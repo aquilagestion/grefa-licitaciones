@@ -147,6 +147,7 @@ CUSTOM_CSS = """
     .grid-sep { border-top: 1px solid #e2e6e3; margin: 0.2rem 0 0.25rem 0; }
     .cuadricula-flag { display: none; }
     .bloque-1-flag { display: none; }
+    /* Bloque 1 (1ª imagen): oportunidades — una sola línea */
     div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) {
         margin-bottom: 0.05rem;
     }
@@ -154,13 +155,13 @@ CUSTOM_CSS = """
         gap: 0.25rem;
         align-items: center;
     }
-    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) button[kind="secondary"] {
-        min-height: 1.55rem !important;
-        padding: 0.08rem 0.35rem !important;
-        font-size: 0.72rem !important;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) [data-testid="stMultiSelect"],
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) [data-testid="stSlider"] {
+        max-width: 100%;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) [data-testid="stSlider"] label,
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) .stRadio > label {
+        display: none;
     }
     .stat-inline {
         font-size: 0.72rem; color: #10241a; line-height: 1.55rem;
@@ -168,6 +169,7 @@ CUSTOM_CSS = """
     }
     .stat-inline b { color: #33513f; font-weight: 700; margin-right: 0.15rem; }
     .bloque-2-flag { display: none; }
+    /* Bloque 2 (2ª imagen): CPV, estado, búsqueda — compacto, inputs al 50 % */
     div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) {
         gap: 0.06rem !important;
         margin-top: 0.05rem;
@@ -182,10 +184,14 @@ CUSTOM_CSS = """
         padding-bottom: 0.08rem !important;
     }
     div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stTextInput"],
-    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stMultiSelect"],
-    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stSlider"],
-    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stRadio"] {
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stDateInput"] {
         max-width: 50%;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) button[kind="secondary"] {
+        min-height: 1.55rem !important;
+        padding: 0.08rem 0.35rem !important;
+        font-size: 0.72rem !important;
+        width: 100%;
     }
     div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stFormSubmitButton"] button {
         min-height: 1.55rem !important;
@@ -809,34 +815,84 @@ def panel_control_superior(
             unsafe_allow_html=True,
         )
 
-        # Bloque 1: filtros + métricas globales en una sola línea
+        # Bloque 1 (1ª imagen): oportunidades — una sola línea
         st.markdown('<span class="bloque-1-flag"></span>', unsafe_allow_html=True)
-        b1 = st.columns([0.82, 0.82, 1.05, 0.72, 0.58, 0.42, 0.42, 0.42, 0.72])
+        b1 = st.columns([0.65, 1.15, 0.45, 0.95, 0.65, 0.85, 0.55, 0.35, 1.05])
         with b1[0]:
-            with st.popover(f"CPV · {n_cpv_activos}", width="stretch"):
-                render_cpv_catalog()
+            _celda_etiqueta("Rel. mín.")
         with b1[1]:
-            with st.popover(f"Término · {n_terms}", width="stretch"):
-                render_term_catalog()
+            st.slider(
+                "Relevancia mínima",
+                min_value=0,
+                max_value=100,
+                step=5,
+                key="opp_min_relevancia",
+                label_visibility="collapsed",
+            )
         with b1[2]:
-            with st.popover(f"Estado · {_etiqueta_estados(estados_sel, 14)}", width="stretch"):
-                render_filtro_estado(df)
+            _celda_etiqueta("Vista")
         with b1[3]:
-            with st.popover(f"Fechas · {_etiqueta_fechas(12)}", width="stretch"):
-                render_filtro_fechas(df)
+            st.radio(
+                "Vista",
+                ["Tarjetas", "Tabla"],
+                horizontal=True,
+                key="opp_vista",
+                label_visibility="collapsed",
+            )
         with b1[4]:
-            _stat_inline("Desc.", resumen["total"])
+            _celda_etiqueta("Cat.")
         with b1[5]:
-            _stat_inline("Alta", resumen["alta"])
+            categorias_sel = st.multiselect(
+                "Categorías",
+                options=["Alta", "Media", "Baja"],
+                key="opp_categorias",
+                label_visibility="collapsed",
+            )
+        minimo = int(st.session_state.get("opp_min_relevancia", MEDIUM_RELEVANCE_THRESHOLD))
+        oportunidades = grefa_filter.filter_opportunities(
+            puntuadas, minimo, categorias_sel or ["Alta", "Media"]
+        )
+        resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
         with b1[6]:
-            _stat_inline("Med.", resumen["media"])
+            _stat_inline("Oport.", resumen_opp["total"] if resumen_opp else 0)
         with b1[7]:
-            _stat_inline("Baja", resumen["baja"])
+            _stat_inline("Alta", resumen_opp["alta"] if resumen_opp else 0)
         with b1[8]:
-            _stat_inline("Crit.", f"{n_cpv}/{n_conceptos}")
+            importe_opp = (
+                formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
+            )
+            _stat_inline("Importe", importe_opp)
 
-        # Bloque 2: búsqueda + oportunidades (menos separación, inputs al 50 %)
+        # Bloque 2 (2ª imagen): CPV, estado, fechas, búsqueda — compacto
         st.markdown('<span class="bloque-2-flag"></span>', unsafe_allow_html=True)
+        col_izq, col_der = st.columns([1.6, 1])
+        with col_izq:
+            for etiqueta, popover_label, render_fn in (
+                ("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog),
+                ("Términos", f"Término · {n_terms}", render_term_catalog),
+                ("Estado", f"Estado · {_etiqueta_estados(estados_sel, 18)}", None),
+                ("Fechas", f"Fechas · {_etiqueta_fechas()}", None),
+            ):
+                ce, cv = st.columns([0.75, 2.25])
+                with ce:
+                    _celda_etiqueta(etiqueta)
+                with cv:
+                    if etiqueta == "Estado":
+                        with st.popover(popover_label, width="stretch"):
+                            render_filtro_estado(df)
+                    elif etiqueta == "Fechas":
+                        with st.popover(popover_label, width="stretch"):
+                            render_filtro_fechas(df)
+                    else:
+                        with st.popover(popover_label, width="stretch"):
+                            render_fn()
+
+        with col_der:
+            _fila_stat_cuadricula("Descargados", resumen["total"])
+            _fila_stat_cuadricula("Alta", resumen["alta"])
+            _fila_stat_cuadricula("Media", resumen["media"])
+            _fila_stat_cuadricula("Baja", resumen["baja"])
+            _fila_stat_cuadricula("Criterios", f"{n_cpv} CPV · {n_conceptos}")
 
         with st.form("form_busqueda_global", clear_on_submit=False):
             ce, cv, _esp, cb, cl = st.columns([0.55, 1.05, 1.05, 0.42, 0.42])
@@ -878,58 +934,6 @@ def panel_control_superior(
         if limpiar:
             _limpiar_filtros_busqueda()
             st.rerun()
-
-        col_izq2, col_der2 = st.columns([1.6, 1])
-        with col_izq2:
-            ce, cv, _esp = st.columns([0.55, 1.05, 1.05])
-            with ce:
-                _celda_etiqueta("Rel. mín. %")
-            with cv:
-                st.slider(
-                    "Relevancia mínima",
-                    min_value=0,
-                    max_value=100,
-                    step=5,
-                    key="opp_min_relevancia",
-                    label_visibility="collapsed",
-                )
-            ce, cv, _esp = st.columns([0.55, 1.05, 1.05])
-            with ce:
-                _celda_etiqueta("Vista")
-            with cv:
-                st.radio(
-                    "Vista",
-                    ["Tarjetas", "Tabla"],
-                    horizontal=True,
-                    key="opp_vista",
-                    label_visibility="collapsed",
-                )
-
-        oportunidades = puntuadas.iloc[0:0]
-        with col_der2:
-            ce, cv, _esp = st.columns([0.58, 0.52, 0.9])
-            with ce:
-                _celda_etiqueta("Categorías")
-            with cv:
-                categorias_sel = st.multiselect(
-                    "Categorías",
-                    options=["Alta", "Media", "Baja"],
-                    key="opp_categorias",
-                    label_visibility="collapsed",
-                )
-            minimo = int(st.session_state.get("opp_min_relevancia", MEDIUM_RELEVANCE_THRESHOLD))
-            oportunidades = grefa_filter.filter_opportunities(
-                puntuadas, minimo, categorias_sel or ["Alta", "Media"]
-            )
-            resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
-            total_opp = resumen_opp["total"] if resumen_opp else 0
-            alta_opp = resumen_opp["alta"] if resumen_opp else 0
-            importe_opp = (
-                formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
-            )
-            _fila_stat_cuadricula("Oportunidades", total_opp)
-            _fila_stat_cuadricula("Alta", alta_opp)
-            _fila_stat_cuadricula("Importe", importe_opp)
 
         st.markdown(
             f'<p class="resumen-filtros">{_resumen_filtros_aplicados()}</p>',
