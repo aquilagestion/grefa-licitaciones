@@ -152,6 +152,22 @@ CUSTOM_CSS = """
         line-height: 1.1rem; text-align: left;
     }
     .grid-par .grid-val { font-size: 0.78rem; }
+    .col-filtros-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) [data-testid="stHorizontalBlock"] {
+        gap: 0.03rem !important;
+        align-items: center;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) [data-testid="column"]:first-child [data-testid="stMarkdown"] {
+        padding-right: 0 !important;
+        margin-right: 0 !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) [data-testid="column"]:last-child [data-testid="element-container"] {
+        padding-left: 0 !important;
+        margin-left: 0 !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) .grid-etiq {
+        padding-right: 0.08rem;
+    }
     .panel-mockup-flag { display: none; }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) {
         max-height: 32vh;
@@ -774,7 +790,7 @@ def _fila_etiq_valor(etiqueta: str, valor: str) -> None:
 
 
 def _fila_popover(etiqueta: str, popover_label: str, contenido) -> None:
-    ce, cv = st.columns([0.36, 0.64], gap="small")
+    ce, cv = st.columns([0.26, 0.74], gap="small")
     with ce:
         _celda_etiqueta(etiqueta)
     with cv:
@@ -807,6 +823,7 @@ def panel_control_superior(
         # ── Fila superior: filtros (izq) | estadísticas (der) ──
         col_filtros, col_stats = st.columns([1.55, 1])
         with col_filtros:
+            st.markdown('<span class="col-filtros-flag"></span>', unsafe_allow_html=True)
             _fila_popover("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog)
             _fila_popover("Términos", f"Término · {n_terms}", render_term_catalog)
             _fila_popover(
