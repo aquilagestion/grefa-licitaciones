@@ -138,41 +138,64 @@ CUSTOM_CSS = """
     .grid-etiq {
         font-size: 0.68rem; font-weight: 700; color: #33513f;
         text-transform: uppercase; letter-spacing: 0.02em;
-        line-height: 1.5rem; white-space: nowrap;
+        line-height: 1.1rem; white-space: nowrap;
     }
     .grid-val {
-        font-size: 0.8rem; font-weight: 600; color: #10241a;
-        line-height: 1.5rem; text-align: right;
+        font-size: 0.78rem; font-weight: 600; color: #10241a;
+        line-height: 1.1rem; text-align: right;
     }
+    .grid-par {
+        display: flex; align-items: center; gap: 0.2rem;
+        line-height: 1.1rem; white-space: nowrap;
+    }
+    .grid-par .grid-etiq, .grid-par .grid-val {
+        line-height: 1.1rem; text-align: left;
+    }
+    .grid-par .grid-val { font-size: 0.78rem; }
     .panel-mockup-flag { display: none; }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) {
         max-height: 32vh;
         overflow-y: auto;
         margin-bottom: 0.25rem;
-        padding: 0.3rem 0.45rem 0.25rem 0.45rem;
+        padding: 0.25rem 0.4rem 0.2rem 0.4rem;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stVerticalBlock"] {
-        gap: 0.12rem;
+        gap: 0.06rem;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stHorizontalBlock"] {
+        gap: 0.12rem !important;
+        align-items: center;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="element-container"] {
-        margin-top: 0.1rem !important;
-        margin-bottom: 0.1rem !important;
-        padding-top: 0.05rem !important;
-        padding-bottom: 0.05rem !important;
+        margin-top: 0.04rem !important;
+        margin-bottom: 0.04rem !important;
+        padding-top: 0.02rem !important;
+        padding-bottom: 0.02rem !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) button[kind="secondary"] {
-        min-height: 1.5rem !important;
-        padding: 0.08rem 0.35rem !important;
-        font-size: 0.72rem !important;
+        min-height: 1.12rem !important;
+        max-height: 1.35rem !important;
+        padding: 0.02rem 0.28rem !important;
+        font-size: 0.7rem !important;
+        line-height: 1.1 !important;
         width: 100%;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stTextInput"] input {
+        min-height: 1.12rem !important;
+        padding: 0.12rem 0.35rem !important;
+        font-size: 0.78rem !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stMultiSelect"] > div {
+        min-height: 1.12rem !important;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stSlider"] label,
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) .stRadio > label {
         display: none;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stFormSubmitButton"] button {
-        min-height: 1.5rem !important;
-        font-size: 0.75rem !important;
+        min-height: 1.12rem !important;
+        font-size: 0.72rem !important;
+        padding: 0.12rem 0.3rem !important;
     }
     .barra-criterios-flag { display: none; }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.zona-control-flag) [data-testid="stHorizontalBlock"] {
@@ -732,8 +755,18 @@ def _celda_valor(texto: str) -> None:
     st.markdown(f'<div class="grid-val">{texto}</div>', unsafe_allow_html=True)
 
 
+def _celda_par(etiqueta: str, valor: str) -> None:
+    st.markdown(
+        f'<div class="grid-par">'
+        f'<span class="grid-etiq">{etiqueta}</span>'
+        f'<span class="grid-val">{valor}</span>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _fila_etiq_valor(etiqueta: str, valor: str) -> None:
-    ce, cv = st.columns([0.42, 0.58])
+    ce, cv = st.columns([0.36, 0.64], gap="small")
     with ce:
         _celda_etiqueta(etiqueta)
     with cv:
@@ -741,7 +774,7 @@ def _fila_etiq_valor(etiqueta: str, valor: str) -> None:
 
 
 def _fila_popover(etiqueta: str, popover_label: str, contenido) -> None:
-    ce, cv = st.columns([0.42, 0.58])
+    ce, cv = st.columns([0.36, 0.64], gap="small")
     with ce:
         _celda_etiqueta(etiqueta)
     with cv:
@@ -795,7 +828,7 @@ def panel_control_superior(
 
         # ── Término a buscar ──
         with st.form("form_busqueda_global", clear_on_submit=False):
-            ce, cv, cb, cl = st.columns([0.38, 2.4, 0.38, 0.38])
+            ce, cv, cb, cl = st.columns([0.34, 2.4, 0.36, 0.36], gap="small")
             with ce:
                 _celda_etiqueta("Término a buscar")
             with cv:
@@ -838,7 +871,7 @@ def panel_control_superior(
         # ── Rel. mín. % y Vista (izq) ──
         col_ctrl, _ = st.columns([1.55, 1])
         with col_ctrl:
-            ce, cv = st.columns([0.42, 0.58])
+            ce, cv = st.columns([0.36, 0.64], gap="small")
             with ce:
                 _celda_etiqueta("Rel. mín. %")
             with cv:
@@ -850,7 +883,7 @@ def panel_control_superior(
                     key="opp_min_relevancia",
                     label_visibility="collapsed",
                 )
-            ce, cv = st.columns([0.42, 0.58])
+            ce, cv = st.columns([0.36, 0.64], gap="small")
             with ce:
                 _celda_etiqueta("Vista")
             with cv:
@@ -863,7 +896,7 @@ def panel_control_superior(
                 )
 
         # ── Pie: Categorías | Oportunidades | Alta | Importe ──
-        p1, p2, p3, p4, p5, p6, p7 = st.columns([0.38, 0.62, 0.55, 0.35, 0.38, 0.32, 0.75])
+        p1, p2, p3, p4, p5 = st.columns([0.34, 0.66, 0.55, 0.4, 1.05], gap="small")
         with p1:
             _celda_etiqueta("Categorías")
         with p2:
@@ -878,23 +911,15 @@ def panel_control_superior(
             puntuadas, minimo, categorias_sel or ["Alta", "Media"]
         )
         resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
+        importe_opp = (
+            formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
+        )
         with p3:
-            _celda_etiqueta("Oportunidades")
+            _celda_par("Oportunidades", str(resumen_opp["total"] if resumen_opp else 0))
         with p4:
-            _celda_valor(str(resumen_opp["total"] if resumen_opp else 0))
+            _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
         with p5:
-            _celda_etiqueta("Alta")
-        with p6:
-            _celda_valor(str(resumen_opp["alta"] if resumen_opp else 0))
-        with p7:
-            importe_opp = (
-                formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
-            )
-            ce, cv = st.columns([0.45, 0.55])
-            with ce:
-                _celda_etiqueta("Importe")
-            with cv:
-                _celda_valor(importe_opp)
+            _celda_par("Importe", importe_opp)
 
         st.markdown(
             f'<p class="resumen-filtros">{_resumen_filtros_aplicados()}</p>',
