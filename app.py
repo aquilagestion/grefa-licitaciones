@@ -9,6 +9,7 @@ Ejecución:  streamlit run app.py
 
 from __future__ import annotations
 
+import importlib
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -159,6 +160,69 @@ def _sincronizar_activos_desde_catalogos() -> None:
 
 
 init_state()
+
+
+def _recargar_grefa_filter() -> None:
+    """Fuerza la recarga del módulo (Streamlit Cloud puede cachear código antiguo)."""
+    import modules.grefa_filter as modulo
+
+    importlib.reload(modulo)
+    sys.modules["modules.grefa_filter"] = modulo
+    globals()["grefa_filter"] = modulo
+
+
+def aplicar_filtros_globales(
+    df: pd.DataFrame,
+    *,
+    texto: str = "",
+    fecha_campo: str = "fecha_actualizacion",
+    fecha_desde=None,
+    fecha_hasta=None,
+    incluir_sin_fecha: bool = True,
+) -> pd.DataFrame:
+    """Búsqueda libre + fechas con fallbacks si falta alguna función en el módulo."""
+    texto = str(texto or "").strip()
+    usar_fechas = fecha_desde is not None or fecha_hasta is not None
+
+    aplicar = getattr(grefa_filter, "apply_filtros_busqueda", None)
+    if callable(aplicar):
+        return aplicar(
+            df,
+            texto=texto,
+            fecha_campo=fecha_campo,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            incluir_sin_fecha=incluir_sin_fecha,
+        )
+
+    resultado = df
+    filtrar_texto = getattr(grefa_filter, "filter_by_texto_libre", None)
+    if callable(filtrar_texto) and texto:
+        resultado = filtrar_texto(resultado, texto)
+    elif texto and hasattr(grefa_filter, "search_dataframe"):
+        resultado = grefa_filter.search_dataframe(resultado, texto=texto)
+
+    filtrar_fechas = getattr(grefa_filter, "filter_by_fechas", None)
+    if callable(filtrar_fechas) and usar_fechas:
+        resultado = filtrar_fechas(
+            resultado,
+            campo=fecha_campo,
+            desde=fecha_desde,
+            hasta=fecha_hasta,
+            incluir_sin_fecha=incluir_sin_fecha,
+        )
+    elif usar_fechas and hasattr(grefa_filter, "search_dataframe"):
+        try:
+            resultado = grefa_filter.search_dataframe(
+                resultado,
+                fecha_campo=fecha_campo,
+                fecha_desde=fecha_desde,
+                fecha_hasta=fecha_hasta,
+                incluir_sin_fecha=incluir_sin_fecha,
+            )
+        except TypeError:
+            pass
+    return resultado
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +956,10 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 # Aplicación
 # ---------------------------------------------------------------------------
 def main() -> None:
+    if not st.session_state.get("_grefa_filter_reloaded"):
+        _recargar_grefa_filter()
+        st.session_state["_grefa_filter_reloaded"] = True
+
     usuario = auth.requiere_acceso()
 
     st.markdown(
@@ -946,7 +1014,7 @@ def main() -> None:
     )
 
     usar_fechas = bool(st.session_state.get("usar_filtro_fechas", False))
-    puntuadas = grefa_filter.apply_filtros_busqueda(
+    puntuadas = aplicar_filtros_globales(
         puntuadas,
         texto=str(st.session_state.get("busqueda_libre") or ""),
         fecha_campo=str(st.session_state.get("fecha_campo") or "fecha_actualizacion"),
