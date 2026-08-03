@@ -1,0 +1,12 @@
+﻿.streamlit/secrets.toml
+service-account.json
+*-credentials.json
+licitacionesplacsp-*.json
+__pycache__/
+.venv/
+venv/
+*.pyc
+*.xlsx
+*.csv
+!data/cpv_es.csv
+*.atom
