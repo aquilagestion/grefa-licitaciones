@@ -146,6 +146,57 @@ CUSTOM_CSS = """
     }
     .grid-sep { border-top: 1px solid #e2e6e3; margin: 0.2rem 0 0.25rem 0; }
     .cuadricula-flag { display: none; }
+    .bloque-1-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) {
+        margin-bottom: 0.05rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) [data-testid="stHorizontalBlock"] {
+        gap: 0.25rem;
+        align-items: center;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-1-flag) button[kind="secondary"] {
+        min-height: 1.55rem !important;
+        padding: 0.08rem 0.35rem !important;
+        font-size: 0.72rem !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .stat-inline {
+        font-size: 0.72rem; color: #10241a; line-height: 1.55rem;
+        white-space: nowrap;
+    }
+    .stat-inline b { color: #33513f; font-weight: 700; margin-right: 0.15rem; }
+    .bloque-2-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) {
+        gap: 0.06rem !important;
+        margin-top: 0.05rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stVerticalBlock"] {
+        gap: 0.06rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="element-container"] {
+        margin-top: 0.12rem !important;
+        margin-bottom: 0.12rem !important;
+        padding-top: 0.08rem !important;
+        padding-bottom: 0.08rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stTextInput"],
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stMultiSelect"],
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stSlider"],
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stRadio"] {
+        max-width: 50%;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) [data-testid="stFormSubmitButton"] button {
+        min-height: 1.55rem !important;
+        font-size: 0.76rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) .grid-etiq {
+        line-height: 1.35rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-2-flag) .grid-val {
+        line-height: 1.35rem;
+    }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.cuadricula-flag) [data-testid="stSlider"] {
         padding-top: 0.1rem;
     }
@@ -727,6 +778,13 @@ def _fila_stat_cuadricula(etiqueta: str, valor) -> None:
         _celda_valor(str(valor))
 
 
+def _stat_inline(etiqueta: str, valor) -> None:
+    st.markdown(
+        f'<span class="stat-inline"><b>{etiqueta}</b>{valor}</span>',
+        unsafe_allow_html=True,
+    )
+
+
 def panel_control_superior(
     df: pd.DataFrame,
     puntuadas: pd.DataFrame,
@@ -751,44 +809,44 @@ def panel_control_superior(
             unsafe_allow_html=True,
         )
 
-        col_izq1, col_der1 = st.columns([1.6, 1])
-        with col_izq1:
-            for etiqueta, popover_label, render_fn in (
-                ("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog),
-                ("Términos", f"Término · {n_terms}", render_term_catalog),
-                ("Estado", f"Estado · {_etiqueta_estados(estados_sel, 18)}", None),
-                ("Fechas", f"Fechas · {_etiqueta_fechas()}", None),
-            ):
-                ce, cv = st.columns([0.75, 2.25])
-                with ce:
-                    _celda_etiqueta(etiqueta)
-                with cv:
-                    if etiqueta == "Estado":
-                        with st.popover(popover_label, width="stretch"):
-                            render_filtro_estado(df)
-                    elif etiqueta == "Fechas":
-                        with st.popover(popover_label, width="stretch"):
-                            render_filtro_fechas(df)
-                    else:
-                        with st.popover(popover_label, width="stretch"):
-                            render_fn()
+        # Bloque 1: filtros + métricas globales en una sola línea
+        st.markdown('<span class="bloque-1-flag"></span>', unsafe_allow_html=True)
+        b1 = st.columns([0.82, 0.82, 1.05, 0.72, 0.58, 0.42, 0.42, 0.42, 0.72])
+        with b1[0]:
+            with st.popover(f"CPV · {n_cpv_activos}", width="stretch"):
+                render_cpv_catalog()
+        with b1[1]:
+            with st.popover(f"Término · {n_terms}", width="stretch"):
+                render_term_catalog()
+        with b1[2]:
+            with st.popover(f"Estado · {_etiqueta_estados(estados_sel, 14)}", width="stretch"):
+                render_filtro_estado(df)
+        with b1[3]:
+            with st.popover(f"Fechas · {_etiqueta_fechas(12)}", width="stretch"):
+                render_filtro_fechas(df)
+        with b1[4]:
+            _stat_inline("Desc.", resumen["total"])
+        with b1[5]:
+            _stat_inline("Alta", resumen["alta"])
+        with b1[6]:
+            _stat_inline("Med.", resumen["media"])
+        with b1[7]:
+            _stat_inline("Baja", resumen["baja"])
+        with b1[8]:
+            _stat_inline("Crit.", f"{n_cpv}/{n_conceptos}")
 
-        with col_der1:
-            _fila_stat_cuadricula("Descargados", resumen["total"])
-            _fila_stat_cuadricula("Alta", resumen["alta"])
-            _fila_stat_cuadricula("Media", resumen["media"])
-            _fila_stat_cuadricula("Baja", resumen["baja"])
-            _fila_stat_cuadricula("Criterios", f"{n_cpv} CPV · {n_conceptos}")
+        # Bloque 2: búsqueda + oportunidades (menos separación, inputs al 50 %)
+        st.markdown('<span class="bloque-2-flag"></span>', unsafe_allow_html=True)
 
         with st.form("form_busqueda_global", clear_on_submit=False):
-            ce, cv, cb, cl = st.columns([0.75, 2.05, 0.55, 0.55])
+            ce, cv, _esp, cb, cl = st.columns([0.55, 1.05, 1.05, 0.42, 0.42])
             with ce:
                 _celda_etiqueta("Término")
             with cv:
                 texto = st.text_input(
                     "Término a buscar",
                     value=st.session_state.get("busqueda_aplicada", ""),
-                    placeholder="Título, descripción, expediente, CPV…",
+                    placeholder="Título, descripción, expediente…",
                     label_visibility="collapsed",
                 )
             with cb:
@@ -823,7 +881,7 @@ def panel_control_superior(
 
         col_izq2, col_der2 = st.columns([1.6, 1])
         with col_izq2:
-            ce, cv = st.columns([0.75, 2.25])
+            ce, cv, _esp = st.columns([0.55, 1.05, 1.05])
             with ce:
                 _celda_etiqueta("Rel. mín. %")
             with cv:
@@ -835,7 +893,7 @@ def panel_control_superior(
                     key="opp_min_relevancia",
                     label_visibility="collapsed",
                 )
-            ce, cv = st.columns([0.75, 2.25])
+            ce, cv, _esp = st.columns([0.55, 1.05, 1.05])
             with ce:
                 _celda_etiqueta("Vista")
             with cv:
@@ -849,8 +907,7 @@ def panel_control_superior(
 
         oportunidades = puntuadas.iloc[0:0]
         with col_der2:
-            st.markdown('<div class="grid-sep"></div>', unsafe_allow_html=True)
-            ce, cv = st.columns([1.15, 0.85])
+            ce, cv, _esp = st.columns([0.58, 0.52, 0.9])
             with ce:
                 _celda_etiqueta("Categorías")
             with cv:
