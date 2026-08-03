@@ -164,6 +164,11 @@ CUSTOM_CSS = """
     div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) [data-testid="column"]:last-child [data-testid="element-container"] {
         padding-left: 0 !important;
         margin-left: 0 !important;
+        max-width: 50% !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) [data-testid="column"]:last-child button[kind="secondary"] {
+        width: 100% !important;
+        max-width: 100% !important;
     }
     div[data-testid="stVerticalBlock"]:has(.col-filtros-flag) .grid-etiq {
         padding-right: 0.08rem;
