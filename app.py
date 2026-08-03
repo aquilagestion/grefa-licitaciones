@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -384,6 +384,9 @@ CONFIG_COLUMNAS = {
     COLUMN_LABELS["fecha_actualizacion"]: st.column_config.DatetimeColumn(
         "Actualizada", format="DD/MM/YYYY HH:mm"
     ),
+    COLUMN_LABELS["fecha_limite"]: st.column_config.DatetimeColumn(
+        "Límite presentación", format="DD/MM/YYYY"
+    ),
 }
 
 
@@ -505,18 +508,75 @@ def barra_criterios_superior(df: pd.DataFrame) -> None:
                 render_filtro_estado(df)
 
 
-def _rango_fechas_disponible(df: pd.DataFrame, campo: str) -> tuple:
-    """Devuelve (min, max) como date para el date_input de Streamlit."""
-    from datetime import date
+def _como_date(valor) -> date | None:
+    """Convierte Timestamp/datetime/str a date para los selectores."""
+    if valor is None:
+        return None
+    if isinstance(valor, date) and not isinstance(valor, datetime):
+        return valor
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return pd.Timestamp(valor).date()
+    except (ValueError, TypeError):
+        return None
 
-    if df.empty or campo not in df.columns:
-        hoy = date.today()
-        return hoy, hoy
-    fechas = pd.to_datetime(df[campo], errors="coerce").dropna()
-    if fechas.empty:
-        hoy = date.today()
-        return hoy, hoy
-    return fechas.min().date(), fechas.max().date()
+
+def _rango_fechas_disponible(df: pd.DataFrame, campo: str | None = None) -> tuple[date, date]:
+    """Rango permitido en los selectores (unión de columnas de fecha si no se indica campo)."""
+    hoy = date.today()
+    fallback_min = hoy - timedelta(days=730)
+    fallback_max = hoy + timedelta(days=730)
+
+    if df.empty:
+        return fallback_min, fallback_max
+
+    campos = [campo] if campo else ["fecha_actualizacion", "fecha_limite"]
+    minimos: list[date] = []
+    maximos: list[date] = []
+    for nombre in campos:
+        if nombre not in df.columns:
+            continue
+        fechas = pd.to_datetime(df[nombre], errors="coerce").dropna()
+        if fechas.empty:
+            continue
+        minimos.append(fechas.min().date())
+        maximos.append(fechas.max().date())
+
+    if not minimos:
+        return fallback_min, fallback_max
+
+    min_d, max_d = min(minimos), max(maximos)
+    if min_d >= max_d:
+        max_d = min_d + timedelta(days=1)
+    return min_d, max_d
+
+
+def _clamp_date(valor: date, min_d: date, max_d: date) -> date:
+    if valor < min_d:
+        return min_d
+    if valor > max_d:
+        return max_d
+    return valor
+
+
+def _pareja_fechas_formulario(
+    min_d: date,
+    max_d: date,
+    desde_guardada,
+    hasta_guardada,
+) -> tuple[date, date]:
+    """Acota y ordena el par Desde/Hasta dentro del rango disponible."""
+    desde = _como_date(desde_guardada) or min_d
+    hasta = _como_date(hasta_guardada) or max_d
+    desde = _clamp_date(desde, min_d, max_d)
+    hasta = _clamp_date(hasta, min_d, max_d)
+    if desde > hasta:
+        return min_d, max_d
+    return desde, hasta
 
 
 def _limpiar_filtros_busqueda() -> None:
@@ -555,9 +615,17 @@ def _resumen_filtros_aplicados() -> None:
 def barra_busqueda_filtros(df: pd.DataFrame) -> None:
     """Búsqueda libre y filtro por fechas; se aplican al pulsar «Buscar»."""
     campo_def = st.session_state.get("fecha_campo_aplicado", "fecha_actualizacion")
-    min_d, max_d = _rango_fechas_disponible(df, campo_def)
-    desde_def = st.session_state.get("fecha_desde_aplicada") or min_d
-    hasta_def = st.session_state.get("fecha_hasta_aplicada") or max_d
+    min_d, max_d = _rango_fechas_disponible(df)
+    usar_fechas_aplicado = bool(st.session_state.get("usar_fechas_aplicado", False))
+    if usar_fechas_aplicado:
+        desde_def, hasta_def = _pareja_fechas_formulario(
+            min_d,
+            max_d,
+            st.session_state.get("fecha_desde_aplicada"),
+            st.session_state.get("fecha_hasta_aplicada"),
+        )
+    else:
+        desde_def, hasta_def = min_d, max_d
 
     with st.container(border=True):
         with st.form("form_busqueda_global", clear_on_submit=False):
@@ -574,7 +642,7 @@ def barra_busqueda_filtros(df: pd.DataFrame) -> None:
             with col_fechas_toggle:
                 usar_fechas = st.checkbox(
                     "Filtrar por fechas",
-                    value=bool(st.session_state.get("usar_fechas_aplicado", False)),
+                    value=usar_fechas_aplicado,
                 )
 
             fc1, fc2, fc3, fc4 = st.columns([1.4, 1, 1, 1.2])
@@ -586,16 +654,35 @@ def barra_busqueda_filtros(df: pd.DataFrame) -> None:
                     format_func=lambda x: (
                         "Fecha de actualización" if x == "fecha_actualizacion" else "Límite de presentación"
                     ),
+                    disabled=not usar_fechas,
                 )
             with fc2:
-                fecha_desde = st.date_input("Desde", value=desde_def, min_value=min_d, max_value=max_d)
+                fecha_desde = st.date_input(
+                    "Desde",
+                    value=desde_def,
+                    min_value=min_d,
+                    max_value=max_d,
+                    format="DD/MM/YYYY",
+                    disabled=not usar_fechas,
+                )
             with fc3:
-                fecha_hasta = st.date_input("Hasta", value=hasta_def, min_value=min_d, max_value=max_d)
+                fecha_hasta = st.date_input(
+                    "Hasta",
+                    value=hasta_def,
+                    min_value=min_d,
+                    max_value=max_d,
+                    format="DD/MM/YYYY",
+                    disabled=not usar_fechas,
+                )
             with fc4:
                 incluir_sin_fecha = st.checkbox(
                     "Incluir sin fecha",
                     value=bool(st.session_state.get("incluir_sin_fecha_aplicado", True)),
+                    disabled=not usar_fechas,
                 )
+
+            if usar_fechas:
+                st.caption(f"Rango disponible en los datos: {min_d:%d/%m/%Y} – {max_d:%d/%m/%Y}")
 
             st.caption(
                 "El estado (popover superior) y el texto/fechas se aplican juntos al pulsar «Buscar»."
@@ -607,14 +694,17 @@ def barra_busqueda_filtros(df: pd.DataFrame) -> None:
                 limpiar = st.form_submit_button("Limpiar filtros", width="stretch")
 
         if buscar:
-            st.session_state["busqueda_aplicada"] = texto.strip()
-            st.session_state["usar_fechas_aplicado"] = usar_fechas
-            st.session_state["fecha_campo_aplicado"] = fecha_campo
-            st.session_state["fecha_desde_aplicada"] = fecha_desde
-            st.session_state["fecha_hasta_aplicada"] = fecha_hasta
-            st.session_state["incluir_sin_fecha_aplicado"] = incluir_sin_fecha
-            st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
-            st.rerun()
+            if usar_fechas and fecha_desde > fecha_hasta:
+                st.error("La fecha «Desde» no puede ser posterior a «Hasta».")
+            else:
+                st.session_state["busqueda_aplicada"] = texto.strip()
+                st.session_state["usar_fechas_aplicado"] = usar_fechas
+                st.session_state["fecha_campo_aplicado"] = fecha_campo
+                st.session_state["fecha_desde_aplicada"] = fecha_desde if usar_fechas else None
+                st.session_state["fecha_hasta_aplicada"] = fecha_hasta if usar_fechas else None
+                st.session_state["incluir_sin_fecha_aplicado"] = incluir_sin_fecha
+                st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
+                st.rerun()
 
         if limpiar:
             _limpiar_filtros_busqueda()
