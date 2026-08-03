@@ -505,8 +505,9 @@ def _limpiar_filtros_busqueda() -> None:
     st.session_state["fecha_desde_aplicada"] = None
     st.session_state["fecha_hasta_aplicada"] = None
     st.session_state["incluir_sin_fecha_aplicado"] = True
-    st.session_state["filtro_estados"] = list(ESTADOS_ABIERTOS_DEFAULT)
     st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+    # filtro_estados es clave de widget: no se puede escribir tras renderizarlo.
+    st.session_state["_reset_filtro_estados"] = True
 
 
 def _resumen_filtros_aplicados() -> None:
@@ -677,6 +678,9 @@ def sidebar_google_sheets() -> None:
 
 def render_filtro_estado(df: pd.DataFrame) -> None:
     """Filtro global por estado PLACSP (persiste en la sesión)."""
+    if st.session_state.pop("_reset_filtro_estados", False):
+        st.session_state["filtro_estados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+
     st.markdown("**Estado de la licitación**")
     disponibles = sorted({str(e).strip() for e in df["estado"].unique() if e}) if not df.empty else []
 
