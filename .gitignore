@@ -1,5 +1,6 @@
 ﻿.streamlit/secrets.toml
 service-account.json
+.public-url
 *-credentials.json
 licitacionesplacsp-*.json
 __pycache__/

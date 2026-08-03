@@ -18,9 +18,7 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 function Find-Cloudflared {
     $candidates = @(
         (Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe"),
-        (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe"),
-        (Join-Path $env:LOCALAPPDATA "cloudflared\cloudflared.exe"),
-        "cloudflared"
+        (Join-Path ${env:ProgramFiles(x86)} "cloudflared\cloudflared.exe")
     )
     foreach ($candidate in $candidates) {
         if ($candidate -eq "cloudflared") {
