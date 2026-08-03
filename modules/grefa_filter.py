@@ -282,8 +282,11 @@ def filter_opportunities(
     if df.empty:
         return df
     filtrado = df[df["relevancia"] >= int(min_relevancia)]
-    if categorias:
-        filtrado = filtrado[filtrado["categoria"].isin(list(categorias))]
+    if categorias is not None:
+        cats = [str(c).strip() for c in categorias if str(c).strip()]
+        if not cats:
+            return df.iloc[0:0].copy()
+        filtrado = filtrado[filtrado["categoria"].astype(str).str.strip().isin(cats)]
     filtrado = filter_by_estado(filtrado, estados)
     return filtrado.reset_index(drop=True)
 

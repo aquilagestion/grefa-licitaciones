@@ -145,7 +145,7 @@ CUSTOM_CSS = """
         line-height: 1.1rem; text-align: right;
     }
     .grid-par {
-        display: flex; align-items: center; gap: 0.2rem;
+        display: flex; align-items: center; gap: 0.12rem;
         line-height: 1.1rem; white-space: nowrap;
     }
     .grid-par .grid-etiq, .grid-par .grid-val {
@@ -184,8 +184,54 @@ CUSTOM_CSS = """
         gap: 0.06rem;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="stHorizontalBlock"] {
-        gap: 0.12rem !important;
+        gap: 0.05rem !important;
         align-items: center;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="column"] {
+        padding-left: 0.08rem !important;
+        padding-right: 0.08rem !important;
+    }
+    .col-stats-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(.col-stats-flag) [data-testid="stHorizontalBlock"] {
+        gap: 0.04rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-stats-flag) .grid-par {
+        gap: 0.08rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-stats-flag) .grid-etiq {
+        font-size: 0.64rem;
+    }
+    div[data-testid="stVerticalBlock"]:has(.col-stats-flag) .grid-val {
+        font-size: 0.74rem;
+    }
+    .fila-buscar-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(.fila-buscar-flag) [data-testid="stHorizontalBlock"] {
+        gap: 0.25rem !important;
+        align-items: center;
+        justify-content: flex-end;
+    }
+    div[data-testid="stVerticalBlock"]:has(.fila-buscar-flag) [data-testid="column"]:last-child button {
+        font-weight: 600;
+    }
+    .bloque-opp-flag { display: none; }
+    .bloque-estandar-flag { display: none; }
+    .bloque-libre-flag { display: none; }
+    .bloque-seccion-titulo {
+        font-size: 0.72rem; font-weight: 700; color: #33513f;
+        text-transform: uppercase; letter-spacing: 0.04em;
+        margin: 0.35rem 0 0.12rem 0; line-height: 1.2;
+    }
+    div[data-testid="stVerticalBlock"]:has(.bloque-opp-flag) .resumen-filtros,
+    div[data-testid="stVerticalBlock"]:has(.bloque-estandar-flag) .resumen-filtros,
+    div[data-testid="stVerticalBlock"]:has(.bloque-libre-flag) .resumen-filtros {
+        margin: 0.1rem 0 0.06rem 0;
+    }
+    .opp-stats-spacer {
+        display: block;
+        height: 3.35rem;
+    }
+    @media (max-width: 900px) {
+        .opp-stats-spacer { height: 0; }
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.panel-mockup-flag) [data-testid="element-container"] {
         margin-top: 0.04rem !important;
@@ -270,6 +316,7 @@ def init_state() -> None:
         "filtro_estados": list(ESTADOS_ABIERTOS_DEFAULT),
         "estados_aplicados": list(ESTADOS_ABIERTOS_DEFAULT),
         "busqueda_aplicada": "",
+        "busqueda_borrador": "",
         "usar_fechas_aplicado": False,
         "fecha_campo_aplicado": "fecha_actualizacion",
         "fecha_desde_aplicada": None,
@@ -280,7 +327,9 @@ def init_state() -> None:
         "filtro_fecha_campo": "fecha_actualizacion",
         "filtro_incluir_sin_fecha": True,
         "opp_min_relevancia": MEDIUM_RELEVANCE_THRESHOLD,
-        "opp_categorias": ["Alta", "Media"],
+        "opp_min_relevancia_aplicado": MEDIUM_RELEVANCE_THRESHOLD,
+        "opp_categorias_borrador": ["Alta", "Media"],
+        "opp_categorias_aplicadas": ["Alta", "Media"],
         "opp_vista": "Tarjetas",
     }
     for clave, valor in valores_iniciales.items():
@@ -652,16 +701,63 @@ def _clamp_date(valor: date, min_d: date, max_d: date) -> date:
     return valor
 
 
-def _limpiar_filtros_busqueda() -> None:
-    st.session_state["busqueda_aplicada"] = ""
+def _limpiar_busqueda_estandar() -> None:
+    st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+    st.session_state["_reset_filtro_estados"] = True
+
+
+def _limpiar_busqueda_libre() -> None:
     st.session_state["usar_fechas_aplicado"] = False
     st.session_state["fecha_campo_aplicado"] = "fecha_actualizacion"
     st.session_state["fecha_desde_aplicada"] = None
     st.session_state["fecha_hasta_aplicada"] = None
     st.session_state["incluir_sin_fecha_aplicado"] = True
-    st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
-    st.session_state["_reset_filtro_estados"] = True
     st.session_state["_reset_filtro_fechas"] = True
+    st.session_state["opp_categorias_aplicadas"] = ["Alta", "Media"]
+    st.session_state["opp_min_relevancia_aplicado"] = MEDIUM_RELEVANCE_THRESHOLD
+    st.session_state["_reset_opp_categorias"] = True
+
+
+def _limpiar_filtros_busqueda() -> None:
+    _limpiar_busqueda_estandar()
+    _limpiar_busqueda_libre()
+    st.session_state["busqueda_aplicada"] = ""
+    st.session_state["busqueda_borrador"] = ""
+
+
+def _aplicar_filtros_oportunidades() -> None:
+    borrador = list(st.session_state.get("opp_categorias_borrador") or [])
+    st.session_state["opp_categorias_aplicadas"] = borrador
+    st.session_state["opp_min_relevancia_aplicado"] = int(
+        st.session_state.get("opp_min_relevancia", MEDIUM_RELEVANCE_THRESHOLD)
+    )
+
+
+def _aplicar_busqueda_estandar() -> None:
+    st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
+
+
+def _aplicar_busqueda_libre() -> str | None:
+    """Copia borradores de búsqueda libre. Devuelve error o None."""
+    if st.session_state.get("filtro_usar_fechas"):
+        desde = _como_date(st.session_state.get("filtro_fecha_desde"))
+        hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
+        if desde and hasta and desde > hasta:
+            return "La fecha «Desde» no puede ser posterior a «Hasta»."
+    _aplicar_borrador_fechas()
+    _aplicar_filtros_oportunidades()
+    return None
+
+
+def _etiqueta_fechas_borrador(max_chars: int = 22) -> str:
+    if not st.session_state.get("filtro_usar_fechas"):
+        return "off"
+    desde = _como_date(st.session_state.get("filtro_fecha_desde"))
+    hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
+    if desde and hasta:
+        texto = f"{desde:%d/%m/%y}–{hasta:%d/%m/%y}"
+        return texto if len(texto) <= max_chars else texto[: max_chars - 1] + "…"
+    return "on"
 
 
 def _etiqueta_fechas(max_chars: int = 22) -> str:
@@ -683,8 +779,8 @@ def _inicializar_borrador_fechas(df: pd.DataFrame) -> None:
         st.session_state["filtro_fecha_hasta"] = max_d
 
 
-def render_filtro_fechas(df: pd.DataFrame) -> None:
-    """Filtro por fechas en popover (borrador hasta pulsar Buscar)."""
+def _render_fechas_inline(df: pd.DataFrame) -> None:
+    """Controles de fecha en línea (búsqueda libre)."""
     if st.session_state.pop("_reset_filtro_fechas", False):
         st.session_state["filtro_usar_fechas"] = False
         st.session_state["filtro_fecha_campo"] = "fecha_actualizacion"
@@ -694,21 +790,26 @@ def render_filtro_fechas(df: pd.DataFrame) -> None:
 
     min_d, max_d = _rango_fechas_disponible(df)
     _inicializar_borrador_fechas(df)
-
-    st.markdown("**Filtro por fechas**")
-    st.checkbox("Activar filtro por fechas", key="filtro_usar_fechas")
     usar = bool(st.session_state.get("filtro_usar_fechas"))
-    st.selectbox(
-        "Campo de fecha",
-        ["fecha_actualizacion", "fecha_limite"],
-        format_func=lambda x: (
-            "Fecha de actualización" if x == "fecha_actualizacion" else "Límite de presentación"
-        ),
-        key="filtro_fecha_campo",
-        disabled=not usar,
-    )
-    fc1, fc2 = st.columns(2)
-    with fc1:
+
+    ce, cv = st.columns([0.34, 0.66], gap="small")
+    with ce:
+        _celda_etiqueta("Fechas")
+    with cv:
+        st.checkbox("Activar filtro por fechas", key="filtro_usar_fechas")
+
+    c1, c2, c3, c4 = st.columns([0.9, 0.7, 0.7, 0.55], gap="small")
+    with c1:
+        st.selectbox(
+            "Campo",
+            ["fecha_actualizacion", "fecha_limite"],
+            format_func=lambda x: (
+                "Actualización" if x == "fecha_actualizacion" else "Límite presentación"
+            ),
+            key="filtro_fecha_campo",
+            disabled=not usar,
+        )
+    with c2:
         st.date_input(
             "Desde",
             min_value=min_d,
@@ -717,7 +818,7 @@ def render_filtro_fechas(df: pd.DataFrame) -> None:
             key="filtro_fecha_desde",
             disabled=not usar,
         )
-    with fc2:
+    with c3:
         st.date_input(
             "Hasta",
             min_value=min_d,
@@ -726,9 +827,18 @@ def render_filtro_fechas(df: pd.DataFrame) -> None:
             key="filtro_fecha_hasta",
             disabled=not usar,
         )
-    st.checkbox("Incluir sin fecha", key="filtro_incluir_sin_fecha", disabled=not usar)
-    if usar:
-        st.caption(f"Rango en datos: {min_d:%d/%m/%Y} – {max_d:%d/%m/%Y}")
+    with c4:
+        st.checkbox(
+            "Sin fecha",
+            key="filtro_incluir_sin_fecha",
+            disabled=not usar,
+            help="Incluir licitaciones sin fecha en el campo seleccionado",
+        )
+
+
+def render_filtro_fechas(df: pd.DataFrame) -> None:
+    """Filtro por fechas en popover (legacy; no usado en panel principal)."""
+    _render_fechas_inline(df)
 
 
 def _aplicar_borrador_fechas() -> None:
@@ -748,24 +858,36 @@ def _aplicar_borrador_fechas() -> None:
         st.session_state["fecha_hasta_aplicada"] = None
 
 
-def _resumen_filtros_aplicados() -> str:
-    partes: list[str] = []
-    texto = (st.session_state.get("busqueda_aplicada") or "").strip()
-    if texto:
-        partes.append(f"texto «{texto}»")
-    estados = st.session_state.get("estados_aplicados") or []
+def _resumen_busqueda_estandar_borrador(n_cpv: int, n_terms: int) -> str:
+    partes = [f"{n_cpv} CPV", f"{n_terms} términos"]
+    estados = st.session_state.get("filtro_estados") or []
     if estados:
         partes.append(f"estado: {', '.join(estados)}")
-    if st.session_state.get("usar_fechas_aplicado"):
-        campo = st.session_state.get("fecha_campo_aplicado", "fecha_actualizacion")
+    else:
+        partes.append("estado: todos")
+    return "Estandarizada: " + " · ".join(partes)
+
+
+def _resumen_busqueda_libre_borrador() -> str:
+    partes: list[str] = []
+    if st.session_state.get("filtro_usar_fechas"):
+        campo = st.session_state.get("filtro_fecha_campo", "fecha_actualizacion")
         etiqueta = "act." if campo == "fecha_actualizacion" else "lím."
-        desde = _como_date(st.session_state.get("fecha_desde_aplicada"))
-        hasta = _como_date(st.session_state.get("fecha_hasta_aplicada"))
+        desde = _como_date(st.session_state.get("filtro_fecha_desde"))
+        hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
         if desde and hasta:
             partes.append(f"fechas ({etiqueta}): {desde:%d/%m/%Y}–{hasta:%d/%m/%Y}")
-    if partes:
-        return "Filtros: " + " · ".join(partes)
-    return "Sin filtros activos · pulsa «Buscar»"
+    else:
+        partes.append("fechas: sin filtrar")
+    min_rel = st.session_state.get("opp_min_relevancia")
+    if min_rel is not None:
+        partes.append(f"rel. mín. {int(min_rel)}%")
+    vista = st.session_state.get("opp_vista") or "Tarjetas"
+    partes.append(f"vista: {vista}")
+    cats = st.session_state.get("opp_categorias_borrador") or []
+    if cats:
+        partes.append(f"categorías: {', '.join(cats)}")
+    return "Libre: " + " · ".join(partes)
 
 
 def _celda_etiqueta(texto: str) -> None:
@@ -787,15 +909,11 @@ def _celda_par(etiqueta: str, valor: str) -> None:
 
 
 def _fila_etiq_valor(etiqueta: str, valor: str) -> None:
-    ce, cv = st.columns([0.36, 0.64], gap="small")
-    with ce:
-        _celda_etiqueta(etiqueta)
-    with cv:
-        _celda_valor(valor)
+    _celda_par(etiqueta, valor)
 
 
 def _fila_popover(etiqueta: str, popover_label: str, contenido) -> None:
-    ce, cv = st.columns([0.26, 0.74], gap="small")
+    ce, cv = st.columns([0.28, 0.72], gap="small")
     with ce:
         _celda_etiqueta(etiqueta)
     with cv:
@@ -815,7 +933,7 @@ def panel_control_superior(
     catalogo_terminos: list[dict] = st.session_state["catalogo_terminos"]
     n_cpv_activos = sum(1 for c in catalogo_cpv if c.get("activo"))
     n_terms = sum(1 for t in catalogo_terminos if t.get("activo"))
-    estados_sel = st.session_state.get("estados_aplicados") or []
+    estados_borrador = st.session_state.get("filtro_estados") or []
 
     with st.container(border=True):
         st.markdown('<span class="zona-control-flag"></span>', unsafe_allow_html=True)
@@ -825,75 +943,81 @@ def panel_control_superior(
             unsafe_allow_html=True,
         )
 
-        # ── Fila superior: filtros (izq) | estadísticas (der) ──
-        col_filtros, col_stats = st.columns([1.55, 1])
-        with col_filtros:
+        # ── Estadísticas globales ──
+        st.markdown('<span class="col-stats-flag"></span>', unsafe_allow_html=True)
+        s1, s2, s3, s4, s5 = st.columns(5, gap="small")
+        with s1:
+            _celda_par("Descargados", str(resumen["total"]))
+        with s2:
+            _celda_par("Alta", str(resumen["alta"]))
+        with s3:
+            _celda_par("Media", str(resumen["media"]))
+        with s4:
+            _celda_par("Baja", str(resumen["baja"]))
+        with s5:
+            _celda_par("Criterios", f"{n_cpv} CPV · {n_conceptos}")
+
+        # ── 1. Búsqueda estandarizada GREFA (CPV · Términos · Estado) ──
+        st.markdown('<span class="bloque-estandar-flag"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="bloque-seccion-titulo">Búsqueda estandarizada GREFA</p>',
+            unsafe_allow_html=True,
+        )
+        c_cpv, c_term, c_est = st.columns(3, gap="small")
+        with c_cpv:
             st.markdown('<span class="col-filtros-flag"></span>', unsafe_allow_html=True)
             _fila_popover("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog)
+        with c_term:
             _fila_popover("Términos", f"Término · {n_terms}", render_term_catalog)
+        with c_est:
             _fila_popover(
                 "Estado",
-                f"Estado · {_etiqueta_estados(estados_sel, 20)}",
+                f"Estado · {_etiqueta_estados(estados_borrador, 18)}",
                 lambda: render_filtro_estado(df),
             )
-            _fila_popover(
-                "Fechas",
-                f"Fechas · {_etiqueta_fechas()}",
-                lambda: render_filtro_fechas(df),
-            )
-        with col_stats:
-            _fila_etiq_valor("Descargados", str(resumen["total"]))
-            _fila_etiq_valor("Alta", str(resumen["alta"]))
-            _fila_etiq_valor("Media", str(resumen["media"]))
-            _fila_etiq_valor("Baja", str(resumen["baja"]))
-            _fila_etiq_valor("Criterios", f"{n_cpv} CPV · {n_conceptos}")
-
-        # ── Término a buscar ──
-        with st.form("form_busqueda_global", clear_on_submit=False):
-            ce, cv, cb, cl = st.columns([0.34, 2.4, 0.36, 0.36], gap="small")
-            with ce:
-                _celda_etiqueta("Término a buscar")
-            with cv:
-                texto = st.text_input(
-                    "Término a buscar",
-                    value=st.session_state.get("busqueda_aplicada", ""),
-                    placeholder="Título, descripción, expediente, CPV…",
-                    label_visibility="collapsed",
-                )
-            with cb:
-                buscar = st.form_submit_button("🔍 Buscar", type="primary", width="stretch")
-            with cl:
-                limpiar = st.form_submit_button("Limpiar", width="stretch")
-
-        if buscar:
-            if st.session_state.get("filtro_usar_fechas"):
-                desde = _como_date(st.session_state.get("filtro_fecha_desde"))
-                hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
-                if desde and hasta and desde > hasta:
-                    st.error("La fecha «Desde» no puede ser posterior a «Hasta».")
-                else:
-                    st.session_state["busqueda_aplicada"] = texto.strip()
-                    _aplicar_borrador_fechas()
-                    st.session_state["estados_aplicados"] = list(
-                        st.session_state.get("filtro_estados") or []
-                    )
-                    st.rerun()
-            else:
-                st.session_state["busqueda_aplicada"] = texto.strip()
-                _aplicar_borrador_fechas()
-                st.session_state["estados_aplicados"] = list(
-                    st.session_state.get("filtro_estados") or []
-                )
+        st.markdown(
+            f'<p class="resumen-filtros">{_resumen_busqueda_estandar_borrador(n_cpv_activos, n_terms)}</p>',
+            unsafe_allow_html=True,
+        )
+        _, c_lim_e, c_bus_e = st.columns([6.2, 0.55, 0.6], gap="small")
+        with c_lim_e:
+            if st.button("Limpiar", key="btn_limpiar_estandar", width="stretch"):
+                _limpiar_busqueda_estandar()
+                st.rerun()
+        with c_bus_e:
+            if st.button("🔍 Buscar GREFA", key="btn_buscar_estandar", type="primary", width="stretch"):
+                _aplicar_busqueda_estandar()
                 st.rerun()
 
-        if limpiar:
-            _limpiar_filtros_busqueda()
-            st.rerun()
+        # ── 2. Búsqueda libre (fechas · relevancia · vista) ──
+        st.markdown('<span class="bloque-libre-flag"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="bloque-seccion-titulo">Búsqueda libre</p>',
+            unsafe_allow_html=True,
+        )
 
-        # ── Rel. mín. % y Vista (izq) ──
-        col_ctrl, _ = st.columns([1.55, 1])
-        with col_ctrl:
-            ce, cv = st.columns([0.36, 0.64], gap="small")
+        minimo = int(
+            st.session_state.get("opp_min_relevancia_aplicado", MEDIUM_RELEVANCE_THRESHOLD)
+        )
+        categorias_aplicadas = list(st.session_state.get("opp_categorias_aplicadas") or [])
+        oportunidades = grefa_filter.filter_opportunities(
+            puntuadas, minimo, categorias_aplicadas
+        )
+        resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
+        importe_opp = (
+            formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
+        )
+
+        if st.session_state.pop("_reset_opp_categorias", False):
+            st.session_state["opp_categorias_borrador"] = list(
+                st.session_state.get("opp_categorias_aplicadas") or ["Alta", "Media"]
+            )
+
+        _render_fechas_inline(df)
+
+        col_izq, col_der = st.columns([1.55, 1], gap="small")
+        with col_izq:
+            ce, cv = st.columns([0.34, 0.66], gap="small")
             with ce:
                 _celda_etiqueta("Rel. mín. %")
             with cv:
@@ -905,7 +1029,7 @@ def panel_control_superior(
                     key="opp_min_relevancia",
                     label_visibility="collapsed",
                 )
-            ce, cv = st.columns([0.36, 0.64], gap="small")
+            ce, cv = st.columns([0.34, 0.66], gap="small")
             with ce:
                 _celda_etiqueta("Vista")
             with cv:
@@ -916,37 +1040,44 @@ def panel_control_superior(
                     key="opp_vista",
                     label_visibility="collapsed",
                 )
+            ce, cv = st.columns([0.34, 0.66], gap="small")
+            with ce:
+                _celda_etiqueta("Categorías")
+            with cv:
+                st.multiselect(
+                    "Categorías",
+                    options=["Alta", "Media", "Baja"],
+                    key="opp_categorias_borrador",
+                    label_visibility="collapsed",
+                )
 
-        # ── Pie: Categorías | Oportunidades | Alta | Importe ──
-        p1, p2, p3, p4, p5 = st.columns([0.34, 0.66, 0.55, 0.4, 1.05], gap="small")
-        with p1:
-            _celda_etiqueta("Categorías")
-        with p2:
-            categorias_sel = st.multiselect(
-                "Categorías",
-                options=["Alta", "Media", "Baja"],
-                key="opp_categorias",
-                label_visibility="collapsed",
-            )
-        minimo = int(st.session_state.get("opp_min_relevancia", MEDIUM_RELEVANCE_THRESHOLD))
-        oportunidades = grefa_filter.filter_opportunities(
-            puntuadas, minimo, categorias_sel or ["Alta", "Media"]
-        )
-        resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
-        importe_opp = (
-            formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
-        )
-        with p3:
-            _celda_par("Oportunidades", str(resumen_opp["total"] if resumen_opp else 0))
-        with p4:
-            _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
-        with p5:
-            _celda_par("Importe", importe_opp)
+        with col_der:
+            st.markdown('<div class="opp-stats-spacer"></div>', unsafe_allow_html=True)
+            o1, o2, o3 = st.columns(3, gap="small")
+            with o1:
+                _celda_par("Oportunidades", str(resumen_opp["total"] if resumen_opp else 0))
+            with o2:
+                _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
+            with o3:
+                _celda_par("Importe", importe_opp)
 
         st.markdown(
-            f'<p class="resumen-filtros">{_resumen_filtros_aplicados()}</p>',
+            f'<p class="resumen-filtros">{_resumen_busqueda_libre_borrador()}</p>',
             unsafe_allow_html=True,
         )
+        st.markdown('<span class="fila-buscar-flag"></span>', unsafe_allow_html=True)
+        _, c_lim_l, c_bus_l = st.columns([6.2, 0.55, 0.6], gap="small")
+        with c_lim_l:
+            if st.button("Limpiar", key="btn_limpiar_libre", width="stretch"):
+                _limpiar_busqueda_libre()
+                st.rerun()
+        with c_bus_l:
+            if st.button("🔍 Buscar", key="btn_buscar_libre", type="primary", width="stretch"):
+                error = _aplicar_busqueda_libre()
+                if error:
+                    st.error(error)
+                else:
+                    st.rerun()
 
     vista = str(st.session_state.get("opp_vista") or "Tarjetas")
     return oportunidades, vista
@@ -1049,9 +1180,9 @@ def render_filtro_estado(df: pd.DataFrame) -> None:
         help="Vacío = todos los estados. El filtro se aplica en ambas pestañas.",
     )
     if not seleccion:
-        st.caption("Sin filtro de estado (se muestran todos). Se aplica al pulsar «Buscar».")
+        st.caption("Sin filtro de estado (todos). Se aplica al pulsar «Buscar GREFA».")
     else:
-        st.caption(f"{len(seleccion)} estado(s) seleccionado(s). Se aplicará al pulsar «Buscar».")
+        st.caption(f"{len(seleccion)} estado(s). Se aplicará al pulsar «Buscar GREFA».")
 
 
 def render_cpv_catalog() -> None:
