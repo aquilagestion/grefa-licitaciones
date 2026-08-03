@@ -135,6 +135,32 @@ CUSTOM_CSS = """
         font-size: 0.82rem !important;
     }
     .resumen-filtros { font-size: 0.72rem; color: #5b6b62; margin: 0.1rem 0 0.15rem 0; line-height: 1.25; }
+    .grid-etiq {
+        font-size: 0.68rem; font-weight: 700; color: #33513f;
+        text-transform: uppercase; letter-spacing: 0.02em;
+        line-height: 1.75rem; white-space: nowrap;
+    }
+    .grid-val {
+        font-size: 0.82rem; font-weight: 600; color: #10241a;
+        line-height: 1.75rem; text-align: right;
+    }
+    .grid-sep { border-top: 1px solid #e2e6e3; margin: 0.2rem 0 0.25rem 0; }
+    .cuadricula-flag { display: none; }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.cuadricula-flag) [data-testid="stSlider"] {
+        padding-top: 0.1rem;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.cuadricula-flag) [data-testid="stSlider"] label {
+        display: none;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.cuadricula-flag) .stRadio > label {
+        display: none;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.cuadricula-flag) button[kind="secondary"] {
+        min-height: 1.65rem !important;
+        padding: 0.1rem 0.4rem !important;
+        font-size: 0.76rem !important;
+        width: 100%;
+    }
     .barra-criterios-flag { display: none; }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.zona-control-flag) [data-testid="stHorizontalBlock"] {
         gap: 0.35rem;
@@ -196,6 +222,9 @@ def init_state() -> None:
         "filtro_usar_fechas": False,
         "filtro_fecha_campo": "fecha_actualizacion",
         "filtro_incluir_sin_fecha": True,
+        "opp_min_relevancia": MEDIUM_RELEVANCE_THRESHOLD,
+        "opp_categorias": ["Alta", "Media"],
+        "opp_vista": "Tarjetas",
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -682,53 +711,89 @@ def _resumen_filtros_aplicados() -> str:
     return "Sin filtros activos · pulsa «Buscar»"
 
 
-def panel_control_superior(df: pd.DataFrame, resumen: dict, n_cpv: int, n_conceptos: int) -> None:
-    """Cabecera, filtros y métricas en una franja compacta (máx. 30 % de pantalla)."""
+def _celda_etiqueta(texto: str) -> None:
+    st.markdown(f'<div class="grid-etiq">{texto}</div>', unsafe_allow_html=True)
+
+
+def _celda_valor(texto: str) -> None:
+    st.markdown(f'<div class="grid-val">{texto}</div>', unsafe_allow_html=True)
+
+
+def _fila_stat_cuadricula(etiqueta: str, valor) -> None:
+    col_l, col_v = st.columns([1.15, 0.85])
+    with col_l:
+        _celda_etiqueta(etiqueta)
+    with col_v:
+        _celda_valor(str(valor))
+
+
+def panel_control_superior(
+    df: pd.DataFrame,
+    puntuadas: pd.DataFrame,
+    resumen: dict,
+    n_cpv: int,
+    n_conceptos: int,
+) -> tuple[pd.DataFrame, str]:
+    """Cuadrícula compacta: filtros a la izquierda, métricas a la derecha."""
     catalogo_cpv: list[dict] = st.session_state["catalogo_cpv"]
     catalogo_terminos: list[dict] = st.session_state["catalogo_terminos"]
     n_cpv_activos = sum(1 for c in catalogo_cpv if c.get("activo"))
     n_terms = sum(1 for t in catalogo_terminos if t.get("activo"))
     estados_sel = st.session_state.get("estados_aplicados") or []
-    total_raw = len(st.session_state["datos"]) if st.session_state.get("datos") is not None else 0
 
     with st.container(border=True):
         st.markdown('<span class="zona-control-flag"></span>', unsafe_allow_html=True)
+        st.markdown('<span class="cuadricula-flag"></span>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="cabecera-compacta">'
-            f'<span class="cabecera-titulo">🦅 GREFA · Monitor de Licitaciones</span>'
-            f'<span class="cabecera-sub">PLACSP · Índice de Relevancia GREFA</span>'
-            f'<span class="cabecera-badge">{total_raw} lic. descargadas</span>'
-            f"</div>",
+            '<div class="cabecera-compacta">'
+            '<span class="cabecera-titulo">🦅 GREFA · Licitaciones PLACSP</span>'
+            "</div>",
             unsafe_allow_html=True,
         )
 
-        col_cpv, col_terms, col_estado, col_fechas = st.columns(4)
-        with col_cpv:
-            with st.popover(f"🏷️ CPV · {n_cpv_activos}", width="stretch"):
-                render_cpv_catalog()
-        with col_terms:
-            with st.popover(f"🔍 Términos · {n_terms}", width="stretch"):
-                render_term_catalog()
-        with col_estado:
-            etiqueta = _etiqueta_estados(estados_sel)
-            with st.popover(f"📋 Estado · {etiqueta}", width="stretch"):
-                render_filtro_estado(df)
-        with col_fechas:
-            with st.popover(f"📅 Fechas · {_etiqueta_fechas()}", width="stretch"):
-                render_filtro_fechas(df)
+        col_izq1, col_der1 = st.columns([1.6, 1])
+        with col_izq1:
+            for etiqueta, popover_label, render_fn in (
+                ("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog),
+                ("Términos", f"Término · {n_terms}", render_term_catalog),
+                ("Estado", f"Estado · {_etiqueta_estados(estados_sel, 18)}", None),
+                ("Fechas", f"Fechas · {_etiqueta_fechas()}", None),
+            ):
+                ce, cv = st.columns([0.75, 2.25])
+                with ce:
+                    _celda_etiqueta(etiqueta)
+                with cv:
+                    if etiqueta == "Estado":
+                        with st.popover(popover_label, width="stretch"):
+                            render_filtro_estado(df)
+                    elif etiqueta == "Fechas":
+                        with st.popover(popover_label, width="stretch"):
+                            render_filtro_fechas(df)
+                    else:
+                        with st.popover(popover_label, width="stretch"):
+                            render_fn()
+
+        with col_der1:
+            _fila_stat_cuadricula("Descargados", resumen["total"])
+            _fila_stat_cuadricula("Alta", resumen["alta"])
+            _fila_stat_cuadricula("Media", resumen["media"])
+            _fila_stat_cuadricula("Baja", resumen["baja"])
+            _fila_stat_cuadricula("Criterios", f"{n_cpv} CPV · {n_conceptos}")
 
         with st.form("form_busqueda_global", clear_on_submit=False):
-            col_texto, col_buscar, col_limpiar = st.columns([6, 1, 1])
-            with col_texto:
+            ce, cv, cb, cl = st.columns([0.75, 2.05, 0.55, 0.55])
+            with ce:
+                _celda_etiqueta("Término")
+            with cv:
                 texto = st.text_input(
-                    "Búsqueda",
+                    "Término a buscar",
                     value=st.session_state.get("busqueda_aplicada", ""),
-                    placeholder="Título, descripción, expediente, CPV, ubicación…",
+                    placeholder="Título, descripción, expediente, CPV…",
                     label_visibility="collapsed",
                 )
-            with col_buscar:
+            with cb:
                 buscar = st.form_submit_button("🔍 Buscar", type="primary", width="stretch")
-            with col_limpiar:
+            with cl:
                 limpiar = st.form_submit_button("Limpiar", width="stretch")
 
         if buscar:
@@ -756,17 +821,66 @@ def panel_control_superior(df: pd.DataFrame, resumen: dict, n_cpv: int, n_concep
             _limpiar_filtros_busqueda()
             st.rerun()
 
+        col_izq2, col_der2 = st.columns([1.6, 1])
+        with col_izq2:
+            ce, cv = st.columns([0.75, 2.25])
+            with ce:
+                _celda_etiqueta("Rel. mín. %")
+            with cv:
+                st.slider(
+                    "Relevancia mínima",
+                    min_value=0,
+                    max_value=100,
+                    step=5,
+                    key="opp_min_relevancia",
+                    label_visibility="collapsed",
+                )
+            ce, cv = st.columns([0.75, 2.25])
+            with ce:
+                _celda_etiqueta("Vista")
+            with cv:
+                st.radio(
+                    "Vista",
+                    ["Tarjetas", "Tabla"],
+                    horizontal=True,
+                    key="opp_vista",
+                    label_visibility="collapsed",
+                )
+
+        oportunidades = puntuadas.iloc[0:0]
+        with col_der2:
+            st.markdown('<div class="grid-sep"></div>', unsafe_allow_html=True)
+            ce, cv = st.columns([1.15, 0.85])
+            with ce:
+                _celda_etiqueta("Categorías")
+            with cv:
+                categorias_sel = st.multiselect(
+                    "Categorías",
+                    options=["Alta", "Media", "Baja"],
+                    key="opp_categorias",
+                    label_visibility="collapsed",
+                )
+            minimo = int(st.session_state.get("opp_min_relevancia", MEDIUM_RELEVANCE_THRESHOLD))
+            oportunidades = grefa_filter.filter_opportunities(
+                puntuadas, minimo, categorias_sel or ["Alta", "Media"]
+            )
+            resumen_opp = grefa_filter.summarize(oportunidades) if not oportunidades.empty else None
+            total_opp = resumen_opp["total"] if resumen_opp else 0
+            alta_opp = resumen_opp["alta"] if resumen_opp else 0
+            importe_opp = (
+                formato_importe(resumen_opp["importe_oportunidades"]) if resumen_opp else "—"
+            )
+            _fila_stat_cuadricula("Oportunidades", total_opp)
+            _fila_stat_cuadricula("Alta", alta_opp)
+            _fila_stat_cuadricula("Importe", importe_opp)
+
         st.markdown(
             f'<p class="resumen-filtros">{_resumen_filtros_aplicados()}</p>',
             unsafe_allow_html=True,
         )
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Descargadas", resumen["total"])
-        m2.metric("🟢 Alta", resumen["alta"])
-        m3.metric("🟡 Media", resumen["media"])
-        m4.metric("⚪ Baja", resumen["baja"])
-        m5.metric("Criterios", f"{n_cpv} CPV · {n_conceptos}")
+    vista = str(st.session_state.get("opp_vista") or "Tarjetas")
+    return oportunidades, vista
 
 
 # ---------------------------------------------------------------------------
@@ -1056,45 +1170,13 @@ def render_term_catalog() -> None:
 # ---------------------------------------------------------------------------
 # Pestañas
 # ---------------------------------------------------------------------------
-def pestana_oportunidades(df: pd.DataFrame) -> None:
-    st.markdown('<span class="toolbar-oport-flag"></span>', unsafe_allow_html=True)
-    col_slider, col_cat, col_vista, col_metrics = st.columns([2.2, 1.8, 1.2, 3.2])
-    with col_slider:
-        minimo = st.slider(
-            "Rel. mín. %",
-            min_value=0,
-            max_value=100,
-            value=MEDIUM_RELEVANCE_THRESHOLD,
-            step=5,
-        )
-    with col_cat:
-        categorias = st.multiselect(
-            "Categorías",
-            options=["Alta", "Media", "Baja"],
-            default=["Alta", "Media"],
-        )
-    with col_vista:
-        vista = st.radio("Vista", ["Tarjetas", "Tabla"], horizontal=True)
-
-    oportunidades = grefa_filter.filter_opportunities(df, minimo, categorias)
-
-    with col_metrics:
-        if oportunidades.empty:
-            st.caption("Sin oportunidades en el umbral actual")
-        else:
-            resumen = grefa_filter.summarize(oportunidades)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Oportunidades", resumen["total"])
-            m2.metric("Alta", resumen["alta"])
-            m3.metric("Importe", formato_importe(resumen["importe_oportunidades"]))
-
+def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
     if oportunidades.empty:
         st.info(
             "Ninguna licitación supera el umbral. Baja la relevancia mínima o ajusta CPV/términos."
         )
         return
 
-    resumen = grefa_filter.summarize(oportunidades)
     botones_exportacion(oportunidades, "oportunidades", permitir_sheets=True)
 
     if vista == "Tarjetas":
@@ -1256,7 +1338,9 @@ def main() -> None:
     )
 
     resumen = grefa_filter.summarize(puntuadas)
-    panel_control_superior(datos, resumen, len(cpvs_activos), len(conceptos_activos))
+    oportunidades, vista = panel_control_superior(
+        datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)
+    )
 
     if puntuadas.empty:
         st.warning("No hay datos cargados. Pulsa «Actualizar datos ahora» en la barra lateral.")
@@ -1264,7 +1348,7 @@ def main() -> None:
 
     pestana_1, pestana_2 = st.tabs(["🎯 Oportunidades GREFA", "🔎 Buscador General PLACSP"])
     with pestana_1:
-        pestana_oportunidades(puntuadas)
+        pestana_oportunidades(oportunidades, vista)
     with pestana_2:
         pestana_buscador(puntuadas)
 
