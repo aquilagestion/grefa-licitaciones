@@ -145,10 +145,13 @@ def init_state() -> None:
         "sheets_sincronizado": False,
         "sheets_estado": "",
         "filtro_estados": list(ESTADOS_ABIERTOS_DEFAULT),
-        "busqueda_libre": "",
-        "usar_filtro_fechas": False,
-        "fecha_campo": "fecha_actualizacion",
-        "incluir_sin_fecha": True,
+        "estados_aplicados": list(ESTADOS_ABIERTOS_DEFAULT),
+        "busqueda_aplicada": "",
+        "usar_fechas_aplicado": False,
+        "fecha_campo_aplicado": "fecha_actualizacion",
+        "fecha_desde_aplicada": None,
+        "fecha_hasta_aplicada": None,
+        "incluir_sin_fecha_aplicado": True,
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -461,7 +464,7 @@ def barra_criterios_superior(df: pd.DataFrame) -> None:
     catalogo_terminos: list[dict] = st.session_state["catalogo_terminos"]
     n_cpv = sum(1 for c in catalogo_cpv if c.get("activo"))
     n_terms = sum(1 for t in catalogo_terminos if t.get("activo"))
-    estados_sel = st.session_state.get("filtro_estados") or []
+    estados_sel = st.session_state.get("estados_aplicados") or []
 
     with st.container(border=True):
         st.markdown('<span class="barra-criterios-flag"></span>', unsafe_allow_html=True)
@@ -495,41 +498,107 @@ def _rango_fechas_disponible(df: pd.DataFrame, campo: str) -> tuple:
     return fechas.min().date(), fechas.max().date()
 
 
-def barra_busqueda_filtros(df: pd.DataFrame) -> None:
-    """Búsqueda libre y filtro por fechas (global, ambas pestañas)."""
-    with st.container(border=True):
-        col_texto, col_toggle = st.columns([4, 1])
-        with col_texto:
-            st.text_input(
-                "Búsqueda libre",
-                key="busqueda_libre",
-                placeholder="Cualquier término en título, descripción, expediente, CPV, ubicación… (sin añadirlo al catálogo)",
-            )
-        with col_toggle:
-            st.checkbox("Filtrar por fechas", key="usar_filtro_fechas")
+def _limpiar_filtros_busqueda() -> None:
+    st.session_state["busqueda_aplicada"] = ""
+    st.session_state["usar_fechas_aplicado"] = False
+    st.session_state["fecha_campo_aplicado"] = "fecha_actualizacion"
+    st.session_state["fecha_desde_aplicada"] = None
+    st.session_state["fecha_hasta_aplicada"] = None
+    st.session_state["incluir_sin_fecha_aplicado"] = True
+    st.session_state["filtro_estados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+    st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
 
-        if st.session_state.get("usar_filtro_fechas"):
-            campo = st.session_state.get("fecha_campo", "fecha_actualizacion")
-            min_d, max_d = _rango_fechas_disponible(df, campo)
-            st.session_state.setdefault("fecha_desde", min_d)
-            st.session_state.setdefault("fecha_hasta", max_d)
+
+def _resumen_filtros_aplicados() -> None:
+    partes: list[str] = []
+    texto = (st.session_state.get("busqueda_aplicada") or "").strip()
+    if texto:
+        partes.append(f"texto «{texto}»")
+    estados = st.session_state.get("estados_aplicados") or []
+    if estados:
+        partes.append(f"estado: {', '.join(estados)}")
+    if st.session_state.get("usar_fechas_aplicado"):
+        campo = st.session_state.get("fecha_campo_aplicado", "fecha_actualizacion")
+        etiqueta = "actualización" if campo == "fecha_actualizacion" else "límite presentación"
+        desde = st.session_state.get("fecha_desde_aplicada")
+        hasta = st.session_state.get("fecha_hasta_aplicada")
+        if desde and hasta:
+            partes.append(f"fechas ({etiqueta}): {desde:%d/%m/%Y} – {hasta:%d/%m/%Y}")
+    if partes:
+        st.caption("Filtros activos: " + " · ".join(partes))
+    else:
+        st.caption("Sin filtros de búsqueda activos. Pulsa «Buscar» para aplicar.")
+
+
+def barra_busqueda_filtros(df: pd.DataFrame) -> None:
+    """Búsqueda libre y filtro por fechas; se aplican al pulsar «Buscar»."""
+    campo_def = st.session_state.get("fecha_campo_aplicado", "fecha_actualizacion")
+    min_d, max_d = _rango_fechas_disponible(df, campo_def)
+    desde_def = st.session_state.get("fecha_desde_aplicada") or min_d
+    hasta_def = st.session_state.get("fecha_hasta_aplicada") or max_d
+
+    with st.container(border=True):
+        with st.form("form_busqueda_global", clear_on_submit=False):
+            col_texto, col_fechas_toggle = st.columns([4, 1])
+            with col_texto:
+                texto = st.text_input(
+                    "Búsqueda libre",
+                    value=st.session_state.get("busqueda_aplicada", ""),
+                    placeholder=(
+                        "Cualquier término en título, descripción, expediente, CPV, ubicación… "
+                        "(sin añadirlo al catálogo)"
+                    ),
+                )
+            with col_fechas_toggle:
+                usar_fechas = st.checkbox(
+                    "Filtrar por fechas",
+                    value=bool(st.session_state.get("usar_fechas_aplicado", False)),
+                )
 
             fc1, fc2, fc3, fc4 = st.columns([1.4, 1, 1, 1.2])
             with fc1:
-                st.selectbox(
+                fecha_campo = st.selectbox(
                     "Campo de fecha",
                     ["fecha_actualizacion", "fecha_limite"],
+                    index=0 if campo_def == "fecha_actualizacion" else 1,
                     format_func=lambda x: (
                         "Fecha de actualización" if x == "fecha_actualizacion" else "Límite de presentación"
                     ),
-                    key="fecha_campo",
                 )
             with fc2:
-                st.date_input("Desde", key="fecha_desde", min_value=min_d, max_value=max_d)
+                fecha_desde = st.date_input("Desde", value=desde_def, min_value=min_d, max_value=max_d)
             with fc3:
-                st.date_input("Hasta", key="fecha_hasta", min_value=min_d, max_value=max_d)
+                fecha_hasta = st.date_input("Hasta", value=hasta_def, min_value=min_d, max_value=max_d)
             with fc4:
-                st.checkbox("Incluir sin fecha", key="incluir_sin_fecha")
+                incluir_sin_fecha = st.checkbox(
+                    "Incluir sin fecha",
+                    value=bool(st.session_state.get("incluir_sin_fecha_aplicado", True)),
+                )
+
+            st.caption(
+                "El estado (popover superior) y el texto/fechas se aplican juntos al pulsar «Buscar»."
+            )
+            col_buscar, col_limpiar, _ = st.columns([1, 1, 3])
+            with col_buscar:
+                buscar = st.form_submit_button("🔍 Buscar", type="primary", width="stretch")
+            with col_limpiar:
+                limpiar = st.form_submit_button("Limpiar filtros", width="stretch")
+
+        if buscar:
+            st.session_state["busqueda_aplicada"] = texto.strip()
+            st.session_state["usar_fechas_aplicado"] = usar_fechas
+            st.session_state["fecha_campo_aplicado"] = fecha_campo
+            st.session_state["fecha_desde_aplicada"] = fecha_desde
+            st.session_state["fecha_hasta_aplicada"] = fecha_hasta
+            st.session_state["incluir_sin_fecha_aplicado"] = incluir_sin_fecha
+            st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
+            st.rerun()
+
+        if limpiar:
+            _limpiar_filtros_busqueda()
+            st.rerun()
+
+        _resumen_filtros_aplicados()
 
 
 # ---------------------------------------------------------------------------
@@ -622,9 +691,9 @@ def render_filtro_estado(df: pd.DataFrame) -> None:
         help="Vacío = todos los estados. El filtro se aplica en ambas pestañas.",
     )
     if not seleccion:
-        st.caption("Sin filtro de estado (se muestran todos).")
+        st.caption("Sin filtro de estado (se muestran todos). Se aplica al pulsar «Buscar».")
     else:
-        st.caption(f"{len(seleccion)} estado(s) seleccionado(s).")
+        st.caption(f"{len(seleccion)} estado(s) seleccionado(s). Se aplicará al pulsar «Buscar».")
 
 
 def render_cpv_catalog() -> None:
@@ -897,11 +966,11 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
     ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
 
-    estados_globales = st.session_state.get("filtro_estados") or None
+    estados_globales = st.session_state.get("estados_aplicados") or None
     if estados_globales:
-        st.caption(f"Filtro de estado (barra superior): {', '.join(estados_globales)}")
+        st.caption(f"Estados aplicados: {', '.join(estados_globales)}")
 
-    busqueda = (st.session_state.get("busqueda_libre") or "").strip()
+    busqueda = (st.session_state.get("busqueda_aplicada") or "").strip()
     if busqueda:
         st.caption(f"Búsqueda libre activa: «{busqueda}»")
 
@@ -1010,17 +1079,17 @@ def main() -> None:
         conceptos=conceptos_activos,
     )
     puntuadas = grefa_filter.filter_by_estado(
-        puntuadas, st.session_state.get("filtro_estados") or None
+        puntuadas, st.session_state.get("estados_aplicados") or None
     )
 
-    usar_fechas = bool(st.session_state.get("usar_filtro_fechas", False))
+    usar_fechas = bool(st.session_state.get("usar_fechas_aplicado", False))
     puntuadas = aplicar_filtros_globales(
         puntuadas,
-        texto=str(st.session_state.get("busqueda_libre") or ""),
-        fecha_campo=str(st.session_state.get("fecha_campo") or "fecha_actualizacion"),
-        fecha_desde=st.session_state.get("fecha_desde") if usar_fechas else None,
-        fecha_hasta=st.session_state.get("fecha_hasta") if usar_fechas else None,
-        incluir_sin_fecha=bool(st.session_state.get("incluir_sin_fecha", True)),
+        texto=str(st.session_state.get("busqueda_aplicada") or ""),
+        fecha_campo=str(st.session_state.get("fecha_campo_aplicado") or "fecha_actualizacion"),
+        fecha_desde=st.session_state.get("fecha_desde_aplicada") if usar_fechas else None,
+        fecha_hasta=st.session_state.get("fecha_hasta_aplicada") if usar_fechas else None,
+        incluir_sin_fecha=bool(st.session_state.get("incluir_sin_fecha_aplicado", True)),
     )
 
     resumen = grefa_filter.summarize(puntuadas)
