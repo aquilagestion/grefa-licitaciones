@@ -49,9 +49,17 @@ SCORING_COLUMNS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 def normalize_text(texto: str) -> str:
     """Minúsculas, sin tildes y con la puntuación convertida en separadores."""
-    if not texto:
+    if texto is None:
         return ""
-    descompuesto = unicodedata.normalize("NFKD", str(texto))
+    try:
+        if pd.isna(texto):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    cadena = str(texto).strip()
+    if not cadena:
+        return ""
+    descompuesto = unicodedata.normalize("NFKD", cadena)
     sin_tildes = "".join(caracter for caracter in descompuesto if not unicodedata.combining(caracter))
     limpio = re.sub(r"[^0-9a-zA-Z]+", " ", sin_tildes.lower())
     return f" {limpio.strip()} "
@@ -290,6 +298,37 @@ def filter_by_estado(df: pd.DataFrame, estados: Sequence[str] | None) -> pd.Data
     return df[df["estado"].isin(lista)]
 
 
+def _valor_texto(val) -> str:
+    """Convierte celdas heterogéneas (NA, listas, NaN) a texto seguro."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (list, tuple)):
+        return " ".join(_valor_texto(item) for item in val)
+    return str(val)
+
+
+def _coerce_timestamp(val) -> pd.Timestamp | None:
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return pd.Timestamp(val)
+
+
+def _columna_texto(df: pd.DataFrame, nombre: str) -> pd.Series:
+    if nombre not in df.columns:
+        return pd.Series("", index=df.index, dtype="object")
+    return df[nombre].map(_valor_texto)
+
+
 def filter_by_fechas(
     df: pd.DataFrame,
     campo: str = "fecha_actualizacion",
@@ -301,42 +340,43 @@ def filter_by_fechas(
     if df.empty or campo not in df.columns or (desde is None and hasta is None):
         return df
 
+    desde_ts = _coerce_timestamp(desde)
+    hasta_ts = _coerce_timestamp(hasta)
+    if desde_ts is None and hasta_ts is None:
+        return df
+
     fechas = pd.to_datetime(df[campo], errors="coerce")
     mascara = pd.Series(True, index=df.index)
-    if desde is not None:
-        desde_ts = pd.Timestamp(desde).normalize()
-        cond_desde = fechas >= desde_ts
+    if desde_ts is not None:
+        cond_desde = fechas >= desde_ts.normalize()
         mascara &= cond_desde if not incluir_sin_fecha else (fechas.isna() | cond_desde)
-    if hasta is not None:
-        hasta_ts = pd.Timestamp(hasta).normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-        cond_hasta = fechas <= hasta_ts
+    if hasta_ts is not None:
+        limite = hasta_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        cond_hasta = fechas <= limite
         mascara &= cond_hasta if not incluir_sin_fecha else (fechas.isna() | cond_hasta)
     return df[mascara].reset_index(drop=True)
 
 
 def _campo_busqueda_texto(df: pd.DataFrame) -> pd.Series:
     """Texto concatenado y normalizado para búsqueda libre (sin depender del catálogo)."""
-    keywords = df["keywords_match"].map(
-        lambda v: " ".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v or "")
-    )
     blob = (
-        df["titulo"].fillna("")
+        _columna_texto(df, "titulo")
         + " "
-        + df["descripcion"].fillna("")
+        + _columna_texto(df, "descripcion")
         + " "
-        + df["organo_contratacion"].fillna("")
+        + _columna_texto(df, "organo_contratacion")
         + " "
-        + df["expediente"].fillna("")
+        + _columna_texto(df, "expediente")
         + " "
-        + df["cpvs_texto"].fillna("")
+        + _columna_texto(df, "cpvs_texto")
         + " "
-        + df["ubicacion"].fillna("")
+        + _columna_texto(df, "ubicacion")
         + " "
-        + df["estado"].fillna("")
+        + _columna_texto(df, "estado")
         + " "
-        + df["tipo_contrato"].fillna("")
+        + _columna_texto(df, "tipo_contrato")
         + " "
-        + keywords.fillna("")
+        + _columna_texto(df, "keywords_match")
     )
     return blob.map(normalize_text)
 

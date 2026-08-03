@@ -465,7 +465,7 @@ def barra_busqueda_filtros(df: pd.DataFrame) -> None:
             with fc3:
                 st.date_input("Hasta", key="fecha_hasta", min_value=min_d, max_value=max_d)
             with fc4:
-                st.checkbox("Incluir sin fecha", key="incluir_sin_fecha", value=True)
+                st.checkbox("Incluir sin fecha", key="incluir_sin_fecha")
 
 
 # ---------------------------------------------------------------------------
@@ -945,14 +945,14 @@ def main() -> None:
         puntuadas, st.session_state.get("filtro_estados") or None
     )
 
-    usar_fechas = st.session_state.get("usar_filtro_fechas", False)
+    usar_fechas = bool(st.session_state.get("usar_filtro_fechas", False))
     puntuadas = grefa_filter.apply_filtros_busqueda(
         puntuadas,
-        texto=st.session_state.get("busqueda_libre", ""),
-        fecha_campo=st.session_state.get("fecha_campo", "fecha_actualizacion"),
+        texto=str(st.session_state.get("busqueda_libre") or ""),
+        fecha_campo=str(st.session_state.get("fecha_campo") or "fecha_actualizacion"),
         fecha_desde=st.session_state.get("fecha_desde") if usar_fechas else None,
         fecha_hasta=st.session_state.get("fecha_hasta") if usar_fechas else None,
-        incluir_sin_fecha=st.session_state.get("incluir_sin_fecha", True),
+        incluir_sin_fecha=bool(st.session_state.get("incluir_sin_fecha", True)),
     )
 
     resumen = grefa_filter.summarize(puntuadas)
