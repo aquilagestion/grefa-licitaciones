@@ -152,6 +152,7 @@ def init_state() -> None:
         "fecha_desde_aplicada": None,
         "fecha_hasta_aplicada": None,
         "incluir_sin_fecha_aplicado": True,
+        "cargando_datos": False,
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -242,13 +243,12 @@ def cargar_feed(url: str, max_pages: int, max_entries: int, token: int) -> pd.Da
 def actualizar_datos() -> None:
     st.session_state["error_descarga"] = ""
     try:
-        with st.spinner("Descargando licitaciones de la PLACSP…"):
-            df = cargar_feed(
-                st.session_state["feed_url"],
-                int(st.session_state["max_pages"]),
-                int(st.session_state["max_entries"]),
-                int(st.session_state["refresh_token"]),
-            )
+        df = cargar_feed(
+            st.session_state["feed_url"],
+            int(st.session_state["max_pages"]),
+            int(st.session_state["max_entries"]),
+            int(st.session_state["refresh_token"]),
+        )
         st.session_state["datos"] = df
         st.session_state["origen_datos"] = df.attrs.get("feed_url", st.session_state["feed_url"])
         st.session_state["ultima_actualizacion"] = datetime.now()
@@ -256,6 +256,27 @@ def actualizar_datos() -> None:
         st.session_state["error_descarga"] = str(exc)
     except Exception as exc:  # errores de red inesperados
         st.session_state["error_descarga"] = f"Error inesperado al descargar el feed: {exc}"
+
+
+def cargar_datos_con_indicador() -> None:
+    """Descarga con indicador visible en el área principal."""
+    _, centro, _ = st.columns([1, 2.2, 1])
+    with centro:
+        with st.status("⏳ Descargando licitaciones de la PLACSP…", expanded=True) as status:
+            st.write("Consultando el feed ATOM de **contrataciondelestado.es**…")
+            st.caption("Puede tardar unos segundos según las páginas configuradas en la barra lateral.")
+            with st.spinner("Descargando y procesando expedientes…"):
+                actualizar_datos()
+            if st.session_state["error_descarga"]:
+                status.update(label="❌ Error al descargar los datos", state="error", expanded=True)
+            else:
+                total = len(st.session_state["datos"]) if st.session_state["datos"] is not None else 0
+                status.update(
+                    label=f"✅ {total} licitaciones cargadas",
+                    state="complete",
+                    expanded=False,
+                )
+    st.session_state["cargando_datos"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -625,16 +646,20 @@ def sidebar_fuente_datos() -> None:
             "sindicaciones oficiales alternativas de contrataciondelestado.es."
         )
 
+    if st.session_state.get("cargando_datos"):
+        st.sidebar.info("⏳ Descargando licitaciones…")
+
     if st.sidebar.button("🔁 Actualizar datos ahora", type="primary", width="stretch"):
         st.session_state["refresh_token"] += 1
-        actualizar_datos()
+        st.session_state["cargando_datos"] = True
         st.rerun()
 
     with st.sidebar.expander("Cargar fichero ATOM local"):
         fichero = st.file_uploader("Archivo .atom / .xml", type=["atom", "xml"], key="uploader")
         if fichero is not None and st.button("Procesar fichero", width="stretch"):
             try:
-                df = parse_atom_bytes(fichero.getvalue())
+                with st.spinner("Procesando fichero ATOM…"):
+                    df = parse_atom_bytes(fichero.getvalue())
                 st.session_state["datos"] = df
                 st.session_state["origen_datos"] = f"Fichero local: {fichero.name}"
                 st.session_state["ultima_actualizacion"] = datetime.now()
@@ -1049,10 +1074,11 @@ def main() -> None:
     if not st.session_state["sheets_sincronizado"]:
         cargar_criterios_de_sheets(inicial=True)
 
-    # La primera carga se resuelve antes de pintar la barra lateral para que
-    # esta refleje el estado real de los datos ya en el primer render.
-    if st.session_state["datos"] is None and not st.session_state["error_descarga"]:
-        actualizar_datos()
+    necesita_carga = st.session_state.get("cargando_datos") or (
+        st.session_state["datos"] is None and not st.session_state["error_descarga"]
+    )
+    if necesita_carga:
+        cargar_datos_con_indicador()
 
     sidebar_fuente_datos()
     sidebar_google_sheets()
