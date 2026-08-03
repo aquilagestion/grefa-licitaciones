@@ -290,6 +290,91 @@ def filter_by_estado(df: pd.DataFrame, estados: Sequence[str] | None) -> pd.Data
     return df[df["estado"].isin(lista)]
 
 
+def filter_by_fechas(
+    df: pd.DataFrame,
+    campo: str = "fecha_actualizacion",
+    desde: pd.Timestamp | None = None,
+    hasta: pd.Timestamp | None = None,
+    incluir_sin_fecha: bool = True,
+) -> pd.DataFrame:
+    """Filtra por rango de fechas en ``fecha_actualizacion`` o ``fecha_limite``."""
+    if df.empty or campo not in df.columns or (desde is None and hasta is None):
+        return df
+
+    fechas = pd.to_datetime(df[campo], errors="coerce")
+    mascara = pd.Series(True, index=df.index)
+    if desde is not None:
+        desde_ts = pd.Timestamp(desde).normalize()
+        cond_desde = fechas >= desde_ts
+        mascara &= cond_desde if not incluir_sin_fecha else (fechas.isna() | cond_desde)
+    if hasta is not None:
+        hasta_ts = pd.Timestamp(hasta).normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        cond_hasta = fechas <= hasta_ts
+        mascara &= cond_hasta if not incluir_sin_fecha else (fechas.isna() | cond_hasta)
+    return df[mascara].reset_index(drop=True)
+
+
+def _campo_busqueda_texto(df: pd.DataFrame) -> pd.Series:
+    """Texto concatenado y normalizado para búsqueda libre (sin depender del catálogo)."""
+    keywords = df["keywords_match"].map(
+        lambda v: " ".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v or "")
+    )
+    blob = (
+        df["titulo"].fillna("")
+        + " "
+        + df["descripcion"].fillna("")
+        + " "
+        + df["organo_contratacion"].fillna("")
+        + " "
+        + df["expediente"].fillna("")
+        + " "
+        + df["cpvs_texto"].fillna("")
+        + " "
+        + df["ubicacion"].fillna("")
+        + " "
+        + df["estado"].fillna("")
+        + " "
+        + df["tipo_contrato"].fillna("")
+        + " "
+        + keywords.fillna("")
+    )
+    return blob.map(normalize_text)
+
+
+def filter_by_texto_libre(df: pd.DataFrame, texto: str = "") -> pd.DataFrame:
+    """Búsqueda libre en todos los campos textuales, sin usar el catálogo de términos."""
+    if df.empty or not texto or not texto.strip():
+        return df
+    terminos = [t for t in normalize_text(texto).split() if t]
+    if not terminos:
+        return df
+    campos = _campo_busqueda_texto(df)
+    mascara = pd.Series(True, index=df.index)
+    for termino in terminos:
+        mascara &= campos.str.contains(re.escape(termino), regex=True, na=False)
+    return df[mascara].reset_index(drop=True)
+
+
+def apply_filtros_busqueda(
+    df: pd.DataFrame,
+    texto: str = "",
+    fecha_campo: str = "fecha_actualizacion",
+    fecha_desde: pd.Timestamp | None = None,
+    fecha_hasta: pd.Timestamp | None = None,
+    incluir_sin_fecha: bool = True,
+) -> pd.DataFrame:
+    """Búsqueda libre + rango de fechas (global, independiente del scoring GREFA)."""
+    filtrado = filter_by_texto_libre(df, texto)
+    filtrado = filter_by_fechas(
+        filtrado,
+        campo=fecha_campo,
+        desde=fecha_desde,
+        hasta=fecha_hasta,
+        incluir_sin_fecha=incluir_sin_fecha,
+    )
+    return filtrado
+
+
 def search_dataframe(
     df: pd.DataFrame,
     texto: str = "",
@@ -298,6 +383,10 @@ def search_dataframe(
     ubicaciones: Sequence[str] | None = None,
     estados: Sequence[str] | None = None,
     incluir_sin_presupuesto: bool = True,
+    fecha_campo: str = "fecha_actualizacion",
+    fecha_desde: pd.Timestamp | None = None,
+    fecha_hasta: pd.Timestamp | None = None,
+    incluir_sin_fecha: bool = True,
 ) -> pd.DataFrame:
     """Búsqueda libre y filtros del buscador general."""
     if df.empty:
@@ -305,23 +394,7 @@ def search_dataframe(
 
     filtrado = df
     if texto and texto.strip():
-        consulta = normalize_text(texto)
-        terminos = [t for t in consulta.split() if t]
-        campos = (
-            filtrado["titulo"].fillna("")
-            + " "
-            + filtrado["descripcion"].fillna("")
-            + " "
-            + filtrado["organo_contratacion"].fillna("")
-            + " "
-            + filtrado["expediente"].fillna("")
-            + " "
-            + filtrado["cpvs_texto"].fillna("")
-        ).map(normalize_text)
-        mascara = pd.Series(True, index=filtrado.index)
-        for termino in terminos:
-            mascara &= campos.str.contains(re.escape(termino), regex=True)
-        filtrado = filtrado[mascara]
+        filtrado = filter_by_texto_libre(filtrado, texto)
 
     if presupuesto_min is not None or presupuesto_max is not None:
         importes = filtrado["presupuesto_sin_iva"]
@@ -337,6 +410,13 @@ def search_dataframe(
     if ubicaciones:
         filtrado = filtrado[filtrado["ubicacion"].isin(list(ubicaciones))]
     filtrado = filter_by_estado(filtrado, estados)
+    filtrado = filter_by_fechas(
+        filtrado,
+        campo=fecha_campo,
+        desde=fecha_desde,
+        hasta=fecha_hasta,
+        incluir_sin_fecha=incluir_sin_fecha,
+    )
 
     return filtrado.reset_index(drop=True)
 

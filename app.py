@@ -144,6 +144,10 @@ def init_state() -> None:
         "sheets_sincronizado": False,
         "sheets_estado": "",
         "filtro_estados": list(ESTADOS_ABIERTOS_DEFAULT),
+        "busqueda_libre": "",
+        "usar_filtro_fechas": False,
+        "fecha_campo": "fecha_actualizacion",
+        "incluir_sin_fecha": True,
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -411,6 +415,57 @@ def barra_criterios_superior(df: pd.DataFrame) -> None:
             etiqueta = _etiqueta_estados(estados_sel)
             with st.popover(f"📋 Estado · {etiqueta}", width="stretch"):
                 render_filtro_estado(df)
+
+
+def _rango_fechas_disponible(df: pd.DataFrame, campo: str) -> tuple:
+    """Devuelve (min, max) como date para el date_input de Streamlit."""
+    from datetime import date
+
+    if df.empty or campo not in df.columns:
+        hoy = date.today()
+        return hoy, hoy
+    fechas = pd.to_datetime(df[campo], errors="coerce").dropna()
+    if fechas.empty:
+        hoy = date.today()
+        return hoy, hoy
+    return fechas.min().date(), fechas.max().date()
+
+
+def barra_busqueda_filtros(df: pd.DataFrame) -> None:
+    """Búsqueda libre y filtro por fechas (global, ambas pestañas)."""
+    with st.container(border=True):
+        col_texto, col_toggle = st.columns([4, 1])
+        with col_texto:
+            st.text_input(
+                "Búsqueda libre",
+                key="busqueda_libre",
+                placeholder="Cualquier término en título, descripción, expediente, CPV, ubicación… (sin añadirlo al catálogo)",
+            )
+        with col_toggle:
+            st.checkbox("Filtrar por fechas", key="usar_filtro_fechas")
+
+        if st.session_state.get("usar_filtro_fechas"):
+            campo = st.session_state.get("fecha_campo", "fecha_actualizacion")
+            min_d, max_d = _rango_fechas_disponible(df, campo)
+            st.session_state.setdefault("fecha_desde", min_d)
+            st.session_state.setdefault("fecha_hasta", max_d)
+
+            fc1, fc2, fc3, fc4 = st.columns([1.4, 1, 1, 1.2])
+            with fc1:
+                st.selectbox(
+                    "Campo de fecha",
+                    ["fecha_actualizacion", "fecha_limite"],
+                    format_func=lambda x: (
+                        "Fecha de actualización" if x == "fecha_actualizacion" else "Límite de presentación"
+                    ),
+                    key="fecha_campo",
+                )
+            with fc2:
+                st.date_input("Desde", key="fecha_desde", min_value=min_d, max_value=max_d)
+            with fc3:
+                st.date_input("Hasta", key="fecha_hasta", min_value=min_d, max_value=max_d)
+            with fc4:
+                st.checkbox("Incluir sin fecha", key="incluir_sin_fecha", value=True)
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +752,7 @@ def pestana_oportunidades(df: pd.DataFrame) -> None:
     st.subheader("Oportunidades detectadas para GREFA")
     st.caption(
         f"Se muestran las licitaciones con relevancia media (≥ {MEDIUM_RELEVANCE_THRESHOLD} %) "
-        f"y alta (≥ {HIGH_RELEVANCE_THRESHOLD} %) según los criterios activos."
+        f"y alta (≥ {HIGH_RELEVANCE_THRESHOLD} %). Usa la búsqueda libre superior para acotar por cualquier término."
     )
 
     columna_slider, columna_categorias, columna_vista = st.columns([2, 2, 1.4])
@@ -767,23 +822,24 @@ def pestana_oportunidades(df: pd.DataFrame) -> None:
 
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
-    st.caption("Todas las licitaciones descargadas, con independencia de su relevancia GREFA.")
+    st.caption(
+        "Filtros adicionales sobre el listado ya filtrado por la búsqueda libre "
+        "y las fechas de la barra superior."
+    )
 
     importes = df["presupuesto_sin_iva"].dropna()
     tope = float(importes.max()) if not importes.empty else 0.0
 
-    columna_texto, columna_ubicacion = st.columns([2.2, 1.4])
-    with columna_texto:
-        texto = st.text_input("Búsqueda libre", placeholder="fauna, anillamiento, expediente…")
-    with columna_ubicacion:
-        ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
-        ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
+    ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
+    ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
 
     estados_globales = st.session_state.get("filtro_estados") or None
     if estados_globales:
         st.caption(f"Filtro de estado (barra superior): {', '.join(estados_globales)}")
-    else:
-        st.caption("Sin filtro de estado activo (barra superior).")
+
+    busqueda = (st.session_state.get("busqueda_libre") or "").strip()
+    if busqueda:
+        st.caption(f"Búsqueda libre activa: «{busqueda}»")
 
     if tope > 0:
         rango = st.slider(
@@ -802,7 +858,6 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 
     resultados = grefa_filter.search_dataframe(
         df,
-        texto=texto,
         presupuesto_min=rango[0],
         presupuesto_max=rango[1],
         ubicaciones=ubicaciones,
@@ -867,6 +922,7 @@ def main() -> None:
         datos = empty_dataframe()
 
     barra_criterios_superior(datos)
+    barra_busqueda_filtros(datos)
 
     if st.session_state["error_descarga"]:
         st.error(st.session_state["error_descarga"])
@@ -887,6 +943,16 @@ def main() -> None:
     )
     puntuadas = grefa_filter.filter_by_estado(
         puntuadas, st.session_state.get("filtro_estados") or None
+    )
+
+    usar_fechas = st.session_state.get("usar_filtro_fechas", False)
+    puntuadas = grefa_filter.apply_filtros_busqueda(
+        puntuadas,
+        texto=st.session_state.get("busqueda_libre", ""),
+        fecha_campo=st.session_state.get("fecha_campo", "fecha_actualizacion"),
+        fecha_desde=st.session_state.get("fecha_desde") if usar_fechas else None,
+        fecha_hasta=st.session_state.get("fecha_hasta") if usar_fechas else None,
+        incluir_sin_fecha=st.session_state.get("incluir_sin_fecha", True),
     )
 
     resumen = grefa_filter.summarize(puntuadas)
