@@ -702,11 +702,12 @@ def _clamp_date(valor: date, min_d: date, max_d: date) -> date:
 
 
 def _limpiar_busqueda_estandar() -> None:
-    st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
-    st.session_state["_reset_filtro_estados"] = True
+    pass
 
 
 def _limpiar_busqueda_libre() -> None:
+    st.session_state["estados_aplicados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+    st.session_state["_reset_filtro_estados"] = True
     st.session_state["usar_fechas_aplicado"] = False
     st.session_state["fecha_campo_aplicado"] = "fecha_actualizacion"
     st.session_state["fecha_desde_aplicada"] = None
@@ -734,7 +735,8 @@ def _aplicar_filtros_oportunidades() -> None:
 
 
 def _aplicar_busqueda_estandar() -> None:
-    st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
+    """CPV y términos se aplican al activarlos en catálogo; rerun refresca scoring."""
+    return
 
 
 def _aplicar_busqueda_libre() -> str | None:
@@ -744,6 +746,7 @@ def _aplicar_busqueda_libre() -> str | None:
         hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
         if desde and hasta and desde > hasta:
             return "La fecha «Desde» no puede ser posterior a «Hasta»."
+    st.session_state["estados_aplicados"] = list(st.session_state.get("filtro_estados") or [])
     _aplicar_borrador_fechas()
     _aplicar_filtros_oportunidades()
     return None
@@ -779,8 +782,14 @@ def _inicializar_borrador_fechas(df: pd.DataFrame) -> None:
         st.session_state["filtro_fecha_hasta"] = max_d
 
 
+def _estados_disponibles(df: pd.DataFrame) -> list[str]:
+    if df.empty:
+        return []
+    return sorted({str(e).strip() for e in df["estado"].unique() if e})
+
+
 def _render_fechas_inline(df: pd.DataFrame) -> None:
-    """Controles de fecha en línea (búsqueda libre)."""
+    """Filtros en línea de búsqueda libre: estado, fechas."""
     if st.session_state.pop("_reset_filtro_fechas", False):
         st.session_state["filtro_usar_fechas"] = False
         st.session_state["filtro_fecha_campo"] = "fecha_actualizacion"
@@ -788,9 +797,13 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
         st.session_state.pop("filtro_fecha_desde", None)
         st.session_state.pop("filtro_fecha_hasta", None)
 
+    if st.session_state.pop("_reset_filtro_estados", False):
+        st.session_state["filtro_estados"] = list(ESTADOS_ABIERTOS_DEFAULT)
+
     min_d, max_d = _rango_fechas_disponible(df)
     _inicializar_borrador_fechas(df)
     usar = bool(st.session_state.get("filtro_usar_fechas"))
+    disponibles = _estados_disponibles(df)
 
     ce, cv = st.columns([0.34, 0.66], gap="small")
     with ce:
@@ -798,16 +811,15 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
     with cv:
         st.checkbox("Activar filtro por fechas", key="filtro_usar_fechas")
 
-    c1, c2, c3, c4 = st.columns([0.9, 0.7, 0.7, 0.55], gap="small")
+    c1, c2, c3, c4 = st.columns([1.1, 0.7, 0.7, 0.55], gap="small")
     with c1:
-        st.selectbox(
-            "Campo",
-            ["fecha_actualizacion", "fecha_limite"],
-            format_func=lambda x: (
-                "Actualización" if x == "fecha_actualizacion" else "Límite presentación"
-            ),
-            key="filtro_fecha_campo",
-            disabled=not usar,
+        st.multiselect(
+            "Estado",
+            options=disponibles,
+            key="filtro_estados",
+            placeholder="Publicada, Adjudicada…",
+            help="Vacío = todos los estados. Se aplica al pulsar «Buscar».",
+            disabled=not disponibles,
         )
     with c2:
         st.date_input(
@@ -832,7 +844,7 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
             "Sin fecha",
             key="filtro_incluir_sin_fecha",
             disabled=not usar,
-            help="Incluir licitaciones sin fecha en el campo seleccionado",
+            help="Incluir licitaciones sin fecha de actualización",
         )
 
 
@@ -859,24 +871,21 @@ def _aplicar_borrador_fechas() -> None:
 
 
 def _resumen_busqueda_estandar_borrador(n_cpv: int, n_terms: int) -> str:
-    partes = [f"{n_cpv} CPV", f"{n_terms} términos"]
+    return f"Estandarizada: {n_cpv} CPV · {n_terms} términos"
+
+
+def _resumen_busqueda_libre_borrador() -> str:
+    partes: list[str] = []
     estados = st.session_state.get("filtro_estados") or []
     if estados:
         partes.append(f"estado: {', '.join(estados)}")
     else:
         partes.append("estado: todos")
-    return "Estandarizada: " + " · ".join(partes)
-
-
-def _resumen_busqueda_libre_borrador() -> str:
-    partes: list[str] = []
     if st.session_state.get("filtro_usar_fechas"):
-        campo = st.session_state.get("filtro_fecha_campo", "fecha_actualizacion")
-        etiqueta = "act." if campo == "fecha_actualizacion" else "lím."
         desde = _como_date(st.session_state.get("filtro_fecha_desde"))
         hasta = _como_date(st.session_state.get("filtro_fecha_hasta"))
         if desde and hasta:
-            partes.append(f"fechas ({etiqueta}): {desde:%d/%m/%Y}–{hasta:%d/%m/%Y}")
+            partes.append(f"fechas: {desde:%d/%m/%Y}–{hasta:%d/%m/%Y}")
     else:
         partes.append("fechas: sin filtrar")
     min_rel = st.session_state.get("opp_min_relevancia")
@@ -933,7 +942,6 @@ def panel_control_superior(
     catalogo_terminos: list[dict] = st.session_state["catalogo_terminos"]
     n_cpv_activos = sum(1 for c in catalogo_cpv if c.get("activo"))
     n_terms = sum(1 for t in catalogo_terminos if t.get("activo"))
-    estados_borrador = st.session_state.get("filtro_estados") or []
 
     with st.container(border=True):
         st.markdown('<span class="zona-control-flag"></span>', unsafe_allow_html=True)
@@ -957,24 +965,18 @@ def panel_control_superior(
         with s5:
             _celda_par("Criterios", f"{n_cpv} CPV · {n_conceptos}")
 
-        # ── 1. Búsqueda estandarizada GREFA (CPV · Términos · Estado) ──
+        # ── 1. Búsqueda estandarizada GREFA (CPV · Términos) ──
         st.markdown('<span class="bloque-estandar-flag"></span>', unsafe_allow_html=True)
         st.markdown(
             '<p class="bloque-seccion-titulo">Búsqueda estandarizada GREFA</p>',
             unsafe_allow_html=True,
         )
-        c_cpv, c_term, c_est = st.columns(3, gap="small")
+        c_cpv, c_term = st.columns(2, gap="small")
         with c_cpv:
             st.markdown('<span class="col-filtros-flag"></span>', unsafe_allow_html=True)
             _fila_popover("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog)
         with c_term:
             _fila_popover("Términos", f"Término · {n_terms}", render_term_catalog)
-        with c_est:
-            _fila_popover(
-                "Estado",
-                f"Estado · {_etiqueta_estados(estados_borrador, 18)}",
-                lambda: render_filtro_estado(df),
-            )
         st.markdown(
             f'<p class="resumen-filtros">{_resumen_busqueda_estandar_borrador(n_cpv_activos, n_terms)}</p>',
             unsafe_allow_html=True,
@@ -1180,9 +1182,9 @@ def render_filtro_estado(df: pd.DataFrame) -> None:
         help="Vacío = todos los estados. El filtro se aplica en ambas pestañas.",
     )
     if not seleccion:
-        st.caption("Sin filtro de estado (todos). Se aplica al pulsar «Buscar GREFA».")
+        st.caption("Sin filtro de estado (todos). Se aplica al pulsar «Buscar».")
     else:
-        st.caption(f"{len(seleccion)} estado(s). Se aplicará al pulsar «Buscar GREFA».")
+        st.caption(f"{len(seleccion)} estado(s). Se aplicará al pulsar «Buscar».")
 
 
 def render_cpv_catalog() -> None:
