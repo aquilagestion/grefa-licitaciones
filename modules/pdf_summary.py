@@ -10,7 +10,7 @@ from modules.sheets_store import _secret
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 MAX_PDF_BYTES = 15 * 1024 * 1024  # ~15 MB
 MAX_TEXTO_EXTRAIDO = 120_000
 
