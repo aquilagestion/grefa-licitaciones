@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Job diario: descarga PLACSP, puntúa, guarda histórico y avisa por Google Chat.
+"""Job diario: descarga PLACSP, puntúa, guarda histórico y avisa al espacio Chat.
 
 Uso local:
   python scripts/daily_sync.py
 
 Variables de entorno:
   GREFA_SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON (o GOOGLE_APPLICATION_CREDENTIALS)
-  GOOGLE_CHAT_WEBHOOK_URL (opcional)
+  Alertas por email (opción recomendada si no hay webhooks):
+    GREFA_ALERTS_SPACE_EMAIL, GREFA_SMTP_USER, GREFA_SMTP_PASSWORD
+    GREFA_SMTP_FROM (opcional), GREFA_APP_URL
+  Fallback webhook: GOOGLE_CHAT_WEBHOOK_URL
   GREFA_FEED_MAX_PAGES (default 2), GREFA_FEED_MAX_ENTRIES (default 500)
 """
 

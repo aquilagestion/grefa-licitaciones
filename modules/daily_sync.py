@@ -1,15 +1,14 @@
-"""Sincronización diaria: histórico en Sheets + alerta Google Chat."""
+"""Sincronización diaria: histórico en Sheets + alertas."""
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
 
-from modules import google_chat, sheets_historico, sheets_store
+from modules import alert_messages, email_alert, google_chat, sheets_historico, sheets_store
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ class SyncResult:
         partes = [f"Histórico: +{self.filas_historico} filas"]
         partes.append(f"Nuevas Alta: {self.nuevas_alta}")
         if self.chat_enviado:
-            partes.append("Aviso enviado a Google Chat")
+            partes.append("Aviso enviado al espacio Chat")
         return " · ".join(partes)
 
 
@@ -74,14 +73,21 @@ def run_daily_sync(
         resultado.nuevas_alta = len(nuevas)
         resultado.detalle_nuevas = nuevas
 
-        if nuevas and google_chat.is_configured():
+        if nuevas:
             total_alta = int((puntuadas["categoria"] == "Alta").sum()) if not puntuadas.empty else 0
-            texto = google_chat.format_nuevas_alta(
-                nuevas, app_url=_app_url(), total_alta=total_alta
-            )
-            resultado.chat_enviado = google_chat.send_message(texto)
-        elif nuevas:
-            resultado.motivo = "Hay nuevas Alta pero Google Chat no está configurado"
+            url = _app_url()
+            if email_alert.is_configured():
+                asunto, cuerpo = alert_messages.format_nuevas_alta_email(
+                    nuevas, app_url=url, total_alta=total_alta
+                )
+                resultado.chat_enviado = email_alert.send_message(asunto, cuerpo)
+            elif google_chat.is_configured():
+                texto = google_chat.format_nuevas_alta(
+                    nuevas, app_url=url, total_alta=total_alta
+                )
+                resultado.chat_enviado = google_chat.send_message(texto)
+            else:
+                resultado.motivo = "Hay nuevas Alta pero no hay alertas configuradas (email o webhook)"
     except sheets_store.SheetsError as exc:
         resultado.motivo = str(exc)
         LOGGER.warning("Sync diaria fallida: %s", exc)

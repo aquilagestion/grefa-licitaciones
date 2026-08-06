@@ -23,8 +23,12 @@ jobs:
         env:
           GREFA_SPREADSHEET_ID: ${{ secrets.GREFA_SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          GREFA_ALERTS_SPACE_EMAIL: ${{ secrets.GREFA_ALERTS_SPACE_EMAIL }}
+          GREFA_SMTP_USER: ${{ secrets.GREFA_SMTP_USER }}
+          GREFA_SMTP_PASSWORD: ${{ secrets.GREFA_SMTP_PASSWORD }}
+          GREFA_SMTP_FROM: ${{ secrets.GREFA_SMTP_FROM }}
           GREFA_APP_URL: ${{ vars.GREFA_APP_URL }}
+          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           GREFA_FEED_MAX_PAGES: "2"
           GREFA_FEED_MAX_ENTRIES: "500"
         run: python scripts/daily_sync.py

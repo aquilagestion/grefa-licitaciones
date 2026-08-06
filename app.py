@@ -34,7 +34,7 @@ from config.keyword_catalog import (  # noqa: E402
     active_keywords_grouped,
     default_term_catalog,
 )
-from modules import auth, daily_sync, grefa_filter, google_chat, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
+from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, pdf_summary, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
     timestamped_filename,
@@ -331,6 +331,9 @@ def init_state() -> None:
         "opp_categorias_borrador": ["Alta", "Media"],
         "opp_categorias_aplicadas": ["Alta", "Media"],
         "opp_vista": "Tarjetas",
+        "pdf_resumenes": {},
+        "seguimiento_cache": {},
+        "pliego_expediente_sel": "",
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -596,6 +599,72 @@ def botones_exportacion(df: pd.DataFrame, sufijo: str, permitir_sheets: bool = F
                     st.error(str(exc))
 
 
+def _clave_expediente(expediente: str, url: str) -> str:
+    return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
+
+
+def _cargar_seguimiento_cache() -> dict:
+    if not sheets_store.is_configured():
+        return {}
+    try:
+        return sheets_store.load_opportunities_tracking()
+    except sheets_store.SheetsError as exc:
+        st.session_state["seguimiento_estado"] = str(exc)
+        return {}
+
+
+def _widget_resumen_pliego(
+    expediente: str,
+    url: str,
+    titulo: str,
+    *,
+    clave_prefix: str,
+) -> None:
+    """Uploader + botón para resumir un PDF vinculado a un expediente."""
+    if not pdf_summary.is_configured():
+        st.caption("Configura `[gemini] api_key` en Secrets para activar el resumen IA.")
+        return
+
+    clave = _clave_expediente(expediente, url)
+    resumenes = st.session_state.setdefault("pdf_resumenes", {})
+
+    if sheets_store.is_configured():
+        guardado = sheets_store.load_pliego_resumen(expediente, url)
+        if guardado and clave not in resumenes:
+            resumenes[clave] = guardado
+
+    if clave in resumenes:
+        st.markdown(resumenes[clave])
+        if st.button("🗑️ Borrar resumen de sesión", key=f"borrar_resumen_{clave_prefix}"):
+            resumenes.pop(clave, None)
+            st.rerun()
+        return
+
+    fichero = st.file_uploader(
+        "Sube el pliego (PDF)",
+        type=["pdf"],
+        key=f"pdf_{clave_prefix}",
+    )
+    if fichero and st.button("✨ Generar resumen con IA", key=f"resumir_{clave_prefix}"):
+        with st.spinner("Analizando pliego con Gemini… (puede tardar 30-60 s)"):
+            try:
+                texto = pdf_summary.summarize_pdf(
+                    fichero.getvalue(),
+                    expediente=expediente,
+                    titulo=titulo,
+                )
+                resumenes[clave] = texto
+                if sheets_store.is_configured():
+                    sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
+                    st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+            except pdf_summary.PdfSummaryError as exc:
+                st.error(str(exc))
+            except sheets_store.SheetsError as exc:
+                st.warning(f"Resumen generado pero no guardado en Sheets: {exc}")
+                if clave in resumenes:
+                    st.markdown(resumenes[clave])
+
+
 def tarjeta_licitacion(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     cpvs = " ".join(f"<span class='chip'>{codigo}</span>" for codigo in (fila.get("cpvs") or [])[:8])
@@ -634,6 +703,21 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             st.write(fila.get("justificacion", ""))
             if fila.get("descripcion"):
                 st.caption(fila["descripcion"][:800])
+
+    expediente = str(fila.get("expediente") or "")
+    url = str(fila.get("url") or "")
+    clave = _clave_expediente(expediente, url)
+    seguimiento = st.session_state.get("seguimiento_cache", {}).get(clave, {})
+    if seguimiento:
+        st.caption(f"📋 Seguimiento: **{seguimiento.get('seguimiento', '—')}**")
+
+    with st.expander("📄 Resumir pliego (IA)"):
+        _widget_resumen_pliego(
+            expediente,
+            url,
+            str(fila.get("titulo") or ""),
+            clave_prefix=f"tarjeta_{clave[:40]}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1172,10 +1256,12 @@ def sidebar_google_sheets() -> None:
     st.sidebar.caption("**Sync diaria** (Histórico + alertas Chat)")
     ultima = sheets_historico.get_config("ultima_ejecucion_hora", "—")
     st.sidebar.caption(f"Última sync: {ultima}")
-    if google_chat.is_configured():
-        st.sidebar.caption("Google Chat: configurado ✓")
+    if email_alert.is_configured():
+        st.sidebar.caption("Alertas: email al espacio Chat ✓")
+    elif google_chat.is_configured():
+        st.sidebar.caption("Alertas: webhook Chat ✓")
     else:
-        st.sidebar.caption("Google Chat: sin webhook (solo histórico)")
+        st.sidebar.caption("Alertas: configura email del espacio en Secrets")
 
     if st.sidebar.button(
         "🔄 Sync histórico ahora",
@@ -1435,6 +1521,171 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
         )
 
 
+def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
+    st.subheader("Análisis de pliegos con IA")
+    st.caption(
+        "Sube un pliego PDF y obtén un resumen estructurado (objeto, solvencia, criterios, plazos). "
+        "Usa Gemini (tier gratuito de Google AI Studio)."
+    )
+
+    if not pdf_summary.is_configured():
+        st.warning(
+            "Gemini no está configurado. Crea una API key gratuita en "
+            "[Google AI Studio](https://aistudio.google.com/apikey) y añádela en "
+            "Streamlit Secrets como `[gemini] api_key`."
+        )
+        return
+
+    opciones: list[tuple[str, str, str, str]] = []
+    if not oportunidades.empty:
+        for _, fila in oportunidades.iterrows():
+            exp = str(fila.get("expediente") or "—")
+            tit = str(fila.get("titulo") or "")[:70]
+            url = str(fila.get("url") or "")
+            etiqueta = f"{exp} — {tit}" if tit else exp
+            opciones.append((etiqueta, exp, url, str(fila.get("titulo") or "")))
+
+    etiquetas = ["— Sin vincular a expediente —"] + [o[0] for o in opciones]
+    seleccion = st.selectbox(
+        "Vincular a oportunidad del monitor (opcional)",
+        etiquetas,
+        index=0,
+    )
+
+    expediente, url, titulo = "", "", ""
+    if seleccion != etiquetas[0]:
+        for etiqueta, exp, enlace, tit in opciones:
+            if etiqueta == seleccion:
+                expediente, url, titulo = exp, enlace, tit
+                break
+    else:
+        expediente = st.text_input("ID expediente (opcional)", value="")
+        titulo = st.text_input("Título / referencia (opcional)", value="")
+
+    clave_prefix = "tab_pliego"
+    if expediente or url:
+        clave_prefix = f"tab_{_clave_expediente(expediente, url)[:30]}"
+        if sheets_store.is_configured():
+            previo = sheets_store.load_pliego_resumen(expediente, url)
+            if previo:
+                st.info("Ya hay un resumen guardado en Sheets para este expediente.")
+                with st.expander("Ver resumen guardado"):
+                    st.markdown(previo)
+
+    _widget_resumen_pliego(
+        expediente,
+        url,
+        titulo,
+        clave_prefix=clave_prefix,
+    )
+
+
+def pestana_seguimiento() -> None:
+    st.subheader("Seguimiento de expedientes")
+    st.caption(
+        "Pipeline del equipo sobre las oportunidades volcadas en Google Sheets. "
+        "Los cambios se guardan en las columnas Seguimiento y Notas."
+    )
+
+    if not sheets_store.is_configured():
+        st.info(
+            "Configura Google Sheets en Secrets para usar el seguimiento compartido. "
+            "Mientras tanto, exporta oportunidades con «Enviar a Google Sheets»."
+        )
+        return
+
+    if st.button("🔄 Recargar desde Sheets", width="content"):
+        st.session_state["seguimiento_cache"] = _cargar_seguimiento_cache()
+        st.rerun()
+
+    if not st.session_state.get("seguimiento_cache"):
+        st.session_state["seguimiento_cache"] = _cargar_seguimiento_cache()
+
+    filas = list(st.session_state["seguimiento_cache"].values())
+    if not filas:
+        st.info(
+            "No hay oportunidades en la pestaña Oportunidades. "
+            "Usa «Enviar a Google Sheets» desde la pestaña de oportunidades."
+        )
+        return
+
+    conteo: dict[str, int] = {opt: 0 for opt in sheets_store.SEGUIMIENTO_OPTIONS}
+    for fila in filas:
+        estado = fila.get("seguimiento") or sheets_store.DEFAULT_TRACKING
+        conteo[estado] = conteo.get(estado, 0) + 1
+
+    cols = st.columns(len(sheets_store.SEGUIMIENTO_OPTIONS))
+    for col, estado in zip(cols, sheets_store.SEGUIMIENTO_OPTIONS):
+        col.metric(estado, conteo.get(estado, 0))
+
+    filtro = st.multiselect(
+        "Filtrar por estado",
+        list(sheets_store.SEGUIMIENTO_OPTIONS),
+        default=list(sheets_store.SEGUIMIENTO_OPTIONS),
+    )
+
+    filas_filtradas = [f for f in filas if f.get("seguimiento") in filtro]
+    st.markdown(f"**{len(filas_filtradas)}** expedientes")
+
+    for fila in filas_filtradas:
+        clave = _clave_expediente(fila.get("expediente", ""), fila.get("url", ""))
+        titulo = fila.get("titulo") or "(Sin título)"
+        with st.container(border=True):
+            st.markdown(f"**{fila.get('expediente') or '—'}** · {titulo[:100]}")
+            meta = (
+                f"Relevancia: {fila.get('relevancia') or '—'} % · "
+                f"Categoría: {fila.get('categoria') or '—'} · "
+                f"Detectado: {fila.get('fecha_deteccion') or '—'}"
+            )
+            st.caption(meta)
+            if fila.get("url"):
+                st.link_button("PLACSP ↗", fila["url"])
+
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                nuevo_estado = st.selectbox(
+                    "Seguimiento",
+                    sheets_store.SEGUIMIENTO_OPTIONS,
+                    index=list(sheets_store.SEGUIMIENTO_OPTIONS).index(
+                        fila.get("seguimiento") or sheets_store.DEFAULT_TRACKING
+                    )
+                    if (fila.get("seguimiento") or sheets_store.DEFAULT_TRACKING)
+                    in sheets_store.SEGUIMIENTO_OPTIONS
+                    else 0,
+                    key=f"seg_{clave[:48]}",
+                )
+            with c2:
+                nuevas_notas = st.text_area(
+                    "Notas",
+                    value=fila.get("notas") or "",
+                    height=68,
+                    key=f"notas_{clave[:48]}",
+                )
+
+            if st.button("💾 Guardar", key=f"guardar_{clave[:48]}"):
+                try:
+                    sheets_store.update_opportunity_tracking(
+                        fila.get("expediente", ""),
+                        fila.get("url", ""),
+                        seguimiento=nuevo_estado,
+                        notas=nuevas_notas,
+                    )
+                    st.session_state["seguimiento_cache"][clave]["seguimiento"] = nuevo_estado
+                    st.session_state["seguimiento_cache"][clave]["notas"] = nuevas_notas
+                    st.toast("Seguimiento actualizado.", icon="✅")
+                except sheets_store.SheetsError as exc:
+                    st.error(str(exc))
+
+            if sheets_store.is_configured() and pdf_summary.is_configured():
+                with st.expander("Resumen de pliego"):
+                    _widget_resumen_pliego(
+                        fila.get("expediente", ""),
+                        fila.get("url", ""),
+                        titulo,
+                        clave_prefix=f"seg_{clave[:30]}",
+                    )
+
+
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
@@ -1577,15 +1828,34 @@ def main() -> None:
         datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)
     )
 
+    if sheets_store.is_configured() and not st.session_state.get("seguimiento_cache"):
+        st.session_state["seguimiento_cache"] = _cargar_seguimiento_cache()
+
     if puntuadas.empty:
         st.warning("No hay datos cargados. Pulsa «Actualizar datos ahora» en la barra lateral.")
-        return
 
-    pestana_1, pestana_2 = st.tabs(["🎯 Oportunidades GREFA", "🔎 Buscador General PLACSP"])
+    pestana_1, pestana_2, pestana_3, pestana_4 = st.tabs(
+        [
+            "🎯 Oportunidades GREFA",
+            "🔎 Buscador General PLACSP",
+            "📄 Análisis de pliegos",
+            "📋 Seguimiento",
+        ]
+    )
     with pestana_1:
-        pestana_oportunidades(oportunidades, vista)
+        if puntuadas.empty:
+            st.info("Carga licitaciones para ver oportunidades GREFA.")
+        else:
+            pestana_oportunidades(oportunidades, vista)
     with pestana_2:
-        pestana_buscador(puntuadas)
+        if puntuadas.empty:
+            st.info("Carga licitaciones para usar el buscador.")
+        else:
+            pestana_buscador(puntuadas)
+    with pestana_3:
+        pestana_analisis_pliegos(oportunidades)
+    with pestana_4:
+        pestana_seguimiento()
 
     st.divider()
     st.caption(

@@ -7,6 +7,7 @@ from typing import Any
 
 import requests
 
+from modules import alert_messages
 from modules.sheets_store import _secret
 
 LOGGER = logging.getLogger(__name__)
@@ -61,19 +62,6 @@ def format_nuevas_alta(
     app_url: str = "",
     total_alta: int = 0,
 ) -> str:
-    lineas = [
-        f"🦅 *GREFA · Licitaciones* — {len(nuevas)} nueva(s) oportunidad(es) *Alta*",
-    ]
-    if total_alta:
-        lineas.append(f"Total Alta en el monitor: {total_alta}")
-    lineas.append("")
-    for fila in nuevas[:8]:
-        titulo = str(fila.get("titulo") or "")[:90]
-        exp = str(fila.get("expediente") or "—")
-        rel = fila.get("relevancia", "")
-        lineas.append(f"• *{exp}* ({rel} %) — {titulo}")
-    if len(nuevas) > 8:
-        lineas.append(f"… y {len(nuevas) - 8} más.")
-    if app_url:
-        lineas.extend(["", f"<{app_url}|Abrir monitor GREFA>"])
-    return "\n".join(lineas)
+    return alert_messages.format_nuevas_alta_chat_webhook(
+        nuevas, app_url=app_url, total_alta=total_alta
+    )

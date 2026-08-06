@@ -35,6 +35,7 @@ SCOPES = (
 CPV_SHEET = "CPV"
 KEYWORDS_SHEET = "PalabrasClave"
 OPPORTUNITIES_SHEET = "Oportunidades"
+PLIEGOS_SHEET = "Pliegos"
 README_SHEET = "Instrucciones"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
@@ -56,6 +57,13 @@ OPPORTUNITY_HEADERS = [
     "Enlace",
     "Seguimiento",
     "Notas",
+]
+PLIEGO_HEADERS = [
+    "ID Expediente",
+    "Enlace",
+    "Título",
+    "Resumen",
+    "Fecha análisis",
 ]
 
 #: Valor inicial de la columna editable de seguimiento.
@@ -356,6 +364,153 @@ def spreadsheet_url(hoja_id: str | None = None) -> str:
     return f"https://docs.google.com/spreadsheets/d/{identificador}" if identificador else ""
 
 
+def load_opportunities_tracking(hoja_id: str | None = None) -> dict[str, dict[str, Any]]:
+    """Lee la pestaña Oportunidades indexada por clave expediente|enlace."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, OPPORTUNITIES_SHEET, OPPORTUNITY_HEADERS)
+        registros = pestana.get_all_records()
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error leyendo oportunidades de la hoja: {exc}") from exc
+
+    resultado: dict[str, dict[str, Any]] = {}
+    for indice, registro in enumerate(registros, start=2):
+        expediente = str(_campo(registro, "ID Expediente", "expediente")).strip()
+        enlace = str(_campo(registro, "Enlace", "enlace")).strip()
+        if not expediente and not enlace:
+            continue
+        clave = _clave(expediente, enlace)
+        resultado[clave] = {
+            "row": indice,
+            "expediente": expediente,
+            "titulo": str(_campo(registro, "Título / Objeto", "titulo")).strip(),
+            "seguimiento": str(
+                _campo(registro, "Seguimiento", default=DEFAULT_TRACKING) or DEFAULT_TRACKING
+            ).strip(),
+            "notas": str(_campo(registro, "Notas", "notas")).strip(),
+            "categoria": str(_campo(registro, "Categoría", "categoria")).strip(),
+            "relevancia": str(_campo(registro, "Relevancia (%)", "relevancia")).strip(),
+            "url": enlace,
+            "organo": str(_campo(registro, "Órgano de Contratación", "organo")).strip(),
+            "fecha_deteccion": str(_campo(registro, "Fecha detección", "fecha_deteccion")).strip(),
+        }
+    return resultado
+
+
+def update_opportunity_tracking(
+    expediente: str,
+    enlace: str,
+    *,
+    seguimiento: str,
+    notas: str,
+    hoja_id: str | None = None,
+) -> None:
+    """Actualiza Seguimiento y Notas de una fila existente."""
+    if seguimiento not in SEGUIMIENTO_OPTIONS:
+        raise SheetsError(f"Estado de seguimiento no válido: {seguimiento}")
+
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, OPPORTUNITIES_SHEET, OPPORTUNITY_HEADERS)
+        clave_objetivo = _clave(expediente, enlace)
+        fila_encontrada: int | None = None
+        for indice, registro in enumerate(pestana.get_all_records(), start=2):
+            clave = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave == clave_objetivo:
+                fila_encontrada = indice
+                break
+        if fila_encontrada is None:
+            raise SheetsError("Expediente no encontrado en la pestaña Oportunidades.")
+
+        pestana.update_cell(fila_encontrada, 14, seguimiento)
+        pestana.update_cell(fila_encontrada, 15, notas)
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error actualizando el seguimiento: {exc}") from exc
+
+
+def load_pliego_resumen(
+    expediente: str,
+    enlace: str,
+    hoja_id: str | None = None,
+) -> str | None:
+    """Devuelve el resumen guardado para un expediente, o None."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, PLIEGOS_SHEET, PLIEGO_HEADERS)
+        clave_objetivo = _clave(expediente, enlace)
+        for registro in pestana.get_all_records():
+            clave = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave == clave_objetivo:
+                resumen = str(_campo(registro, "Resumen", "resumen")).strip()
+                return resumen or None
+    except Exception as exc:
+        LOGGER.debug("No se pudo leer resumen de pliego: %s", exc)
+    return None
+
+
+def save_pliego_resumen(
+    expediente: str,
+    enlace: str,
+    titulo: str,
+    resumen: str,
+    hoja_id: str | None = None,
+) -> None:
+    """Guarda o actualiza el resumen IA en la pestaña Pliegos."""
+    if not resumen.strip():
+        raise SheetsError("El resumen está vacío.")
+
+    hoja = get_spreadsheet(hoja_id)
+    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    fila = [expediente, enlace, titulo, resumen.strip(), momento]
+    clave_objetivo = _clave(expediente, enlace)
+
+    try:
+        pestana = _worksheet(hoja, PLIEGOS_SHEET, PLIEGO_HEADERS)
+        registros = pestana.get_all_records()
+        for indice, registro in enumerate(registros, start=2):
+            clave = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave == clave_objetivo:
+                pestana.update(f"A{indice}:E{indice}", [fila], value_input_option="USER_ENTERED")
+                return
+        pestana.append_row(fila, value_input_option="USER_ENTERED")
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error guardando el resumen del pliego: {exc}") from exc
+
+
+def load_pliegos_index(hoja_id: str | None = None) -> dict[str, str]:
+    """Mapa clave expediente|enlace → fecha del último análisis."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, PLIEGOS_SHEET, PLIEGO_HEADERS)
+        indice: dict[str, str] = {}
+        for registro in pestana.get_all_records():
+            clave = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave.strip("|"):
+                indice[clave] = str(_campo(registro, "Fecha análisis", "fecha_analisis")).strip()
+        return indice
+    except Exception as exc:
+        LOGGER.debug("Pestaña Pliegos no disponible: %s", exc)
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Inicialización completa del libro
 # ---------------------------------------------------------------------------
@@ -543,9 +698,13 @@ def initialize_spreadsheet(
         [""],
         ["Pestaña Oportunidades"],
         ["- La aplicación añade filas nuevas (nunca duplica expediente+enlace)."],
-        ["- Edita solo las columnas «Seguimiento» y «Notas»."],
+        ["- Edita «Seguimiento» y «Notas» desde la app (pestaña Seguimiento) o en Drive."],
         ["- Seguimiento: Pendiente de revisar / En estudio / Presentada /"],
         ["  Descartada / Adjudicada a terceros / Ganada."],
+        [""],
+        ["Pestaña Pliegos"],
+        ["- Resúmenes IA de pliegos PDF generados desde la aplicación."],
+        ["- Una fila por expediente (se actualiza si se vuelve a analizar)."],
         [""],
         ["Pestaña Historico"],
         ["- Snapshot diario automático de oportunidades Alta y Media."],
@@ -556,8 +715,12 @@ def initialize_spreadsheet(
         ["- claves_alta_vistas: expedientes Alta ya notificados."],
         [""],
         ["Alertas Google Chat"],
-        ["- Configura google_chat_webhook en secrets.toml o GitHub Actions."],
-        ["- Avisa al espacio del equipo cuando aparecen oportunidades Alta nuevas."],
+        ["- Opción recomendada: email del espacio (Configuración → Email → Generar)."],
+        ["- Configura space_email + smtp_* en secrets.toml o Streamlit Cloud."],
+        ["- Alternativa: webhook si el admin lo permite."],
+        [""],
+        ["Resúmenes IA (Gemini)"],
+        ["- Configura [gemini] api_key en secrets.toml (Google AI Studio, tier gratuito)."],
         [""],
         ["URL de la hoja"],
         [spreadsheet_url(hoja_id)],
