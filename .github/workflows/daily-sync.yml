@@ -1,0 +1,30 @@
+name: Sync diaria GREFA
+
+on:
+  schedule:
+    # 07:00 hora Madrid (UTC+1 invierno / UTC+2 verano → 06:00 UTC aprox.)
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar sync diaria
+        env:
+          GREFA_SPREADSHEET_ID: ${{ secrets.GREFA_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          GREFA_APP_URL: ${{ vars.GREFA_APP_URL }}
+          GREFA_FEED_MAX_PAGES: "2"
+          GREFA_FEED_MAX_ENTRIES: "500"
+        run: python scripts/daily_sync.py

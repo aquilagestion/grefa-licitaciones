@@ -7,6 +7,8 @@ Pestañas principales:
   y gallego.
 * ``CPV`` / ``PalabrasClave`` → resumen de lo que está activo (para lectura rápida).
 * ``Oportunidades`` → volcado de licitaciones relevantes con seguimiento editable.
+* ``Historico`` → snapshot diario de oportunidades Alta/Media.
+* ``Config`` → estado de la sincronización diaria y claves Alta vistas.
 * ``Instrucciones`` → guía de uso.
 
 Si no hay hoja configurada, la aplicación sigue funcionando solo en memoria.
@@ -545,6 +547,18 @@ def initialize_spreadsheet(
         ["- Seguimiento: Pendiente de revisar / En estudio / Presentada /"],
         ["  Descartada / Adjudicada a terceros / Ganada."],
         [""],
+        ["Pestaña Historico"],
+        ["- Snapshot diario automático de oportunidades Alta y Media."],
+        ["- No editar manualmente salvo correcciones puntuales."],
+        [""],
+        ["Pestaña Config"],
+        ["- ultima_ejecucion: control interno de la sync diaria."],
+        ["- claves_alta_vistas: expedientes Alta ya notificados."],
+        [""],
+        ["Alertas Google Chat"],
+        ["- Configura google_chat_webhook en secrets.toml o GitHub Actions."],
+        ["- Avisa al espacio del equipo cuando aparecen oportunidades Alta nuevas."],
+        [""],
         ["URL de la hoja"],
         [spreadsheet_url(hoja_id)],
     ]
@@ -559,6 +573,8 @@ def initialize_spreadsheet(
     resumen_catalogos = initialize_catalogs(hoja_id)
 
     # Relee pestañas tras crear los catálogos.
+    from modules import sheets_historico as hist
+
     pestanas = {p.title: p for p in hoja.worksheets()}
     orden = [
         pestanas.get(README_SHEET),
@@ -567,6 +583,8 @@ def initialize_spreadsheet(
         pestanas.get(CPV_SHEET),
         pestanas.get(KEYWORDS_SHEET),
         pestanas.get(OPPORTUNITIES_SHEET),
+        hist._worksheet_historico(hoja_id),
+        hist._worksheet_config(hoja_id),
     ]
     try:
         hoja.reorder_worksheets([p for p in orden if p is not None])

@@ -34,7 +34,7 @@ from config.keyword_catalog import (  # noqa: E402
     active_keywords_grouped,
     default_term_catalog,
 )
-from modules import auth, grefa_filter, sheets_catalog, sheets_store  # noqa: E402
+from modules import auth, daily_sync, grefa_filter, google_chat, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
     timestamped_filename,
@@ -304,8 +304,8 @@ def init_state() -> None:
         "cpvs": active_cpvs(catalogo_cpv),
         "keywords": active_keywords_grouped(catalogo_terminos),
         "feed_url": PRIMARY_FEED_URL,
-        "max_pages": 3,
-        "max_entries": 1500,
+        "max_pages": 2,
+        "max_entries": 500,
         "refresh_token": 0,
         "datos": None,
         "origen_datos": "",
@@ -1102,7 +1102,14 @@ def sidebar_fuente_datos() -> None:
     with st.sidebar.expander("Parámetros de extracción"):
         st.text_input("URL del feed ATOM", key="feed_url")
         st.slider("Páginas del feed a recorrer", 1, 15, key="max_pages")
-        st.slider("Máximo de expedientes", 100, 5000, step=100, key="max_entries")
+        st.slider(
+            "Máximo de expedientes",
+            100,
+            5000,
+            step=100,
+            key="max_entries",
+            help="Por defecto 500, los más recientes según fecha de actualización.",
+        )
         st.caption(
             "Si la URL principal no responde, se prueban automáticamente las "
             "sindicaciones oficiales alternativas de contrataciondelestado.es."
@@ -1144,7 +1151,7 @@ def sidebar_google_sheets() -> None:
                 "2. Compártela como **Editor** con el correo de la cuenta de servicio.\n"
                 "3. Define `GREFA_SPREADSHEET_ID` con el ID de la hoja "
                 "(el tramo entre `/d/` y `/edit` de la URL).\n\n"
-                "La app crea sola las pestañas `CPV`, `PalabrasClave` y `Oportunidades`."
+                "La app crea sola las pestañas de criterios, Oportunidades, Histórico y Config."
             )
         return
 
@@ -1161,6 +1168,22 @@ def sidebar_google_sheets() -> None:
         if st.button("⬆️ Guardar", width="stretch", help="Volcar los criterios actuales a la hoja"):
             guardar_criterios_en_sheets()
             st.rerun()
+
+    st.sidebar.caption("**Sync diaria** (Histórico + alertas Chat)")
+    ultima = sheets_historico.get_config("ultima_ejecucion_hora", "—")
+    st.sidebar.caption(f"Última sync: {ultima}")
+    if google_chat.is_configured():
+        st.sidebar.caption("Google Chat: configurado ✓")
+    else:
+        st.sidebar.caption("Google Chat: sin webhook (solo histórico)")
+
+    if st.sidebar.button(
+        "🔄 Sync histórico ahora",
+        width="stretch",
+        help="Guarda snapshot Alta/Media y avisa nuevas Alta (1×/día automático)",
+    ):
+        st.session_state["_forzar_sync_diaria"] = True
+        st.rerun()
 
 
 def render_filtro_estado(df: pd.DataFrame) -> None:
@@ -1540,6 +1563,16 @@ def main() -> None:
     )
 
     resumen = grefa_filter.summarize(puntuadas)
+
+    if sheets_store.is_configured() and not puntuadas.empty:
+        forzar_sync = bool(st.session_state.pop("_forzar_sync_diaria", False))
+        sync = daily_sync.run_daily_sync(puntuadas, forzar=forzar_sync)
+        st.session_state["ultimo_sync"] = sync.resumen()
+        if sync.ejecutado or (forzar_sync and not sync.omitido):
+            st.toast(st.session_state["ultimo_sync"], icon="📗")
+        elif forzar_sync and sync.omitido:
+            st.toast(st.session_state["ultimo_sync"], icon="ℹ️")
+
     oportunidades, vista = panel_control_superior(
         datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)
     )

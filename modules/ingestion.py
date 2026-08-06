@@ -430,7 +430,8 @@ def fetch_placsp_licitaciones(
         feed_url: URL del feed ATOM a consumir. Si es ``None`` se usa el feed
             principal y, si falla, las sindicaciones oficiales alternativas.
         max_pages: nº máximo de páginas del feed a recorrer (paginación `rel=next`).
-        max_entries: corta la descarga al alcanzar ese nº de expedientes.
+        max_entries: corta al nº de expedientes más recientes (por fecha de
+            actualización) tras ordenar el lote descargado.
         session: sesión `requests` reutilizable.
         extra_urls: URLs adicionales a probar tras las predeterminadas.
 
@@ -462,8 +463,7 @@ def fetch_placsp_licitaciones(
                 nuevos, siguiente = _parse_feed_bytes(contenido)
                 registros.extend(nuevos)
                 paginas += 1
-                if max_entries and len(registros) >= max_entries:
-                    registros = registros[:max_entries]
+                if max_entries and len(registros) >= int(max_entries):
                     break
         except (requests.RequestException, IngestionError) as exc:
             errores.append(f"{url} -> {exc}")
@@ -473,6 +473,8 @@ def fetch_placsp_licitaciones(
         if registros:
             LOGGER.info("Descargados %s expedientes desde %s (%s páginas)", len(registros), url, paginas)
             df = build_dataframe(registros)
+            if max_entries is not None and len(df) > int(max_entries):
+                df = df.head(int(max_entries)).reset_index(drop=True)
             df.attrs["feed_url"] = url
             df.attrs["paginas"] = paginas
             return df
