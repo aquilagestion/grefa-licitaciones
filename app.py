@@ -870,8 +870,8 @@ def _widget_resumen_pliego(
 
     if url:
         st.caption(
-            "Se leen los documentos de la ficha PLACSP. Si el PDF «Pliego» es un índice "
-            "(p. ej. ADIF), se siguen los enlaces internos al PCAP y al PPT."
+            "Para **cualquier** licitación: ficha PLACSP → PDF/HTML «Pliego» → "
+            "enlaces internos al PCAP y PPT (si el feed CODICE no los trae ya)."
         )
         if docs_placsp:
             st.caption(
@@ -924,6 +924,7 @@ def _widget_resumen_pliego(
                         docs_placsp,
                         solo_tipos=("PCAP", "PPT", "PLIEGO"),
                         max_docs=6,
+                        url_detalle=url,
                     )
                     ok = [d for d in descargados if d.get("bytes")]
                     fallos = [d for d in descargados if d.get("error")]

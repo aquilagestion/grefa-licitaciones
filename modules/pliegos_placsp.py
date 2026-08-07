@@ -1,4 +1,12 @@
-"""Extracción y descarga de pliegos desde los documentos CODICE/PLACSP."""
+"""Extracción y descarga de pliegos desde PLACSP (todas las licitaciones).
+
+Estrategia uniforme:
+
+1. Documentos CODICE del feed (LegalDocumentReference / TechnicalDocumentReference).
+2. Ficha HTML de la licitación (fila «Pliego» + otros PDF).
+3. Si el PDF/HTML «Pliego» es un índice, seguir los hipervínculos internos
+   GetDocumentById hasta el PCAP y el PPT reales.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +25,6 @@ USER_AGENT = "GREFA-Licitaciones/1.0 (analisis de pliegos)"
 REQUEST_TIMEOUT = 90
 MAX_PDF_BYTES = 20 * 1024 * 1024
 
-# Prioridad para el análisis combinado.
 TIPOS_PRIORIDAD = (
     "PCAP",
     "PPT",
@@ -36,7 +43,7 @@ def _text(nodo) -> str:
 def _findall(element, local_name: str) -> list:
     if element is None:
         return []
-    return element.xpath(f".//*[local-name()=$n]", n=local_name)
+    return element.xpath(".//*[local-name()=$n]", n=local_name)
 
 
 def _find(element, local_name: str):
@@ -46,7 +53,7 @@ def _find(element, local_name: str):
 
 def _clasificar(nombre: str, etiqueta_xml: str = "") -> str:
     blob = f"{nombre} {etiqueta_xml}".lower()
-    # Evitar falsos positivos: «Acta administrativa» no es el PCAP.
+    # PCAP / cláusulas / condiciones particulares / PCJ / PCC / PCA
     if any(
         x in blob
         for x in (
@@ -57,11 +64,22 @@ def _clasificar(nombre: str, etiqueta_xml: str = "") -> str:
             "pliego de clausulas",
             "pliego de cláusulas",
             "condiciones particulares",
-            "pcap",
+            "pliego de condiciones particulares",
             "legaldocument",
+            "pcap",
+            "pcj_",
+            "pcj-",
+            "pcj.",
+            "pcc_",
+            "pcc-",
+            "pcc.",
+            "pca-",
+            "pca_",
+            "pca.",
         )
-    ):
+    ) or re.search(r"(?:^|[^a-z])pca(?:[^a-z]|$)", blob):
         return "PCAP"
+    # PPT / prescripciones / PCT
     if any(
         x in blob
         for x in (
@@ -70,15 +88,31 @@ def _clasificar(nombre: str, etiqueta_xml: str = "") -> str:
             "prescripciones tecnicas",
             "pliegodeprescripciones",
             "pliego de prescripciones",
-            "ppt",
             "technicaldocument",
+            "ppt",
+            "pct_",
+            "pct-",
+            "pct.",
         )
-    ):
+    ) or re.search(r"(?:^|[^a-z])ppt(?:[^a-z]|$)", blob):
         return "PPT"
     if "anexo" in blob or "memoria" in blob:
         return "ANEXO"
-    if blob.strip() in {"pliego", "pliego.pdf", "documento de pliegos", "documento de pliegos.pdf"}:
-        return "PLIEGO"
+    if re.search(r"\bpliego\b", blob) and not any(
+        x in blob for x in ("anuncio", "adjudic", "formaliz", "acta", "resoluci")
+    ):
+        # «Pliego.pdf» / fila Pliego → índice, no el PCAP/PPT en sí
+        if any(
+            x in blob
+            for x in (
+                "documento de pliegos",
+                "pliego.pdf",
+                " pliego ",
+            )
+        ) or blob.strip() in {"pliego", "pliego.pdf"}:
+            return "PLIEGO"
+        if blob.strip().startswith("pliego") and len(blob) < 40:
+            return "PLIEGO"
     return "OTRO"
 
 
@@ -96,7 +130,7 @@ def extract_documentos_from_carpeta(carpeta) -> list[dict[str, str]]:
             return
         vistos.add(url)
         nombre = (nombre or "documento.pdf").strip() or "documento.pdf"
-        docs.append({"nombre": nombre, "url": url, "tipo": tipo})
+        docs.append({"nombre": nombre, "url": url, "tipo": tipo, "origen": "codice"})
 
     for tag, tipo_fijo in (
         ("LegalDocumentReference", "PCAP"),
@@ -112,16 +146,13 @@ def extract_documentos_from_carpeta(carpeta) -> list[dict[str, str]]:
         uri = _text(_find(nodo, "URI"))
         añadir(nombre, uri, _clasificar(nombre, "GeneralDocument"))
 
-    # Otros DocumentReference genéricos con URI
     for nodo in _findall(carpeta, "DocumentReference"):
         nombre = _text(_find(nodo, "ID")) or _text(_find(nodo, "FileName"))
         uri = _text(_find(nodo, "URI"))
         if uri:
             añadir(nombre, uri, _clasificar(nombre, "DocumentReference"))
 
-    orden = {t: i for i, t in enumerate(TIPOS_PRIORIDAD)}
-    docs.sort(key=lambda d: (orden.get(d["tipo"], 99), d["nombre"].lower()))
-    return docs
+    return _ordenar(docs)
 
 
 def _absolutizar(href: str, base: str = "https://contrataciondelestado.es") -> str:
@@ -149,8 +180,28 @@ def _nombre_desde_content_disposition(cabecera: str) -> str:
     return ""
 
 
+def _ordenar(docs: list[dict[str, str]]) -> list[dict[str, str]]:
+    orden = {t: i for i, t in enumerate(TIPOS_PRIORIDAD)}
+    docs.sort(key=lambda d: (orden.get(d.get("tipo", ""), 99), d.get("nombre", "").lower()))
+    return docs
+
+
+def _tiene_tipo_real(docs: list[dict[str, str]], tipo: str) -> bool:
+    for d in docs:
+        if d.get("tipo") != tipo:
+            continue
+        # CODICE Legal/Technical son fiables aunque el nombre sea genérico
+        if d.get("origen") == "codice":
+            return True
+        if _clasificar(d.get("nombre", ""), d.get("etiqueta", "")) == tipo:
+            return True
+        if d.get("origen") == "indice_pliego":
+            return True
+    return False
+
+
 def extract_document_uris_from_pdf(pdf_bytes: bytes) -> list[str]:
-    """URIs GetDocumentById embebidas como hipervínculos en un PDF (índice de pliegos)."""
+    """URIs GetDocumentById embebidas como hipervínculos en un PDF índice."""
     if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
         return []
     try:
@@ -188,7 +239,6 @@ def extract_document_uris_from_pdf(pdf_bytes: bytes) -> list[str]:
         LOGGER.warning("No se pudieron leer enlaces del PDF índice: %s", exc)
         return []
 
-    # Deduplicar preservando orden
     vistos: set[str] = set()
     out: list[str] = []
     for uri in uris:
@@ -199,40 +249,59 @@ def extract_document_uris_from_pdf(pdf_bytes: bytes) -> list[str]:
     return out
 
 
+def extract_documentos_from_html(html_text: str) -> list[dict[str, str]]:
+    """Enlaces GetDocumentById con texto visible (versión HTML del pliego índice)."""
+    if not html_text:
+        return []
+    soup = BeautifulSoup(html_text, "lxml")
+    docs: list[dict[str, str]] = []
+    vistos: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = _absolutizar(a.get("href") or "")
+        if "GetDocumentByIdServlet" not in href or href in vistos:
+            continue
+        nombre = " ".join(a.get_text(" ", strip=True).split()) or "documento.pdf"
+        tipo = _clasificar(nombre)
+        if tipo not in {"PCAP", "PPT", "ANEXO"}:
+            continue
+        vistos.add(href)
+        if not nombre.lower().endswith(".pdf"):
+            nombre = f"{nombre}.pdf"
+        docs.append(
+            {
+                "nombre": nombre,
+                "url": href,
+                "tipo": tipo,
+                "origen": "indice_pliego_html",
+                "etiqueta": "Pliego",
+            }
+        )
+    return docs
+
+
+def _peek_nombre(url: str, session: requests.Session) -> str:
+    """Obtiene el filename del Content-Disposition sin guardar el cuerpo entero."""
+    try:
+        resp = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True)
+        resp.raise_for_status()
+        nombre = _nombre_desde_content_disposition(
+            resp.headers.get("content-disposition") or ""
+        )
+        resp.close()
+        return nombre
+    except Exception:
+        return ""
+
+
 def expandir_pliegos_desde_indice(
     documentos: list[dict[str, str]],
     *,
     session: requests.Session | None = None,
-    max_indices: int = 2,
+    max_indices: int = 3,
 ) -> list[dict[str, str]]:
-    """Si solo hay el PDF «Pliego» (índice), descarga PCAP/PPT enlazados dentro.
-
-    En muchas licitaciones (p. ej. ADIF) la ficha solo muestra «Pliego» y dentro
-    del PDF están los hipervínculos a PliegoDeClausulasAdministrativas y
-    PliegoDePrescripcionesTecnicas.
-    """
+    """Para cualquier licitación: si falta PCAP o PPT, abrir el «Pliego» índice."""
     base = [dict(d) for d in documentos if d.get("url")]
-
-    def _pcap_ppt_real(d: dict[str, str]) -> bool:
-        if d.get("origen") == "indice_pliego" and d.get("tipo") in {"PCAP", "PPT"}:
-            return True
-        n = f"{d.get('nombre', '')} {d.get('etiqueta', '')}".lower()
-        return any(
-            x in n
-            for x in (
-                "clausulasadministrativas",
-                "clausulas administrativas",
-                "cláusulas administrativas",
-                "prescripcionestecnicas",
-                "prescripciones tecnicas",
-                "prescripciones técnicas",
-                "condiciones particulares",
-            )
-        )
-
-    if any(_pcap_ppt_real(d) for d in base if d.get("tipo") == "PCAP") and any(
-        _pcap_ppt_real(d) for d in base if d.get("tipo") == "PPT"
-    ):
+    if _tiene_tipo_real(base, "PCAP") and _tiene_tipo_real(base, "PPT"):
         return base
 
     candidatos = [
@@ -241,16 +310,59 @@ def expandir_pliegos_desde_indice(
         if d.get("tipo") == "PLIEGO"
         or str(d.get("etiqueta", "")).strip().lower() == "pliego"
         or str(d.get("nombre", "")).strip().lower() in {"pliego", "pliego.pdf"}
+        or (
+            "pliego" in str(d.get("nombre", "")).lower()
+            and d.get("tipo") not in {"PCAP", "PPT"}
+            and "anuncio" not in str(d.get("nombre", "")).lower()
+        )
     ]
-    if not candidatos:
+    # También HTML del pliego si se guardó como url_html
+    html_idxs = [d for d in base if d.get("url_html")]
+    if not candidatos and not html_idxs:
         return base
 
     sesion = session or requests.Session()
     sesion.headers.setdefault("User-Agent", USER_AGENT)
     vistos = {d["url"] for d in base}
-    añadidos = 0
+
+    def _añadir_si_pcap_ppt(uri: str, nombre_hint: str = "", etiqueta: str = "Pliego") -> None:
+        nonlocal base
+        if uri in vistos:
+            return
+        nombre = nombre_hint or _peek_nombre(uri, sesion) or "documento.pdf"
+        tipo = _clasificar(nombre, etiqueta)
+        if tipo not in {"PCAP", "PPT"}:
+            return
+        if _tiene_tipo_real(base, tipo):
+            # Ya tenemos ese tipo; no duplicar basura
+            return
+        vistos.add(uri)
+        base.append(
+            {
+                "nombre": nombre,
+                "url": uri,
+                "tipo": tipo,
+                "origen": "indice_pliego",
+                "etiqueta": etiqueta,
+            }
+        )
 
     for indice in candidatos[:max_indices]:
+        # 1) Versión HTML del mismo documento (mejor etiquetado de enlaces)
+        url_html = (indice.get("url_html") or "").strip()
+        if url_html:
+            try:
+                rh = sesion.get(url_html, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+                rh.raise_for_status()
+                for doc in extract_documentos_from_html(rh.text):
+                    _añadir_si_pcap_ppt(doc["url"], doc.get("nombre", ""), "Pliego")
+            except Exception as exc:
+                LOGGER.debug("HTML índice no legible: %s", exc)
+
+        if _tiene_tipo_real(base, "PCAP") and _tiene_tipo_real(base, "PPT"):
+            break
+
+        # 2) PDF índice con anotaciones
         try:
             pdf, nombre_cd = download_pdf(indice["url"], session=sesion)
         except Exception as exc:
@@ -259,159 +371,99 @@ def expandir_pliegos_desde_indice(
         if nombre_cd:
             indice["nombre"] = nombre_cd
             tip = _clasificar(nombre_cd)
-            if tip in {"PCAP", "PPT"}:
+            if tip in {"PCAP", "PPT"} and not _tiene_tipo_real(base, tip):
                 indice["tipo"] = tip
-        uris = extract_document_uris_from_pdf(pdf)
-        for uri in uris:
-            if uri in vistos:
-                continue
-            # Resolver nombre/tipo con HEAD/GET ligero (Content-Disposition).
-            nombre = "documento.pdf"
-            try:
-                resp = sesion.get(uri, timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True)
-                resp.raise_for_status()
-                nombre = (
-                    _nombre_desde_content_disposition(
-                        resp.headers.get("content-disposition") or ""
-                    )
-                    or nombre
-                )
-                # Consumir poco: si es PDF pequeño lo podemos omitir aquí
-                resp.close()
-            except Exception:
-                pass
-            tipo = _clasificar(nombre)
-            if tipo == "OTRO":
-                # En el índice ADIF los dos GetDocument suelen ser PCAP/PPT.
-                tipo = "PPT" if añadidos == 0 and "tecnic" in nombre.lower() else (
-                    "PCAP" if "admin" in nombre.lower() or "clausul" in nombre.lower() else "OTRO"
-                )
-            if tipo not in {"PCAP", "PPT", "ANEXO"} and "GetDocument" in uri:
-                # Clasificar por nombre de fichero ya resuelto
-                if "prescripcion" in nombre.lower() or "tecnic" in nombre.lower():
-                    tipo = "PPT"
-                elif "clausul" in nombre.lower() or "admin" in nombre.lower():
-                    tipo = "PCAP"
-            doc = {
-                "nombre": nombre,
-                "url": uri,
-                "tipo": tipo if tipo != "OTRO" else _clasificar(nombre),
-                "origen": "indice_pliego",
-                "etiqueta": indice.get("etiqueta") or "Pliego",
-            }
-            if doc["tipo"] == "OTRO":
-                # Último recurso: orden típico PPT luego PCAP en el índice PLACSP
-                doc["tipo"] = "PPT" if añadidos == 0 else "PCAP"
-            base.append(doc)
-            vistos.add(uri)
-            añadidos += 1
+        for uri in extract_document_uris_from_pdf(pdf):
+            _añadir_si_pcap_ppt(uri, etiqueta=indice.get("etiqueta") or "Pliego")
 
-    orden = {t: i for i, t in enumerate(TIPOS_PRIORIDAD)}
-    base.sort(key=lambda d: (orden.get(d.get("tipo", ""), 99), d.get("nombre", "").lower()))
-    return base
+        if _tiene_tipo_real(base, "PCAP") and _tiene_tipo_real(base, "PPT"):
+            break
+
+    return _ordenar(base)
 
 
-def fetch_documentos_desde_detalle(url: str) -> list[dict[str, str]]:
-    """Lee la ficha de licitación PLACSP y extrae enlaces GetDocumentById (PDF).
-
-    Es la misma fuente que ve el usuario en «Anuncios y Documentos» / «Pliego».
-    Si el PDF «Pliego» es un índice, se expanden los enlaces internos a PCAP/PPT.
-    """
-    url = (url or "").strip()
-    if not url.startswith("http"):
-        return []
-
-    sesion = requests.Session()
-    sesion.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
-    respuesta = sesion.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    respuesta.raise_for_status()
-
-    soup = BeautifulSoup(respuesta.text, "lxml")
+def _parse_tabla_documentos(soup: BeautifulSoup) -> list[dict[str, str]]:
+    """Extrae PDF (y HTML asociado) de las tablas Anuncios/Documentos de la ficha."""
     docs: list[dict[str, str]] = []
-    vistos: set[str] = set()
-
+    # Agrupar por fila: varios formatos (html/xml/pdf) del mismo documento
     for tr in soup.find_all("tr"):
         celdas = tr.find_all(["td", "th"])
+        if not celdas:
+            continue
         etiqueta_fila = ""
         if len(celdas) >= 2:
             etiqueta_fila = " ".join(celdas[1].get_text(" ", strip=True).split())
-        elif celdas:
+        if not etiqueta_fila:
             etiqueta_fila = " ".join(celdas[0].get_text(" ", strip=True).split())
 
+        pdf_url = ""
+        html_url = ""
         for a in tr.find_all("a", href=True):
             href = _absolutizar(a.get("href") or "")
             if "GetDocumentByIdServlet" not in href and "FileSystem" not in href:
                 continue
             img = a.find("img")
             alt = ((img.get("alt") if img else "") or "").lower()
-            title = (a.get("title") or "").lower()
-            # Preferir PDF; descartar html/xml de la misma fila.
-            if any(x in alt or x in title for x in ("html", "xml")) and "pdf" not in alt:
+            if "html" in alt:
+                html_url = href
+            elif "xml" in alt:
                 continue
-            if href in vistos:
-                continue
-            vistos.add(href)
-            texto_a = " ".join(a.get_text(" ", strip=True).split())
-            nombre = texto_a or etiqueta_fila or "documento.pdf"
-            if not nombre.lower().endswith(".pdf"):
-                nombre = f"{nombre}.pdf"
-            tipo = _clasificar(f"{nombre} {etiqueta_fila}")
-            # Filas «Pliego» sin más detalle → índice que enlaza PCAP/PPT.
-            if tipo == "OTRO" and "pliego" in etiqueta_fila.lower():
-                tipo = "PLIEGO"
-            docs.append(
-                {
-                    "nombre": nombre,
-                    "url": href,
-                    "tipo": tipo,
-                    "origen": "ficha_placsp",
-                    "etiqueta": etiqueta_fila,
-                }
-            )
+            elif "pdf" in alt or href.lower().endswith(".pdf"):
+                pdf_url = href
+            elif not pdf_url and "GetDocument" in href:
+                # «Ver» u otros sin icono
+                texto = " ".join(a.get_text(" ", strip=True).split()).lower()
+                if texto in {"", "ver", "documento pdf"} or "pdf" in texto:
+                    pdf_url = href
 
-    # Enlaces «Ver» de Otros Documentos
-    for a in soup.find_all("a", href=True):
-        href = _absolutizar(a.get("href") or "")
-        if "GetDocumentByIdServlet" not in href or href in vistos:
+        if not pdf_url:
             continue
-        img = a.find("img")
-        alt = ((img.get("alt") if img else "") or "").lower()
-        texto_a = " ".join(a.get_text(" ", strip=True).split())
-        # Incluir PDF explícitos; «Ver» sin alt también (otros documentos)
-        if "html" in alt or "xml" in alt:
-            continue
-        if "pdf" not in alt and texto_a.lower() not in {"", "ver", "documento pdf"}:
-            if ".pdf" not in href.lower() and "GetDocument" not in href:
-                continue
-        vistos.add(href)
-        # Contexto de la fila
-        etiqueta = ""
-        padre = a.find_parent("tr")
-        if padre is not None:
-            celdas = padre.find_all(["td", "th"])
-            if celdas:
-                etiqueta = " ".join(celdas[0].get_text(" ", strip=True).split())
-                if len(celdas) > 1 and len(etiqueta) < 3:
-                    etiqueta = " ".join(celdas[1].get_text(" ", strip=True).split())
-        nombre = texto_a if texto_a and texto_a.lower() not in {"ver", "documento pdf"} else (
-            etiqueta or "documento.pdf"
-        )
+        nombre = etiqueta_fila or "documento.pdf"
         if not nombre.lower().endswith(".pdf"):
             nombre = f"{nombre}.pdf"
-        docs.append(
-            {
-                "nombre": nombre,
-                "url": href,
-                "tipo": _clasificar(f"{nombre} {etiqueta}"),
-                "origen": "ficha_placsp",
-                "etiqueta": etiqueta,
-            }
-        )
-
-    docs = expandir_pliegos_desde_indice(docs, session=sesion)
-    orden = {t: i for i, t in enumerate(TIPOS_PRIORIDAD)}
-    docs.sort(key=lambda d: (orden.get(d["tipo"], 99), d["nombre"].lower()))
+        tipo = _clasificar(nombre, etiqueta_fila)
+        if tipo == "OTRO" and etiqueta_fila.strip().lower() == "pliego":
+            tipo = "PLIEGO"
+        item = {
+            "nombre": nombre,
+            "url": pdf_url,
+            "tipo": tipo,
+            "origen": "ficha_placsp",
+            "etiqueta": etiqueta_fila,
+        }
+        if html_url:
+            item["url_html"] = html_url
+        docs.append(item)
     return docs
+
+
+def fetch_documentos_desde_detalle(url: str) -> list[dict[str, str]]:
+    """Lee la ficha PLACSP de cualquier licitación y resuelve PCAP/PPT."""
+    url = (url or "").strip()
+    if not url.startswith("http"):
+        return []
+
+    sesion = requests.Session()
+    sesion.headers.update(
+        {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    )
+    respuesta = sesion.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+    respuesta.raise_for_status()
+
+    soup = BeautifulSoup(respuesta.text, "lxml")
+    docs = _parse_tabla_documentos(soup)
+
+    # Deduplicar por URL
+    vistos: set[str] = set()
+    unicos: list[dict[str, str]] = []
+    for d in docs:
+        if d["url"] in vistos:
+            continue
+        vistos.add(d["url"])
+        unicos.append(d)
+
+    unicos = expandir_pliegos_desde_indice(unicos, session=sesion)
+    return _ordenar(unicos)
 
 
 def resolver_documentos(
@@ -420,11 +472,19 @@ def resolver_documentos(
     *,
     forzar_ficha: bool = False,
 ) -> list[dict[str, str]]:
-    """Combina feed CODICE + ficha HTML + enlaces internos del PDF «Pliego»."""
+    """Pipeline único para todas las licitaciones: feed → ficha → índice Pliego."""
     base = [dict(d) for d in (documentos or []) if d.get("url")]
-    tiene_pcap_ppt = any(d.get("tipo") in {"PCAP", "PPT"} for d in base)
-    necesita_ficha = forzar_ficha or not tiene_pcap_ppt
-    if necesita_ficha and url_detalle:
+    for d in base:
+        tip = _clasificar(d.get("nombre", ""), d.get("etiqueta", ""))
+        if tip in {"PCAP", "PPT", "PLIEGO"}:
+            d["tipo"] = tip
+        d.setdefault("origen", d.get("origen") or "feed")
+
+    falta_pcap = not _tiene_tipo_real(base, "PCAP")
+    falta_ppt = not _tiene_tipo_real(base, "PPT")
+    consultar_ficha = bool(url_detalle) and (forzar_ficha or falta_pcap or falta_ppt)
+
+    if consultar_ficha:
         try:
             from_ficha = fetch_documentos_desde_detalle(url_detalle)
         except Exception as exc:
@@ -432,15 +492,33 @@ def resolver_documentos(
             from_ficha = []
         vistos = {d["url"] for d in base}
         for doc in from_ficha:
-            if doc["url"] not in vistos:
+            if doc["url"] in vistos:
+                # Enriquecer con url_html si falta
+                if doc.get("url_html"):
+                    for b in base:
+                        if b["url"] == doc["url"] and not b.get("url_html"):
+                            b["url_html"] = doc["url_html"]
+                continue
+            tip = doc.get("tipo")
+            if tip in {"PCAP", "PPT"}:
+                if tip == "PCAP" and not falta_pcap:
+                    continue
+                if tip == "PPT" and not falta_ppt:
+                    continue
                 base.append(doc)
                 vistos.add(doc["url"])
-    elif not tiene_pcap_ppt:
+                if tip == "PCAP":
+                    falta_pcap = False
+                if tip == "PPT":
+                    falta_ppt = False
+            elif tip == "PLIEGO" or doc.get("url_html"):
+                base.append(doc)
+                vistos.add(doc["url"])
+
+    if not _tiene_tipo_real(base, "PCAP") or not _tiene_tipo_real(base, "PPT"):
         base = expandir_pliegos_desde_indice(base)
 
-    orden = {t: i for i, t in enumerate(TIPOS_PRIORIDAD)}
-    base.sort(key=lambda d: (orden.get(d.get("tipo", ""), 99), d.get("nombre", "").lower()))
-    return base
+    return _ordenar(base)
 
 
 def download_pdf(
@@ -470,16 +548,15 @@ def download_documentos(
     *,
     solo_tipos: tuple[str, ...] = ("PCAP", "PPT", "PLIEGO"),
     max_docs: int = 6,
+    url_detalle: str = "",
 ) -> list[dict[str, Any]]:
-    """Descarga PCAP/PPT (y Pliego índice solo si faltan) y devuelve bytes."""
-    # Expandir índice por si aún no se hizo.
-    documentos = expandir_pliegos_desde_indice(list(documentos or []))
+    """Resuelve (si hace falta) y descarga PCAP/PPT de cualquier licitación."""
+    documentos = resolver_documentos(documentos, url_detalle, forzar_ficha=bool(url_detalle))
     elegidos = [d for d in documentos if d.get("tipo") in solo_tipos]
-    # Si ya hay PCAP o PPT, no hace falta mandar el PDF índice a Gemini.
-    if any(d.get("tipo") in {"PCAP", "PPT"} for d in elegidos):
-        elegidos = [d for d in elegidos if d.get("tipo") in {"PCAP", "PPT", "ANEXO"}]
+    if _tiene_tipo_real(elegidos, "PCAP") or _tiene_tipo_real(elegidos, "PPT"):
+        elegidos = [d for d in elegidos if d.get("tipo") in {"PCAP", "PPT"}]
     if not elegidos:
-        elegidos = list(documentos)
+        elegidos = [d for d in documentos if d.get("tipo") == "PLIEGO"] or list(documentos)
     elegidos = elegidos[:max_docs]
 
     sesion = requests.Session()
@@ -489,9 +566,9 @@ def download_documentos(
         try:
             pdf, nombre_cd = download_pdf(doc["url"], session=sesion)
             nombre = nombre_cd or doc.get("nombre") or "documento.pdf"
-            tipo = doc.get("tipo") or _clasificar(nombre)
-            if tipo == "PLIEGO":
-                tipo = _clasificar(nombre) if _clasificar(nombre) != "OTRO" else "PLIEGO"
+            tipo = _clasificar(nombre) or doc.get("tipo") or "OTRO"
+            if tipo == "OTRO":
+                tipo = doc.get("tipo") or "OTRO"
             descargados.append(
                 {
                     "nombre": nombre,
