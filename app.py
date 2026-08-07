@@ -347,7 +347,11 @@ def init_state() -> None:
         "opp_vista": "Tarjetas",
         "pdf_resumenes": {},
         "seguimiento_cache": {},
+        "mis_licitaciones_cache": None,
         "pliego_expediente_sel": "",
+        "buscador_filtros_aplicados": None,
+        "hist_filtros_aplicados": None,
+        "pliego_consulta_aplicada": "",
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -619,6 +623,132 @@ def botones_exportacion(df: pd.DataFrame, sufijo: str, permitir_sheets: bool = F
 
 def _clave_expediente(expediente: str, url: str) -> str:
     return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
+
+
+def _cargar_mis_licitaciones_cache(*, forzar: bool = False) -> list[dict]:
+    if not sheets_store.is_configured():
+        return list(st.session_state.get("mis_licitaciones_local") or [])
+    if forzar or st.session_state.get("mis_licitaciones_cache") is None:
+        try:
+            st.session_state["mis_licitaciones_cache"] = sheets_store.load_mis_licitaciones()
+        except Exception as exc:
+            st.session_state["mis_licitaciones_cache"] = list(
+                st.session_state.get("mis_licitaciones_local") or []
+            )
+            st.caption(f"Mis Licitaciones (caché local): {exc}")
+    return list(st.session_state.get("mis_licitaciones_cache") or [])
+
+
+def _claves_interes() -> set[str]:
+    return {
+        _clave_expediente(f.get("expediente", ""), f.get("url", ""))
+        for f in _cargar_mis_licitaciones_cache()
+    }
+
+
+def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
+    get = fila.get if hasattr(fila, "get") else lambda k, d="": d
+    expediente = str(get("expediente", "") or "")
+    url = str(get("url", "") or "")
+    presupuesto = get("presupuesto_sin_iva", "")
+    if presupuesto is not None and str(presupuesto) not in {"", "nan", "None"}:
+        try:
+            presupuesto = f"{float(presupuesto):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            presupuesto = str(presupuesto)
+    else:
+        presupuesto = ""
+    payload = dict(
+        expediente=expediente,
+        enlace=url,
+        titulo=str(get("titulo", "") or ""),
+        organo=str(get("organo_contratacion", "") or get("organo", "") or ""),
+        presupuesto=presupuesto,
+        estado=str(get("estado", "") or ""),
+        relevancia=str(get("relevancia", "") or ""),
+        me_interesa=interesa,
+    )
+    if sheets_store.is_configured():
+        sheets_store.upsert_mi_licitacion(**payload)
+        st.session_state["mis_licitaciones_cache"] = None
+    else:
+        local = list(st.session_state.setdefault("mis_licitaciones_local", []))
+        clave = _clave_expediente(expediente, url)
+        local = [x for x in local if _clave_expediente(x.get("expediente", ""), x.get("url", "")) != clave]
+        if interesa:
+            local.append(
+                {
+                    "expediente": expediente,
+                    "url": url,
+                    "titulo": payload["titulo"],
+                    "organo": payload["organo"],
+                    "presupuesto": presupuesto,
+                    "estado": payload["estado"],
+                    "relevancia": payload["relevancia"],
+                    "me_interesa": "sí",
+                    "me_presento": "no",
+                    "fecha_interes": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "notas": "",
+                }
+            )
+        st.session_state["mis_licitaciones_local"] = local
+        st.session_state["mis_licitaciones_cache"] = local
+
+
+def _render_resultados_con_interes(
+    resultados: pd.DataFrame,
+    *,
+    clave_prefix: str,
+    max_filas: int = 40,
+) -> None:
+    """Lista resultados con checkbox «Me interesa» a la izquierda."""
+    if resultados.empty:
+        return
+    interes = _claves_interes()
+    st.caption(
+        "Marca ⭐ **Me interesa** para enviarla a la pestaña **Mis Licitaciones**."
+    )
+    for i, (_, fila) in enumerate(resultados.head(max_filas).iterrows()):
+        clave = _clave_expediente(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
+        marcado = clave in interes
+        c0, c1 = st.columns([0.08, 0.92])
+        with c0:
+            nuevo = st.checkbox(
+                "⭐",
+                value=marcado,
+                key=f"int_{clave_prefix}_{i}_{clave[:40]}",
+                help="Me interesa esta licitación",
+            )
+        with c1:
+            exp = fila.get("expediente") or "—"
+            tit = str(fila.get("titulo") or "")[:120]
+            organo = str(fila.get("organo_contratacion") or "")[:80]
+            meta = " · ".join(
+                x
+                for x in (
+                    str(fila.get("estado") or ""),
+                    organo,
+                    f"{fila.get('relevancia')} %" if pd.notna(fila.get("relevancia")) else "",
+                )
+                if x
+            )
+            st.markdown(f"**{exp}** — {tit}")
+            if meta:
+                st.caption(meta)
+            if fila.get("url"):
+                st.markdown(f"[PLACSP ↗]({fila.get('url')})")
+        if nuevo != marcado:
+            try:
+                _marcar_interes(fila, interesa=nuevo)
+                st.toast(
+                    "Añadida a Mis Licitaciones." if nuevo else "Quitada de Mis Licitaciones.",
+                    icon="⭐" if nuevo else "🗑️",
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+    if len(resultados) > max_filas:
+        st.caption(f"Mostrando {max_filas} de {len(resultados):,} (exporta para ver todas).")
 
 
 def _cargar_seguimiento_cache() -> dict:
@@ -2041,123 +2171,77 @@ def pestana_analisis_pliegos(
 
     st.markdown("**1. Localizar expediente**")
     base_busqueda, origen_corpus = _corpus_busqueda_pliegos(catalogo, oportunidades)
-    st.caption(f"Ámbito de búsqueda: {origen_corpus}.")
+    st.caption(f"Ámbito disponible: {origen_corpus}. La búsqueda solo se ejecuta al pulsar el botón.")
 
     col_q, col_btn = st.columns([3, 1])
     with col_q:
-        q_exp = st.text_input(
+        st.text_input(
             "Buscar por ID de expediente",
             placeholder="Ej. 3.25/20830.0288",
             key="pliego_buscar_exp",
         )
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        forzar_drive = st.button(
-            "Buscar en Drive",
-            key="pliego_buscar_drive",
-            help="Busca en Historico_2026, luego 2025, 2024… hasta encontrarlo.",
+        lanzar = st.button(
+            "🔍 Buscar",
+            key="pliego_btn_buscar",
+            help="Feed + Drive (2026 → 2025 → …) hasta encontrarlo.",
             type="primary",
             width="stretch",
         )
 
-    consulta = (q_exp or "").strip()
+    if lanzar:
+        st.session_state["pliego_consulta_aplicada"] = str(
+            st.session_state.get("pliego_buscar_exp") or ""
+        ).strip()
+        st.session_state.pop("pliego_hallados_drive", None)
+
+    consulta = str(st.session_state.get("pliego_consulta_aplicada") or "").strip()
     hallados = empty_dataframe()
+
     if consulta:
         hallados = _filtrar_por_expediente_seguro(base_busqueda, consulta)
-
-    # Reutilizar resultado Drive previo de esta misma consulta.
-    if consulta and hallados.empty:
         cache_drive = st.session_state.get("pliego_hallados_drive") or {}
-        if cache_drive.get("q") == consulta and cache_drive.get("rows"):
+        if hallados.empty and cache_drive.get("q") == consulta and cache_drive.get("rows"):
             hallados = pd.DataFrame(cache_drive["rows"])
-            año_hit = cache_drive.get("year")
-            if año_hit:
-                st.caption(f"Encontrado en Drive · Historico_{año_hit} (caché).")
-
-    # Si no está en el feed: Drive año a año (2026 → 2025 → …).
-    auto_drive = st.session_state.pop("pliego_auto_drive_q", None) == consulta
-    # Una sola pasada automática por consulta (p. ej. al pegar el ID completo).
-    auto_once = (
-        bool(consulta)
-        and hallados.empty
-        and len(consulta) >= 8
-        and sheets_store.is_configured()
-        and st.session_state.get("pliego_drive_tried_q") != consulta
-    )
-    if consulta and hallados.empty and sheets_store.is_configured() and (
-        forzar_drive or auto_drive or auto_once
-    ):
-        st.session_state["pliego_drive_tried_q"] = consulta
-        años = _anos_candidatos_desde_expediente(consulta)
-        with st.spinner(
-            f"Buscando «{consulta}» en Drive: {años[0]} → {años[1] if len(años) > 1 else '…'}…"
-        ):
-            try:
-                hallados, año_ok, probados = _buscar_expediente_drive_por_años(
-                    consulta, años
-                )
-                if not hallados.empty:
-                    st.session_state["pliego_hallados_drive"] = {
-                        "q": consulta,
-                        "year": año_ok,
-                        "rows": hallados.to_dict(orient="records"),
-                    }
-                    st.success(
-                        f"Encontrado en **Historico_{año_ok}** "
-                        f"(probado: {' → '.join(probados)})."
-                    )
-                else:
-                    st.caption(
-                        "Drive revisado sin coincidencias: "
-                        + " → ".join(probados)
-                        + "."
-                    )
-            except Exception as exc:
-                msg = str(exc)
-                if "429" in msg or "Quota" in msg.lower():
-                    st.warning(
-                        "Cuota de Google Sheets agotada. Espera 1 minuto y pulsa "
-                        "**Buscar en Drive**."
-                    )
-                else:
-                    st.warning(
-                        f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}"
-                    )
-
-    if consulta and hallados.empty:
-        años = _anos_candidatos_desde_expediente(consulta)
-        st.warning(
-            f"No hay coincidencias para «{consulta}» en {origen_corpus}. "
-            f"Pulsa **Buscar en Drive** (orden: {' → '.join(map(str, años[:4]))}…) "
-            "o sube los PDF a mano."
-        )
-        if sheets_store.is_configured():
-            if st.button(
-                f"🔎 Buscar en Drive ({años[0]} → {años[1] if len(años) > 1 else '…'})",
-                key="pliego_auto_drive_btn",
+            if cache_drive.get("year"):
+                st.caption(f"Encontrado en Drive · Historico_{cache_drive['year']} (caché).")
+        elif hallados.empty and sheets_store.is_configured() and lanzar:
+            años = _anos_candidatos_desde_expediente(consulta)
+            with st.spinner(
+                f"Buscando «{consulta}» en Drive: {años[0]} → …"
             ):
-                st.session_state["pliego_auto_drive_q"] = consulta
-                st.session_state.pop("pliego_drive_tried_q", None)
-                st.rerun()
-    elif consulta and not hallados.empty:
-        st.success(f"**{len(hallados)}** coincidencia(s) para «{consulta}».")
-        cols_vista = [
-            c
-            for c in (
-                "expediente",
-                "titulo",
-                "organo_contratacion",
-                "estado",
-                "url",
+                try:
+                    hallados, año_ok, probados = _buscar_expediente_drive_por_años(
+                        consulta, años
+                    )
+                    if not hallados.empty:
+                        st.session_state["pliego_hallados_drive"] = {
+                            "q": consulta,
+                            "year": año_ok,
+                            "rows": hallados.to_dict(orient="records"),
+                        }
+                        st.success(
+                            f"Encontrado en **Historico_{año_ok}** "
+                            f"(probado: {' → '.join(probados)})."
+                        )
+                    else:
+                        st.caption("Drive revisado: " + " → ".join(probados))
+                except Exception as exc:
+                    msg = str(exc)
+                    if "429" in msg or "quota" in msg.lower():
+                        st.warning("Cuota Sheets agotada. Espera 1 minuto y vuelve a buscar.")
+                    else:
+                        st.warning(f"Drive: {exc}")
+
+        if hallados.empty:
+            st.warning(
+                f"Sin coincidencias para «{consulta}». "
+                "Prueba de nuevo o sube los PDF a mano."
             )
-            if c in hallados.columns
-        ]
-        st.dataframe(
-            tabla_para_mostrar(hallados.head(20), cols_vista),
-            width="stretch",
-            hide_index=True,
-            height=min(280, 52 + 35 * min(len(hallados), 8)),
-        )
+        else:
+            st.success(f"**{len(hallados)}** coincidencia(s) para «{consulta}».")
+            _render_resultados_con_interes(hallados, clave_prefix="pliego", max_filas=15)
 
     opciones: list[tuple[str, str, str, str, str, list]] = []
     fuente_opciones = hallados if not hallados.empty else (
@@ -2256,6 +2340,137 @@ def pestana_analisis_pliegos(
         clave_prefix="tab_pliego",
         organo=organo,
     )
+
+
+def pestana_mis_licitaciones() -> None:
+    st.subheader("Mis Licitaciones")
+    st.caption(
+        "Licitaciones que marcaste con ⭐ **Me interesa** en las búsquedas. "
+        "Marca **Me presento** para preparar el checklist de documentación."
+    )
+
+    col_r, _ = st.columns([1, 3])
+    with col_r:
+        if st.button("🔄 Recargar", key="mis_lic_reload"):
+            st.session_state["mis_licitaciones_cache"] = None
+            st.rerun()
+
+    filas = _cargar_mis_licitaciones_cache(forzar=False)
+    if not filas:
+        st.info(
+            "Aún no hay licitaciones de interés. Busca en **Buscador** o **Histórico** "
+            "y marca la estrella ⭐ de las que te interesen."
+        )
+        return
+
+    presentarse = [f for f in filas if f.get("me_presento") == "sí"]
+    st.markdown(
+        f"**{len(filas)}** de interés · **{len(presentarse)}** con presentación prevista"
+    )
+
+    for idx, fila in enumerate(filas):
+        clave = _clave_expediente(fila.get("expediente", ""), fila.get("url", ""))
+        with st.container(border=True):
+            c_chk, c_body = st.columns([0.12, 0.88])
+            with c_chk:
+                presento = st.checkbox(
+                    "Me presento",
+                    value=fila.get("me_presento") == "sí",
+                    key=f"mis_presento_{idx}_{clave[:36]}",
+                    help="Voy a presentar oferta: activa el checklist de documentación",
+                )
+            with c_body:
+                st.markdown(
+                    f"**{fila.get('expediente') or '—'}** — "
+                    f"{str(fila.get('titulo') or '')[:120]}"
+                )
+                st.caption(
+                    " · ".join(
+                        x
+                        for x in (
+                            fila.get("organo") or "",
+                            fila.get("estado") or "",
+                            f"Relevancia {fila.get('relevancia')} %"
+                            if fila.get("relevancia")
+                            else "",
+                        )
+                        if x
+                    )
+                )
+                if fila.get("url"):
+                    st.markdown(f"[PLACSP ↗]({fila['url']})")
+
+            if presento != (fila.get("me_presento") == "sí"):
+                try:
+                    if sheets_store.is_configured():
+                        sheets_store.upsert_mi_licitacion(
+                            fila.get("expediente", ""),
+                            fila.get("url", ""),
+                            titulo=fila.get("titulo", ""),
+                            organo=fila.get("organo", ""),
+                            presupuesto=fila.get("presupuesto", ""),
+                            estado=fila.get("estado", ""),
+                            relevancia=fila.get("relevancia", ""),
+                            me_interesa=True,
+                            me_presento=presento,
+                        )
+                    else:
+                        fila["me_presento"] = "sí" if presento else "no"
+                        st.session_state["mis_licitaciones_local"] = filas
+                    st.session_state["mis_licitaciones_cache"] = None
+                    if presento:
+                        try:
+                            sheets_store.ensure_checklist(
+                                fila.get("expediente", ""),
+                                fila.get("url", ""),
+                                fila.get("titulo", ""),
+                            )
+                        except Exception:
+                            pass
+                    st.toast(
+                        "Marcada para presentar." if presento else "Presentación desmarcada.",
+                        icon="📝",
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+            if presento or fila.get("me_presento") == "sí":
+                with st.expander("Checklist de documentación", expanded=True):
+                    _widget_checklist_docs(
+                        fila.get("expediente", ""),
+                        fila.get("url", ""),
+                        fila.get("titulo", ""),
+                        clave_prefix=f"mismis_{idx}_{clave[:20]}",
+                        organo=str(fila.get("organo") or ""),
+                    )
+                if pdf_summary.is_configured():
+                    with st.expander("Análisis de pliegos (IA)"):
+                        _widget_resumen_pliego(
+                            fila.get("expediente", ""),
+                            fila.get("url", ""),
+                            fila.get("titulo", ""),
+                            clave_prefix=f"mispliego_{idx}_{clave[:20]}",
+                            documentos=[],
+                        )
+
+            if st.button("🗑️ Quitar de Mis Licitaciones", key=f"mis_del_{idx}_{clave[:36]}"):
+                try:
+                    _marcar_interes(
+                        {
+                            "expediente": fila.get("expediente", ""),
+                            "url": fila.get("url", ""),
+                            "titulo": fila.get("titulo", ""),
+                            "organo_contratacion": fila.get("organo", ""),
+                            "presupuesto_sin_iva": fila.get("presupuesto", ""),
+                            "estado": fila.get("estado", ""),
+                            "relevancia": fila.get("relevancia", ""),
+                        },
+                        interesa=False,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
 
 def pestana_seguimiento() -> None:
@@ -2520,12 +2735,6 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             incluir_parquet = False
             st.caption("Sin Parquet en este servidor (normal en Cloud).")
 
-    base = _combinar_fuentes_historico(
-        puntuadas if incluir_vivo else empty_dataframe(),
-        incluir_parquet=incluir_parquet,
-        drive_df=drive_df if incluir_drive else None,
-    )
-
     col_exp, col_nif = st.columns([2, 2])
     with col_exp:
         expediente = st.text_input(
@@ -2554,29 +2763,85 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 
     texto = st.text_input("Texto libre (opcional)", placeholder="Título, CPV…", key="hist_texto")
 
+    if st.button("🔍 Buscar", key="hist_btn_buscar", type="primary"):
+        st.session_state["hist_filtros_aplicados"] = {
+            "expediente": (expediente or "").strip(),
+            "nif": (nif or "").strip(),
+            "nif_ambito": {
+                "Ambos": "ambos",
+                "Órgano de contratación": "organo",
+                "Adjudicatario": "adjudicatario",
+            }.get(ambito_etiqueta, "ambos"),
+            "niveles_admin": list(niveles_admin),
+            "texto": (texto or "").strip(),
+            "incluir_vivo": incluir_vivo,
+            "incluir_parquet": incluir_parquet,
+            "incluir_drive": incluir_drive,
+            "years_key": st.session_state.get("hist_drive_years_key") or "",
+            "_probe_drive": True,
+        }
+
+    aplicados = st.session_state.get("hist_filtros_aplicados")
+    if not aplicados:
+        st.info("Elige filtros y pulsa **Buscar**. No se consulta hasta que pulses el botón.")
+        return
+
+    base = _combinar_fuentes_historico(
+        puntuadas if aplicados.get("incluir_vivo") else empty_dataframe(),
+        incluir_parquet=bool(aplicados.get("incluir_parquet")),
+        drive_df=drive_df if aplicados.get("incluir_drive") else None,
+    )
+
     resultados = grefa_filter.search_dataframe(
         base,
-        texto=texto,
-        nif=nif,
-        nif_ambito={
-            "Ambos": "ambos",
-            "Órgano de contratación": "organo",
-            "Adjudicatario": "adjudicatario",
-        }.get(ambito_etiqueta, "ambos"),
-        expediente=expediente,
-        niveles_admin=niveles_admin,
+        texto=str(aplicados.get("texto") or ""),
+        nif=str(aplicados.get("nif") or ""),
+        nif_ambito=str(aplicados.get("nif_ambito") or "ambos"),
+        expediente=str(aplicados.get("expediente") or ""),
+        niveles_admin=aplicados.get("niveles_admin"),
     )
+
+    # Si buscan por expediente y no está en la base cargada → Drive año a año (solo al pulsar Buscar).
+    q_exp = str(aplicados.get("expediente") or "").strip()
+    if (
+        q_exp
+        and resultados.empty
+        and sheets_store.is_configured()
+        and aplicados.pop("_probe_drive", False)
+    ):
+        st.session_state["hist_filtros_aplicados"] = aplicados
+        años = _anos_candidatos_desde_expediente(q_exp)
+        with st.spinner(f"Buscando expediente en Drive ({años[0]} → …)…"):
+            try:
+                hallados, año_ok, probados = _buscar_expediente_drive_por_años(q_exp, años)
+                if not hallados.empty:
+                    resultados = hallados
+                    st.session_state["hist_resultados_drive"] = {
+                        "q": q_exp,
+                        "rows": hallados.to_dict(orient="records"),
+                    }
+                    st.success(
+                        f"Encontrado en Historico_{año_ok} (probado: {' → '.join(probados)})."
+                    )
+                else:
+                    st.caption("Drive revisado: " + " → ".join(probados))
+            except Exception as exc:
+                st.warning(f"Drive: {exc}")
+    elif q_exp and resultados.empty:
+        cache = st.session_state.get("hist_resultados_drive") or {}
+        if cache.get("q") == q_exp and cache.get("rows"):
+            resultados = pd.DataFrame(cache["rows"])
 
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
         st.warning(
-            "Sin coincidencias. Pulsa **Cargar histórico de Drive** (elige el año correcto, "
-            "p. ej. 2026 para `3.25/…`). El histórico solo incluye Alta/Media GREFA. "
-            "Si ves error 429, espera un minuto y recarga solo 1 año."
+            "Sin coincidencias. Carga Drive (p. ej. 2026), revisa el ID o espera si hay cuota 429. "
+            "El histórico solo incluye Alta/Media GREFA."
         )
         return
 
     botones_exportacion(resultados, "historico_nif")
+    _render_resultados_con_interes(resultados, clave_prefix="hist")
 
     columnas = [
         "expediente", "titulo", "organo_contratacion", "nivel_administracion", "nif_organo",
@@ -2587,20 +2852,21 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
         columnas = ["relevancia", "categoria"] + columnas
 
     vista_tabla = tabla_para_mostrar(resultados, [c for c in columnas if c in resultados.columns])
-    st.dataframe(
-        vista_tabla,
-        width="stretch",
-        hide_index=True,
-        column_config=CONFIG_COLUMNAS,
-        height=620,
-    )
+    with st.expander("Tabla completa", expanded=False):
+        st.dataframe(
+            vista_tabla,
+            width="stretch",
+            hide_index=True,
+            column_config=CONFIG_COLUMNAS,
+            height=420,
+        )
 
 
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
-        "Filtros adicionales sobre el listado ya filtrado por la búsqueda libre "
-        "y las fechas de la barra superior."
+        "Configura los filtros y pulsa **Buscar**. "
+        "Si indicas un ID de expediente, también se consulta el histórico Drive (2026→2025…)."
     )
 
     importes = df["presupuesto_sin_iva"].dropna()
@@ -2609,61 +2875,113 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
     col_exp, col_admin = st.columns([2, 2])
     with col_exp:
-        expediente = st.text_input(
+        st.text_input(
             "ID Expediente",
             placeholder="Búsqueda directa por código de licitación",
             key="buscador_exp",
             help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
         )
     with col_admin:
-        niveles_admin = st.multiselect(
+        st.multiselect(
             "Ámbito del órgano",
             [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
             default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
             key="buscador_niveles",
         )
 
-    ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
+    st.multiselect("Ubicación / Provincia", ubicaciones_disponibles, key="buscador_ubicaciones")
 
     estados_globales = st.session_state.get("estados_aplicados") or None
     if estados_globales:
-        st.caption(f"Estados aplicados: {', '.join(estados_globales)}")
+        st.caption(f"Estados aplicados (barra superior): {', '.join(estados_globales)}")
 
     busqueda = (st.session_state.get("busqueda_aplicada") or "").strip()
     if busqueda:
         st.caption(f"Búsqueda libre activa: «{busqueda}»")
 
     if tope > 0:
-        rango = st.slider(
+        st.slider(
             "Rango de presupuesto sin IVA (€)",
             min_value=0.0,
             max_value=tope,
             value=(0.0, tope),
             step=max(tope / 200, 1.0),
             format="%.0f",
+            key="buscador_rango",
         )
-        incluir_sin_importe = st.checkbox("Incluir licitaciones sin presupuesto publicado", value=True)
+        st.checkbox(
+            "Incluir licitaciones sin presupuesto publicado",
+            value=True,
+            key="buscador_sin_importe",
+        )
     else:
-        rango = (None, None)
-        incluir_sin_importe = True
         st.caption("El feed descargado no incluye importes; el filtro de presupuesto está desactivado.")
+
+    if st.button("🔍 Buscar", key="buscador_btn_buscar", type="primary"):
+        rango = st.session_state.get("buscador_rango") or (None, None)
+        st.session_state["buscador_filtros_aplicados"] = {
+            "expediente": str(st.session_state.get("buscador_exp") or "").strip(),
+            "niveles_admin": list(st.session_state.get("buscador_niveles") or []),
+            "ubicaciones": list(st.session_state.get("buscador_ubicaciones") or []),
+            "presupuesto_min": rango[0] if isinstance(rango, (list, tuple)) else None,
+            "presupuesto_max": rango[1] if isinstance(rango, (list, tuple)) else None,
+            "incluir_sin_presupuesto": bool(
+                st.session_state.get("buscador_sin_importe", True)
+            ),
+            "_probe_drive": True,
+        }
+
+    aplicados = st.session_state.get("buscador_filtros_aplicados")
+    if not aplicados:
+        st.info("Configura filtros y pulsa **Buscar**.")
+        return
 
     resultados = grefa_filter.search_dataframe(
         df,
-        presupuesto_min=rango[0],
-        presupuesto_max=rango[1],
-        ubicaciones=ubicaciones,
-        incluir_sin_presupuesto=incluir_sin_importe,
-        expediente=expediente,
-        niveles_admin=niveles_admin,
+        presupuesto_min=aplicados.get("presupuesto_min"),
+        presupuesto_max=aplicados.get("presupuesto_max"),
+        ubicaciones=aplicados.get("ubicaciones") or None,
+        incluir_sin_presupuesto=bool(aplicados.get("incluir_sin_presupuesto", True)),
+        expediente=str(aplicados.get("expediente") or ""),
+        niveles_admin=aplicados.get("niveles_admin"),
     )
+
+    q_exp = str(aplicados.get("expediente") or "").strip()
+    if (
+        q_exp
+        and resultados.empty
+        and sheets_store.is_configured()
+        and aplicados.pop("_probe_drive", False)
+    ):
+        st.session_state["buscador_filtros_aplicados"] = aplicados
+        años = _anos_candidatos_desde_expediente(q_exp)
+        with st.spinner(f"No está en el feed vivo; buscando en Drive ({años[0]} → …)…"):
+            try:
+                hallados, año_ok, probados = _buscar_expediente_drive_por_años(q_exp, años)
+                if not hallados.empty:
+                    resultados = hallados
+                    st.session_state["busc_resultados_drive"] = {
+                        "q": q_exp,
+                        "rows": hallados.to_dict(orient="records"),
+                    }
+                    st.success(
+                        f"Encontrado en Historico_{año_ok} (probado: {' → '.join(probados)})."
+                    )
+            except Exception as exc:
+                st.warning(f"Drive: {exc}")
+    elif q_exp and resultados.empty:
+        cache = st.session_state.get("busc_resultados_drive") or {}
+        if cache.get("q") == q_exp and cache.get("rows"):
+            resultados = pd.DataFrame(cache["rows"])
 
     st.markdown(f"**{len(resultados)}** licitaciones coinciden con los filtros.")
     botones_exportacion(resultados, "busqueda")
 
     if resultados.empty:
-        st.info("Sin coincidencias. Prueba con otros términos o amplía el rango de presupuesto.")
+        st.info("Sin coincidencias. Prueba otro ID, carga más páginas del feed o Drive.")
         return
+
+    _render_resultados_con_interes(resultados, clave_prefix="busc")
 
     vista_tabla = tabla_para_mostrar(
         resultados,
@@ -2673,13 +2991,14 @@ def pestana_buscador(df: pd.DataFrame) -> None:
             "fecha_actualizacion", "fecha_limite", "estado", "url",
         ],
     )
-    st.dataframe(
-        vista_tabla,
-        width="stretch",
-        hide_index=True,
-        column_config=CONFIG_COLUMNAS,
-        height=620,
-    )
+    with st.expander("Tabla completa", expanded=False):
+        st.dataframe(
+            vista_tabla,
+            width="stretch",
+            hide_index=True,
+            column_config=CONFIG_COLUMNAS,
+            height=420,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2764,11 +3083,12 @@ def main() -> None:
     if puntuadas.empty:
         st.warning("No hay datos cargados. Pulsa «Actualizar datos ahora» en la barra lateral.")
 
-    pestana_1, pestana_2, pestana_3, pestana_4, pestana_5 = st.tabs(
+    pestana_1, pestana_2, pestana_3, pestana_4, pestana_5, pestana_6 = st.tabs(
         [
             "🎯 Oportunidades GREFA",
             "🔎 Buscador General PLACSP",
             "🗂️ Histórico y NIF",
+            "⭐ Mis Licitaciones",
             "📄 Análisis de pliegos",
             "📋 Seguimiento",
         ]
@@ -2789,8 +3109,10 @@ def main() -> None:
         except Exception as exc:
             st.error(f"Histórico no disponible ahora: {type(exc).__name__}")
     with pestana_4:
-        pestana_analisis_pliegos(oportunidades, catalogo=puntuadas_todas)
+        pestana_mis_licitaciones()
     with pestana_5:
+        pestana_analisis_pliegos(oportunidades, catalogo=puntuadas_todas)
+    with pestana_6:
         pestana_seguimiento()
 
     st.divider()

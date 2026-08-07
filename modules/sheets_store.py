@@ -39,6 +39,7 @@ KEYWORDS_SHEET = "PalabrasClave"
 OPPORTUNITIES_SHEET = "Oportunidades"
 PLIEGOS_SHEET = "Pliegos"
 CHECKLIST_SHEET = "ChecklistDocs"
+MIS_LICITACIONES_SHEET = "MisLicitaciones"
 README_SHEET = "Instrucciones"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
@@ -77,6 +78,19 @@ CHECKLIST_HEADERS = [
     "Notas",
     "Enlace Drive",
     "Fecha actualización",
+]
+MIS_LICITACIONES_HEADERS = [
+    "ID Expediente",
+    "Enlace",
+    "Título",
+    "Órgano de Contratación",
+    "Presupuesto sin IVA",
+    "Estado PLACSP",
+    "Relevancia (%)",
+    "Me interesa",
+    "Me presento",
+    "Fecha interés",
+    "Notas",
 ]
 
 #: Valor inicial de la columna editable de seguimiento.
@@ -735,6 +749,149 @@ def ensure_checklist(
     return load_checklist(expediente, enlace, hoja_id=hoja_id)
 
 
+def load_mis_licitaciones(hoja_id: str | None = None) -> list[dict[str, str]]:
+    """Licitaciones marcadas como de interés por el equipo."""
+    try:
+        hoja = get_spreadsheet(hoja_id)
+        pestana = _worksheet(hoja, MIS_LICITACIONES_SHEET, MIS_LICITACIONES_HEADERS)
+        filas: list[dict[str, str]] = []
+        for i, registro in enumerate(pestana.get_all_records(), start=2):
+            expediente = str(_campo(registro, "ID Expediente", "expediente")).strip()
+            enlace = str(_campo(registro, "Enlace", "enlace", "url")).strip()
+            if not expediente and not enlace:
+                continue
+            interesa = str(_campo(registro, "Me interesa", "me_interesa")).strip().lower()
+            if interesa in {"no", "false", "0", "n"}:
+                continue
+            filas.append(
+                {
+                    "expediente": expediente,
+                    "url": enlace,
+                    "titulo": str(_campo(registro, "Título", "titulo")),
+                    "organo": str(
+                        _campo(registro, "Órgano de Contratación", "organo", "organo_contratacion")
+                    ),
+                    "presupuesto": str(
+                        _campo(registro, "Presupuesto sin IVA", "presupuesto")
+                    ),
+                    "estado": str(_campo(registro, "Estado PLACSP", "estado")),
+                    "relevancia": str(_campo(registro, "Relevancia (%)", "relevancia")),
+                    "me_interesa": "sí",
+                    "me_presento": (
+                        "sí"
+                        if str(_campo(registro, "Me presento", "me_presento")).strip().lower()
+                        in {"sí", "si", "yes", "true", "1"}
+                        else "no"
+                    ),
+                    "fecha_interes": str(_campo(registro, "Fecha interés", "fecha_interes")),
+                    "notas": str(_campo(registro, "Notas", "notas")),
+                    "_row": str(i),
+                }
+            )
+        return filas
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"No se pudo leer MisLicitaciones: {_mensaje_api_sheets(exc)}"
+        ) from exc
+
+
+def upsert_mi_licitacion(
+    expediente: str,
+    enlace: str,
+    *,
+    titulo: str = "",
+    organo: str = "",
+    presupuesto: str = "",
+    estado: str = "",
+    relevancia: str = "",
+    me_interesa: bool = True,
+    me_presento: bool | None = None,
+    notas: str | None = None,
+    hoja_id: str | None = None,
+) -> None:
+    """Añade o actualiza una licitación en MisLicitaciones."""
+    hoja = get_spreadsheet(hoja_id)
+    pestana = _worksheet(hoja, MIS_LICITACIONES_SHEET, MIS_LICITACIONES_HEADERS)
+    clave_objetivo = _clave(expediente, enlace)
+    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    try:
+        registros = pestana.get_all_records()
+        for indice, registro in enumerate(registros, start=2):
+            if _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace", "url"),
+            ) != clave_objetivo:
+                continue
+            presento_actual = str(_campo(registro, "Me presento", "me_presento")).strip()
+            notas_actual = str(_campo(registro, "Notas", "notas"))
+            fecha_actual = str(_campo(registro, "Fecha interés", "fecha_interes")) or momento
+            presento = (
+                ("sí" if me_presento else "no")
+                if me_presento is not None
+                else (
+                    "sí"
+                    if presento_actual.lower() in {"sí", "si", "yes", "true", "1"}
+                    else "no"
+                )
+            )
+            fila = [
+                expediente,
+                enlace,
+                titulo or str(_campo(registro, "Título", "titulo")),
+                organo
+                or str(_campo(registro, "Órgano de Contratación", "organo")),
+                presupuesto
+                or str(_campo(registro, "Presupuesto sin IVA", "presupuesto")),
+                estado or str(_campo(registro, "Estado PLACSP", "estado")),
+                relevancia or str(_campo(registro, "Relevancia (%)", "relevancia")),
+                "sí" if me_interesa else "no",
+                presento,
+                fecha_actual if me_interesa else "",
+                notas if notas is not None else notas_actual,
+            ]
+            pestana.update(
+                f"A{indice}:K{indice}",
+                [fila],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        if not me_interesa:
+            return
+        fila = [
+            expediente,
+            enlace,
+            titulo,
+            organo,
+            presupuesto,
+            estado,
+            relevancia,
+            "sí",
+            "sí" if me_presento else "no",
+            momento,
+            notas or "",
+        ]
+        pestana.append_row(fila, value_input_option="USER_ENTERED")
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"Error guardando MisLicitaciones: {_mensaje_api_sheets(exc)}"
+        ) from exc
+
+
+def claves_mis_licitaciones(hoja_id: str | None = None) -> set[str]:
+    """Conjunto de claves expediente|url marcadas como interés."""
+    try:
+        return {
+            _clave(f.get("expediente", ""), f.get("url", ""))
+            for f in load_mis_licitaciones(hoja_id=hoja_id)
+        }
+    except Exception:
+        return set()
+
+
 def upsert_checklist_item(
     expediente: str,
     enlace: str,
@@ -886,6 +1043,7 @@ def _ensure_named_sheets(hoja) -> dict[str, Any]:
         (OPPORTUNITIES_SHEET, OPPORTUNITY_HEADERS, 2000),
         (PLIEGOS_SHEET, PLIEGO_HEADERS, 500),
         (CHECKLIST_SHEET, CHECKLIST_HEADERS, 2000),
+        (MIS_LICITACIONES_SHEET, MIS_LICITACIONES_HEADERS, 1000),
         (README_SHEET, ["Instrucciones"], 40),
     ):
         if titulo in existentes:
