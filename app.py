@@ -348,13 +348,17 @@ def _sincronizar_activos_desde_catalogos() -> None:
 init_state()
 
 
-def _recargar_grefa_filter() -> None:
-    """Fuerza la recarga del módulo (Streamlit Cloud puede cachear código antiguo)."""
-    import modules.grefa_filter as modulo
-
-    importlib.reload(modulo)
-    sys.modules["modules.grefa_filter"] = modulo
-    globals()["grefa_filter"] = modulo
+def _recargar_modulos_criticos() -> None:
+    """Fuerza la recarga de módulos (Streamlit Cloud puede cachear código antiguo)."""
+    for nombre in ("modules.grefa_filter", "modules.sheets_historico", "modules.admin_ambito"):
+        try:
+            modulo = importlib.import_module(nombre)
+            modulo = importlib.reload(modulo)
+            sys.modules[nombre] = modulo
+            corto = nombre.rsplit(".", 1)[-1]
+            globals()[corto] = modulo
+        except Exception:
+            continue
 
 
 def aplicar_filtros_globales(
@@ -1690,10 +1694,13 @@ def pestana_seguimiento() -> None:
                     )
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def _listar_anos_historico_cached(spreadsheet_id: str) -> list[int]:
     _ = spreadsheet_id
-    return sheets_historico.list_historico_years()
+    try:
+        return list(sheets_historico.list_historico_years())
+    except Exception:
+        return []
 
 
 @st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
@@ -1703,10 +1710,14 @@ def _cargar_historico_drive_cached(
     """Cache de servidor por hoja + años seleccionados."""
     _ = spreadsheet_id
     years = [int(y) for y in years_key.split(",") if y.strip().isdigit()] or None
-    return sheets_historico.load_historico_dataframe(
-        years=years,
-        include_legacy=not bool(years),
-    )
+    try:
+        return sheets_historico.load_historico_dataframe(
+            years=years,
+            include_legacy=not bool(years),
+        )
+    except TypeError:
+        # Caché de módulo antiguo en Cloud: leer legado sin kwargs nuevos.
+        return sheets_historico.load_historico_dataframe()
 
 
 def _combinar_fuentes_historico(
@@ -1995,9 +2006,14 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 # Aplicación
 # ---------------------------------------------------------------------------
 def main() -> None:
-    if not st.session_state.get("_grefa_filter_reloaded"):
-        _recargar_grefa_filter()
-        st.session_state["_grefa_filter_reloaded"] = True
+    if not st.session_state.get("_modulos_criticos_reloaded"):
+        _recargar_modulos_criticos()
+        st.session_state["_modulos_criticos_reloaded"] = True
+        try:
+            _listar_anos_historico_cached.clear()
+            _cargar_historico_drive_cached.clear()
+        except Exception:
+            pass
 
     usuario = auth.requiere_acceso()
 
