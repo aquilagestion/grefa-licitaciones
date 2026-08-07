@@ -4,7 +4,7 @@
 Solo vuelca licitaciones Alta/Media según scoring GREFA (incluye NIF órgano/adjudicatario).
 
 Ejemplos:
-  python scripts/import_historico_to_sheets.py --from-year 2021 --to-year 2025
+  python scripts/import_historico_to_sheets.py --from-year 2021 --to-year 2026
   python scripts/import_historico_to_sheets.py --year 2024 --replace
   python scripts/import_historico_to_sheets.py --year 2025 --skip-download
 """
@@ -110,7 +110,7 @@ def _procesar_zip(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Importar histórico PLACSP a Historico_YYYY")
     parser.add_argument("--from-year", type=int, default=2021)
-    parser.add_argument("--to-year", type=int, default=2025)
+    parser.add_argument("--to-year", type=int, default=2026)
     parser.add_argument("--year", type=int, action="append")
     parser.add_argument("--zip", type=str)
     parser.add_argument("--max-files", type=int, default=None)

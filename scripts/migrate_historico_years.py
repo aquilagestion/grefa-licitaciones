@@ -3,7 +3,7 @@
 
 Ejemplos:
   python scripts/migrate_historico_years.py
-  python scripts/migrate_historico_years.py --reimport --from-year 2021 --to-year 2025
+  python scripts/migrate_historico_years.py --reimport --from-year 2021 --to-year 2026
   python scripts/migrate_historico_years.py --reimport --year 2024 --skip-download
 """
 
@@ -118,7 +118,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Migrar histórico a pestañas por año")
     parser.add_argument("--reimport", action="store_true", help="Reimportar ZIPs a Historico_YYYY")
     parser.add_argument("--from-year", type=int, default=2021)
-    parser.add_argument("--to-year", type=int, default=2025)
+    parser.add_argument("--to-year", type=int, default=2026)
     parser.add_argument("--year", type=int, action="append")
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--max-files", type=int, default=None)
