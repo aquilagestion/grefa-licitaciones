@@ -54,6 +54,18 @@ def _worksheet_config(hoja_id: str | None = None):
     return store._worksheet(hoja, CONFIG_SHEET, CONFIG_HEADERS)
 
 
+def _find_worksheet(hoja, titulo: str):
+    """Localiza una pestaña por nombre (sin crearla). Tolera mayúsculas/espacios."""
+    objetivo = str(titulo).strip().lower()
+    for pestana in hoja.worksheets():
+        if str(pestana.title).strip().lower() == objetivo:
+            return pestana
+    try:
+        return hoja.worksheet(titulo)
+    except Exception:
+        return None
+
+
 def _worksheet_historico(hoja_id: str | None = None):
     hoja = store.get_spreadsheet(hoja_id)
     return store._worksheet(hoja, HISTORICO_SHEET, HISTORICO_HEADERS)
@@ -196,11 +208,13 @@ def load_historico_dataframe(hoja_id: str | None = None) -> pd.DataFrame:
 
     try:
         hoja = store.get_spreadsheet(hoja_id)
-        try:
-            pestana = hoja.worksheet(HISTORICO_SHEET)
-        except Exception:
-            pestana = _worksheet_historico(hoja_id)
-        # get_all_values es más robusto que get_all_records con cabeceras mixtas / filas largas.
+        pestana = _find_worksheet(hoja, HISTORICO_SHEET)
+        if pestana is None:
+            raise store.SheetsError(
+                'No existe la pestaña "Historico" en la hoja. '
+                "Créala con scripts/ensure_extra_sheets.py."
+            )
+        # Solo lectura: nunca crear/renombrar pestañas aquí.
         valores = pestana.get_all_values()
     except store.SheetsError:
         raise

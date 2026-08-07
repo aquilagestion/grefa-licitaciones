@@ -186,12 +186,36 @@ def reset_cache() -> None:
 # ---------------------------------------------------------------------------
 def _worksheet(hoja, titulo: str, cabeceras: list[str]):
     """Devuelve la pestaña pedida, creándola con cabeceras si no existe."""
+    pestana = None
+    objetivo = str(titulo).strip().lower()
     try:
-        pestana = hoja.worksheet(titulo)
+        for candidata in hoja.worksheets():
+            if str(candidata.title).strip().lower() == objetivo:
+                pestana = candidata
+                break
     except Exception:
-        pestana = hoja.add_worksheet(title=titulo, rows=200, cols=max(len(cabeceras), 10))
-        pestana.update([cabeceras], "A1")
-        return pestana
+        pestana = None
+
+    if pestana is None:
+        try:
+            pestana = hoja.worksheet(titulo)
+        except Exception:
+            pestana = None
+
+    if pestana is None:
+        try:
+            pestana = hoja.add_worksheet(title=titulo, rows=200, cols=max(len(cabeceras), 10))
+            pestana.update([cabeceras], "A1")
+            return pestana
+        except Exception as exc:
+            # Carrera típica: la pestaña existe pero worksheet() falló antes.
+            if "already exists" in str(exc).lower():
+                for candidata in hoja.worksheets():
+                    if str(candidata.title).strip().lower() == objetivo:
+                        pestana = candidata
+                        break
+            if pestana is None:
+                raise SheetsError(f"No se pudo abrir/crear la pestaña {titulo}: {exc}") from exc
 
     valores = [v.strip() for v in pestana.row_values(1) if str(v).strip()]
     esperadas = [c.strip() for c in cabeceras]
