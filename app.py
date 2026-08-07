@@ -1692,8 +1692,8 @@ def pestana_seguimiento() -> None:
 
 @st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
 def _cargar_historico_drive_cached(spreadsheet_id: str) -> pd.DataFrame:
-    """Cache en servidor (no en session_state) para no tumbar Streamlit Cloud."""
-    _ = spreadsheet_id  # clave de caché
+    """Cache de servidor. No usar session_state para el DataFrame (rompe Cloud)."""
+    _ = spreadsheet_id
     return sheets_historico.load_historico_dataframe()
 
 
@@ -1723,81 +1723,72 @@ def _combinar_fuentes_historico(
         else:
             combinado = combinado.drop_duplicates(subset=["expediente"], keep="first")
 
-    return grefa_filter.with_nivel_administracion(combinado.reset_index(drop=True))
+    try:
+        return grefa_filter.with_nivel_administracion(combinado.reset_index(drop=True))
+    except Exception:
+        return combinado.reset_index(drop=True)
 
 
 def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
-    """Pestaña de histórico; errores de Drive no deben tumbar el resto de la app."""
+    """Pestaña de histórico; nunca debe tumbar el resto de la app."""
     try:
-        _pestana_historico_nif_body(puntuadas)
+        _pestana_historico_nif_body(puntuadas if puntuadas is not None else empty_dataframe())
     except Exception as exc:
         st.error(
-            "Error en la pestaña Histórico. "
-            f"Detalle: {type(exc).__name__}: {exc or '(sin mensaje)'}."
+            "Error en la pestaña Histórico (la app sigue usable en el resto de pestañas). "
+            f"{type(exc).__name__}: {exc or '(sin mensaje)'}."
         )
 
 
 def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.subheader("Histórico en Drive y búsqueda avanzada")
     st.caption(
-        "Consulta el histórico compartido en Google Sheets (pestaña **Histórico**), "
-        "el archivo local importado desde PLACSP y el feed en vivo. "
+        "Consulta el histórico en Google Sheets y el feed en vivo. "
         "Filtra por ID de expediente, NIF o ámbito del órgano (local, autonómico, nacional)."
     )
 
-    # Evita reventar session_state si una versión anterior guardó un DF enorme.
-    if "historico_drive_cache" in st.session_state:
-        del st.session_state["historico_drive_cache"]
-
-    col_drive, col_parquet = st.columns(2)
     drive_disponible = sheets_store.is_configured()
-    parquet_disponible = historico_placsp.is_available()
     drive_df: pd.DataFrame | None = None
     filas_drive = 0
 
+    col_drive, col_vivo = st.columns(2)
     with col_drive:
         if drive_disponible:
-            hoja_id = sheets_store.spreadsheet_id() or ""
-            cargar = st.button("📥 Cargar / actualizar histórico de Drive", key="load_historico_drive")
-            if cargar:
-                st.session_state["historico_drive_loaded"] = True
-                _cargar_historico_drive_cached.clear()
-            if st.session_state.get("historico_drive_loaded"):
+            incluir_drive = st.checkbox(
+                "Incluir histórico en Drive",
+                value=False,
+                key="hist_incluir_drive",
+                help="Activa y pulsa Cargar. No se guarda el listado en la sesión del navegador.",
+            )
+            refrescar = st.button("📥 Cargar histórico de Drive", key="hist_cargar_drive")
+            if incluir_drive:
+                hoja_id = sheets_store.spreadsheet_id() or "default"
+                if refrescar:
+                    try:
+                        _cargar_historico_drive_cached.clear()
+                    except Exception:
+                        pass
                 try:
                     drive_df = _cargar_historico_drive_cached(hoja_id)
-                    filas_drive = len(drive_df)
-                    st.success(f"Histórico Drive cargado: **{filas_drive:,}** filas.")
+                    filas_drive = int(len(drive_df))
+                    st.caption(f"{filas_drive:,} filas en Drive (caché 10 min).")
                 except Exception as exc:
-                    st.warning(
-                        "No se pudo cargar el histórico de Drive. "
-                        f"Detalle: {type(exc).__name__}: {exc or '(sin mensaje)'}."
-                    )
+                    st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
                     drive_df = None
-            else:
-                st.info("Pulsa el botón para cargar el histórico desde Google Sheets (~12.000 filas).")
-            incluir_drive = st.checkbox(
-                f"Incluir histórico en Drive ({filas_drive:,} filas)",
-                value=bool(filas_drive),
-                disabled=drive_df is None,
-            )
-            if not incluir_drive:
-                drive_df = None
         else:
             incluir_drive = False
-            st.info("Google Sheets no configurado: no hay histórico en Drive.")
+            st.info("Google Sheets no configurado.")
 
-    with col_parquet:
-        meta = historico_placsp.metadata()
-        if parquet_disponible:
+    with col_vivo:
+        incluir_vivo = st.checkbox("Incluir feed en vivo", value=True, key="hist_incluir_vivo")
+        if historico_placsp.is_available():
             incluir_parquet = st.checkbox(
-                f"Incluir histórico local Parquet ({int(meta.get('filas', 0)):,} filas)",
-                value=False,
+                "Incluir Parquet local", value=False, key="hist_incluir_parquet"
             )
         else:
             incluir_parquet = False
-            st.caption("En Streamlit Cloud no hay Parquet local; usa el histórico de Drive.")
+            st.caption("Sin Parquet en este servidor (normal en Cloud).")
 
-    incluir_vivo = st.checkbox("Incluir feed en vivo / datos cargados", value=True)
     base = _combinar_fuentes_historico(
         puntuadas if incluir_vivo else empty_dataframe(),
         incluir_parquet=incluir_parquet,
@@ -1806,42 +1797,43 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 
     col_exp, col_nif = st.columns([2, 2])
     with col_exp:
-        expediente = st.text_input("ID Expediente", placeholder="Ej. 2024/001234, PAC-2023-45…")
+        expediente = st.text_input("ID Expediente", placeholder="Ej. 2024/001234…", key="hist_exp")
     with col_nif:
-        nif = st.text_input("NIF", placeholder="Ej. B12345678, P2807900B…")
+        nif = st.text_input("NIF", placeholder="Ej. B12345678…", key="hist_nif")
 
     col_ambito_nif, col_ambito_admin = st.columns([1, 2])
     with col_ambito_nif:
         ambito_etiqueta = st.selectbox(
             "Buscar NIF en",
             ["Ambos", "Órgano de contratación", "Adjudicatario"],
+            key="hist_nif_ambito",
         )
     with col_ambito_admin:
         niveles_admin = st.multiselect(
             "Ámbito del órgano",
             [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
             default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
+            key="hist_niveles",
         )
 
-    ambito_map = {
-        "Ambos": "ambos",
-        "Órgano de contratación": "organo",
-        "Adjudicatario": "adjudicatario",
-    }
-    texto = st.text_input("Texto libre adicional (opcional)", placeholder="Título, CPV, provincia…")
+    texto = st.text_input("Texto libre (opcional)", placeholder="Título, CPV…", key="hist_texto")
 
     resultados = grefa_filter.search_dataframe(
         base,
         texto=texto,
         nif=nif,
-        nif_ambito=ambito_map[ambito_etiqueta],
+        nif_ambito={
+            "Ambos": "ambos",
+            "Órgano de contratación": "organo",
+            "Adjudicatario": "adjudicatario",
+        }.get(ambito_etiqueta, "ambos"),
         expediente=expediente,
         niveles_admin=niveles_admin,
     )
 
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
-        st.warning("Sin coincidencias. Carga el histórico de Drive o prueba otro filtro.")
+        st.warning("Sin coincidencias. Activa «Incluir histórico en Drive» y pulsa Cargar.")
         return
 
     botones_exportacion(resultados, "historico_nif")
@@ -2044,7 +2036,10 @@ def main() -> None:
         else:
             pestana_buscador(puntuadas)
     with pestana_3:
-        pestana_historico_nif(puntuadas)
+        try:
+            pestana_historico_nif(puntuadas)
+        except Exception as exc:
+            st.error(f"Histórico no disponible ahora: {type(exc).__name__}")
     with pestana_4:
         pestana_analisis_pliegos(oportunidades)
     with pestana_5:
