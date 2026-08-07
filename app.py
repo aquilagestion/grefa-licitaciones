@@ -1690,29 +1690,25 @@ def pestana_seguimiento() -> None:
                     )
 
 
+@st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
+def _cargar_historico_drive_cached(spreadsheet_id: str) -> pd.DataFrame:
+    """Cache en servidor (no en session_state) para no tumbar Streamlit Cloud."""
+    _ = spreadsheet_id  # clave de caché
+    return sheets_historico.load_historico_dataframe()
+
+
 def _combinar_fuentes_historico(
     puntuadas: pd.DataFrame,
     *,
     incluir_parquet: bool,
-    incluir_drive: bool,
+    drive_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """Une feed vivo, Parquet local y pestaña Histórico de Drive."""
     partes: list[pd.DataFrame] = []
     if incluir_parquet and historico_placsp.is_available():
         partes.append(historico_placsp.load())
-    if incluir_drive and sheets_store.is_configured():
-        drive = st.session_state.get("historico_drive_cache")
-        if drive is None:
-            try:
-                drive = sheets_historico.load_historico_dataframe()
-                st.session_state["historico_drive_cache"] = drive
-                st.session_state["historico_drive_error"] = ""
-            except Exception as exc:
-                st.warning(f"No se pudo leer el histórico en Drive: {exc}")
-                drive = pd.DataFrame()
-                st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
-        if isinstance(drive, pd.DataFrame) and not drive.empty:
-            partes.append(drive)
+    if drive_df is not None and isinstance(drive_df, pd.DataFrame) and not drive_df.empty:
+        partes.append(drive_df)
     if not puntuadas.empty:
         partes.append(puntuadas)
 
@@ -1731,6 +1727,17 @@ def _combinar_fuentes_historico(
 
 
 def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
+    """Pestaña de histórico; errores de Drive no deben tumbar el resto de la app."""
+    try:
+        _pestana_historico_nif_body(puntuadas)
+    except Exception as exc:
+        st.error(
+            "Error en la pestaña Histórico. "
+            f"Detalle: {type(exc).__name__}: {exc or '(sin mensaje)'}."
+        )
+
+
+def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.subheader("Histórico en Drive y búsqueda avanzada")
     st.caption(
         "Consulta el histórico compartido en Google Sheets (pestaña **Histórico**), "
@@ -1738,39 +1745,43 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
         "Filtra por ID de expediente, NIF o ámbito del órgano (local, autonómico, nacional)."
     )
 
+    # Evita reventar session_state si una versión anterior guardó un DF enorme.
+    if "historico_drive_cache" in st.session_state:
+        del st.session_state["historico_drive_cache"]
+
     col_drive, col_parquet = st.columns(2)
     drive_disponible = sheets_store.is_configured()
     parquet_disponible = historico_placsp.is_available()
+    drive_df: pd.DataFrame | None = None
+    filas_drive = 0
 
     with col_drive:
         if drive_disponible:
-            if "historico_drive_cache" not in st.session_state:
+            hoja_id = sheets_store.spreadsheet_id() or ""
+            cargar = st.button("📥 Cargar / actualizar histórico de Drive", key="load_historico_drive")
+            if cargar:
+                st.session_state["historico_drive_loaded"] = True
+                _cargar_historico_drive_cached.clear()
+            if st.session_state.get("historico_drive_loaded"):
                 try:
-                    st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
-                    st.session_state["historico_drive_error"] = ""
+                    drive_df = _cargar_historico_drive_cached(hoja_id)
+                    filas_drive = len(drive_df)
+                    st.success(f"Histórico Drive cargado: **{filas_drive:,}** filas.")
                 except Exception as exc:
-                    st.session_state["historico_drive_cache"] = pd.DataFrame()
-                    st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
-            error_drive = st.session_state.get("historico_drive_error") or ""
-            if error_drive:
-                st.warning(
-                    "No se pudo cargar el histórico de Drive. "
-                    f"Detalle: {error_drive}. Prueba «Actualizar histórico desde Drive»."
-                )
-            filas_drive = len(st.session_state.get("historico_drive_cache", pd.DataFrame()))
+                    st.warning(
+                        "No se pudo cargar el histórico de Drive. "
+                        f"Detalle: {type(exc).__name__}: {exc or '(sin mensaje)'}."
+                    )
+                    drive_df = None
+            else:
+                st.info("Pulsa el botón para cargar el histórico desde Google Sheets (~12.000 filas).")
             incluir_drive = st.checkbox(
                 f"Incluir histórico en Drive ({filas_drive:,} filas)",
-                value=filas_drive > 0,
+                value=bool(filas_drive),
+                disabled=drive_df is None,
             )
-            if st.button("Actualizar histórico desde Drive", key="refresh_historico_drive"):
-                try:
-                    st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
-                    st.session_state["historico_drive_error"] = ""
-                    st.rerun()
-                except Exception as exc:
-                    st.session_state["historico_drive_cache"] = pd.DataFrame()
-                    st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
-                    st.error(f"Error al leer Histórico: {st.session_state['historico_drive_error']}")
+            if not incluir_drive:
+                drive_df = None
         else:
             incluir_drive = False
             st.info("Google Sheets no configurado: no hay histórico en Drive.")
@@ -1780,22 +1791,17 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
         if parquet_disponible:
             incluir_parquet = st.checkbox(
                 f"Incluir histórico local Parquet ({int(meta.get('filas', 0)):,} filas)",
-                value=True,
+                value=False,
             )
         else:
             incluir_parquet = False
-            st.info(
-                "Sin Parquet local. Importa con:\n\n"
-                "`python scripts/import_historico_placsp.py --year 2024`\n\n"
-                "Para volcar a Drive:\n\n"
-                "`python scripts/import_historico_to_sheets.py --from-year 2021`"
-            )
+            st.caption("En Streamlit Cloud no hay Parquet local; usa el histórico de Drive.")
 
     incluir_vivo = st.checkbox("Incluir feed en vivo / datos cargados", value=True)
     base = _combinar_fuentes_historico(
         puntuadas if incluir_vivo else empty_dataframe(),
         incluir_parquet=incluir_parquet,
-        incluir_drive=incluir_drive,
+        drive_df=drive_df if incluir_drive else None,
     )
 
     col_exp, col_nif = st.columns([2, 2])
@@ -1835,7 +1841,7 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
 
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
-        st.warning("Sin coincidencias. Prueba otro filtro o importa más histórico a Drive.")
+        st.warning("Sin coincidencias. Carga el histórico de Drive o prueba otro filtro.")
         return
 
     botones_exportacion(resultados, "historico_nif")
