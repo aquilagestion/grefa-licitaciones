@@ -1812,8 +1812,9 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
         niveles_admin = st.multiselect(
             "Ámbito del órgano",
             [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
-            default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
+            default=list(NIVELES_ADMIN),
             key="hist_niveles",
+            help="Si buscas por NIF o ID expediente, este filtro no se aplica.",
         )
 
     texto = st.text_input("Texto libre (opcional)", placeholder="Título, CPV…", key="hist_texto")

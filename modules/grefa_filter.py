@@ -520,7 +520,12 @@ def search_dataframe(
         filtrado = filter_by_texto_libre(filtrado, texto)
     if nif and str(nif).strip():
         filtrado = filter_by_nif(filtrado, nif, ambito=nif_ambito)
-    if niveles_admin:
+    # Con búsqueda directa por NIF/expediente no aplicar ámbito: muchos órganos
+    # caen en «Otros» y el filtro los ocultaba aunque el NIF coincidiera.
+    busqueda_directa = bool(
+        (nif and str(nif).strip()) or (expediente and str(expediente).strip())
+    )
+    if niveles_admin and not busqueda_directa:
         filtrado = filter_by_nivel_administracion(filtrado, niveles_admin)
 
     if presupuesto_min is not None or presupuesto_max is not None:
