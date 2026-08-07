@@ -155,58 +155,104 @@ def _fila_historico(fila: pd.Series, momento: str) -> list[str]:
     ]
 
 
+def _indice_cabeceras(fila_cabecera: list[str]) -> dict[str, int]:
+    """Mapea nombre de cabecera (minúsculas) → índice de columna."""
+    indices: dict[str, int] = {}
+    for indice, nombre in enumerate(fila_cabecera):
+        clave = str(nombre or "").strip().lower()
+        if clave and clave not in indices:
+            indices[clave] = indice
+    return indices
+
+
+def _celda(fila: list[Any], indices: dict[str, int], *nombres: str) -> str:
+    for nombre in nombres:
+        indice = indices.get(nombre.strip().lower())
+        if indice is None or indice >= len(fila):
+            continue
+        valor = fila[indice]
+        if valor is None:
+            continue
+        texto = str(valor).strip()
+        if texto:
+            return texto
+    return ""
+
+
+def _parse_presupuesto(valor: str) -> float | None:
+    if not valor:
+        return None
+    limpio = valor.replace("€", "").replace("\xa0", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(limpio)
+    except ValueError:
+        return None
+
+
 def load_historico_dataframe(hoja_id: str | None = None) -> pd.DataFrame:
     """Lee la pestaña Histórico de Google Sheets como DataFrame unificado."""
     if not store.is_configured():
         return pd.DataFrame()
 
     try:
-        registros = _worksheet_historico(hoja_id).get_all_records()
+        hoja = store.get_spreadsheet(hoja_id)
+        try:
+            pestana = hoja.worksheet(HISTORICO_SHEET)
+        except Exception:
+            pestana = _worksheet_historico(hoja_id)
+        # get_all_values es más robusto que get_all_records con cabeceras mixtas / filas largas.
+        valores = pestana.get_all_values()
     except store.SheetsError:
         raise
     except Exception as exc:
         raise store.SheetsError(f"No se pudo leer el histórico en Sheets: {exc}") from exc
 
-    if not registros:
+    if not valores or len(valores) < 2:
         return pd.DataFrame()
 
-    filas: list[dict[str, Any]] = []
-    for reg in registros:
-        expediente = str(store._campo(reg, "ID Expediente", "expediente")).strip()
-        if not expediente:
-            continue
-        organo = str(store._campo(reg, "Órgano de Contratación", "organo")).strip()
-        ambito = str(
-            store._campo(reg, "Ámbito administración", "ambito_administracion", default="")
-        ).strip()
-        if not ambito and organo:
-            ambito = classify_organo(organo)
-        presupuesto_bruto = store._campo(reg, "Presupuesto sin IVA", "presupuesto")
-        try:
-            presupuesto = float(str(presupuesto_bruto).replace(",", ".")) if presupuesto_bruto else None
-        except ValueError:
-            presupuesto = None
-        filas.append(
-            {
-                "fecha_snapshot": str(store._campo(reg, "Fecha snapshot", "fecha_snapshot")).strip(),
-                "relevancia": store._campo(reg, "Relevancia (%)", "relevancia"),
-                "categoria": str(store._campo(reg, "Categoría", "categoria")).strip(),
-                "expediente": expediente,
-                "titulo": str(store._campo(reg, "Título / Objeto", "titulo")).strip(),
-                "organo_contratacion": organo,
-                "presupuesto_sin_iva": presupuesto,
-                "estado": str(store._campo(reg, "Estado PLACSP", "estado")).strip(),
-                "fecha_limite": str(store._campo(reg, "Fecha límite", "fecha_limite")).strip(),
-                "url": str(store._campo(reg, "Enlace", "enlace")).strip(),
-                "cpvs_match": str(store._campo(reg, "CPV coincidentes", "cpvs_match")).strip(),
-                "keywords_match": str(
-                    store._campo(reg, "Palabras clave", "keywords_match")
-                ).strip(),
-                "nif_organo": str(store._campo(reg, "NIF órgano", "nif_organo")).strip(),
-                "nivel_administracion": ambito,
-                "ubicacion": str(store._campo(reg, "Ubicación", "ubicacion")).strip(),
-            }
+    indices = _indice_cabeceras(valores[0])
+    if "id expediente" not in indices and "expediente" not in indices:
+        # Cabeceras ausentes o pestaña vacía tras un update parcial.
+        raise store.SheetsError(
+            "La pestaña Histórico no tiene cabeceras reconocibles. "
+            "Recarga la hoja o ejecuta scripts/ensure_extra_sheets.py."
         )
+
+    filas: list[dict[str, Any]] = []
+    try:
+        for fila in valores[1:]:
+            if not fila or not any(str(c).strip() for c in fila):
+                continue
+            expediente = _celda(fila, indices, "ID Expediente", "expediente")
+            if not expediente:
+                continue
+            organo = _celda(fila, indices, "Órgano de Contratación", "organo")
+            ambito = _celda(fila, indices, "Ámbito administración", "ambito_administracion")
+            if not ambito and organo:
+                ambito = classify_organo(organo)
+            filas.append(
+                {
+                    "fecha_snapshot": _celda(fila, indices, "Fecha snapshot", "fecha_snapshot"),
+                    "relevancia": _celda(fila, indices, "Relevancia (%)", "relevancia"),
+                    "categoria": _celda(fila, indices, "Categoría", "categoria"),
+                    "expediente": expediente,
+                    "titulo": _celda(fila, indices, "Título / Objeto", "titulo"),
+                    "organo_contratacion": organo,
+                    "presupuesto_sin_iva": _parse_presupuesto(
+                        _celda(fila, indices, "Presupuesto sin IVA", "presupuesto")
+                    ),
+                    "estado": _celda(fila, indices, "Estado PLACSP", "estado"),
+                    "fecha_limite": _celda(fila, indices, "Fecha límite", "fecha_limite"),
+                    "url": _celda(fila, indices, "Enlace", "enlace", "url"),
+                    "cpvs_match": _celda(fila, indices, "CPV coincidentes", "cpvs_match"),
+                    "keywords_match": _celda(fila, indices, "Palabras clave", "keywords_match"),
+                    "nif_organo": _celda(fila, indices, "NIF órgano", "nif_organo"),
+                    "nivel_administracion": ambito,
+                    "ubicacion": _celda(fila, indices, "Ubicación", "ubicacion"),
+                }
+            )
+    except Exception as exc:
+        raise store.SheetsError(f"Error al interpretar el histórico: {exc}") from exc
 
     return pd.DataFrame(filas)
 

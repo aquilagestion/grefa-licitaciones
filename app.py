@@ -1706,9 +1706,11 @@ def _combinar_fuentes_historico(
             try:
                 drive = sheets_historico.load_historico_dataframe()
                 st.session_state["historico_drive_cache"] = drive
-            except sheets_store.SheetsError as exc:
+                st.session_state["historico_drive_error"] = ""
+            except Exception as exc:
                 st.warning(f"No se pudo leer el histórico en Drive: {exc}")
                 drive = pd.DataFrame()
+                st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
         if isinstance(drive, pd.DataFrame) and not drive.empty:
             partes.append(drive)
     if not puntuadas.empty:
@@ -1745,19 +1747,30 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
             if "historico_drive_cache" not in st.session_state:
                 try:
                     st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
-                except sheets_store.SheetsError:
+                    st.session_state["historico_drive_error"] = ""
+                except Exception as exc:
                     st.session_state["historico_drive_cache"] = pd.DataFrame()
+                    st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
+            error_drive = st.session_state.get("historico_drive_error") or ""
+            if error_drive:
+                st.warning(
+                    "No se pudo cargar el histórico de Drive. "
+                    f"Detalle: {error_drive}. Prueba «Actualizar histórico desde Drive»."
+                )
             filas_drive = len(st.session_state.get("historico_drive_cache", pd.DataFrame()))
             incluir_drive = st.checkbox(
                 f"Incluir histórico en Drive ({filas_drive:,} filas)",
-                value=True,
+                value=filas_drive > 0,
             )
             if st.button("Actualizar histórico desde Drive", key="refresh_historico_drive"):
                 try:
                     st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
+                    st.session_state["historico_drive_error"] = ""
                     st.rerun()
-                except sheets_store.SheetsError as exc:
-                    st.error(str(exc))
+                except Exception as exc:
+                    st.session_state["historico_drive_cache"] = pd.DataFrame()
+                    st.session_state["historico_drive_error"] = str(exc) or type(exc).__name__
+                    st.error(f"Error al leer Histórico: {st.session_state['historico_drive_error']}")
         else:
             incluir_drive = False
             st.info("Google Sheets no configurado: no hay histórico en Drive.")

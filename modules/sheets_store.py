@@ -193,8 +193,10 @@ def _worksheet(hoja, titulo: str, cabeceras: list[str]):
         pestana.update([cabeceras], "A1")
         return pestana
 
-    valores = pestana.row_values(1)
-    if [v.strip().lower() for v in valores] != [c.lower() for c in cabeceras]:
+    valores = [v.strip() for v in pestana.row_values(1) if str(v).strip()]
+    esperadas = [c.strip() for c in cabeceras]
+    if [v.lower() for v in valores] != [c.lower() for c in esperadas]:
+        # Solo reescribe cabeceras; no toca el resto de filas.
         pestana.update([cabeceras], "A1")
     return pestana
 
