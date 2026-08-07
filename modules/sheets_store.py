@@ -30,7 +30,8 @@ LOGGER = logging.getLogger(__name__)
 
 SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
+    # drive (no solo drive.file): permite escribir en carpeta compartida con la SA
+    "https://www.googleapis.com/auth/drive",
 )
 
 CPV_SHEET = "CPV"
@@ -963,7 +964,8 @@ def initialize_spreadsheet(
         ["Pestaña ChecklistDocs"],
         ["- Documentación a preparar por expediente (Pendiente / En preparación / Preparado)."],
         ["- Enlace Drive: fichero subido desde la app o pegado a mano."],
-        ["- Opcional: sheets.drive_folder_id en Secrets para guardar en una carpeta concreta."],
+        ["- Carpeta Drive docs: sheets.drive_folder_id (subcarpetas por expediente — órgano)."],
+        ["- Compartir esa carpeta como Editor con la cuenta de servicio de GCP."],
         [""],
         ["Pestaña Historico"],
         ["- Snapshot diario automático de oportunidades Alta y Media."],

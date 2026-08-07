@@ -665,6 +665,7 @@ def _widget_checklist_docs(
     titulo: str,
     *,
     clave_prefix: str,
+    organo: str = "",
 ) -> None:
     """Checklist de documentación a preparar, con estados y subida a Drive."""
     if not expediente and not url:
@@ -674,10 +675,11 @@ def _widget_checklist_docs(
         st.info("Configura Google Sheets para guardar el checklist en Drive.")
         return
 
+    carpeta_prevista = drive_docs.nombre_carpeta_expediente(expediente, organo)
     st.markdown("**Checklist de documentación**")
     st.caption(
         "Pendiente · En preparación · Preparado · No aplica. "
-        "Puedes subir el fichero a Drive o pegar un enlace."
+        f"Los ficheros se guardan en Drive → `{carpeta_prevista}`."
     )
 
     try:
@@ -783,8 +785,14 @@ def _widget_checklist_docs(
                         subido = drive_docs.upload_bytes(
                             up.getvalue(),
                             up.name or f"{doc}.bin",
+                            expediente=expediente,
+                            organo=organo,
                         )
                         link_final = subido.get("webViewLink") or link_final
+                        if subido.get("folderLink"):
+                            st.caption(
+                                f"Carpeta: [{carpeta_prevista}]({subido['folderLink']})"
+                            )
                     sheets_store.upsert_checklist_item(
                         expediente,
                         url,
@@ -795,7 +803,7 @@ def _widget_checklist_docs(
                         enlace_drive=link_final,
                         row=row_n,
                     )
-                    st.toast("Checklist actualizado en Drive.", icon="✅")
+                    st.toast("Documento y checklist guardados en Drive.", icon="✅")
                     st.rerun()
                 except (sheets_store.SheetsError, drive_docs.DriveDocsError) as exc:
                     st.error(str(exc))
@@ -2071,7 +2079,7 @@ def pestana_analisis_pliegos(
             height=min(280, 52 + 35 * min(len(hallados), 8)),
         )
 
-    opciones: list[tuple[str, str, str, str, list]] = []
+    opciones: list[tuple[str, str, str, str, str, list]] = []
     fuente_opciones = hallados if not hallados.empty else (
         oportunidades if isinstance(oportunidades, pd.DataFrame) and not oportunidades.empty
         else empty_dataframe()
@@ -2081,9 +2089,17 @@ def pestana_analisis_pliegos(
             exp = str(fila.get("expediente") or "—")
             tit = str(fila.get("titulo") or "")[:70]
             enlace = str(fila.get("url") or "")
+            organo_fila = str(fila.get("organo_contratacion") or "")
             etiqueta = f"{exp} — {tit}" if tit else exp
             opciones.append(
-                (etiqueta, exp, enlace, str(fila.get("titulo") or ""), _docs_desde_fila(fila))
+                (
+                    etiqueta,
+                    exp,
+                    enlace,
+                    str(fila.get("titulo") or ""),
+                    organo_fila,
+                    _docs_desde_fila(fila),
+                )
             )
 
     etiquetas = ["— Sin vincular / solo subir PDF —"] + [o[0] for o in opciones]
@@ -2100,10 +2116,17 @@ def pestana_analisis_pliegos(
         key="pliego_select_exp",
     )
 
+    organo = ""
     if seleccion != etiquetas[0]:
-        for etiqueta, exp, enlace, tit, docs in opciones:
+        for etiqueta, exp, enlace, tit, organo_fila, docs in opciones:
             if etiqueta == seleccion:
-                expediente, url, titulo, documentos = exp, enlace, tit, docs
+                expediente, url, titulo, organo, documentos = (
+                    exp,
+                    enlace,
+                    tit,
+                    organo_fila,
+                    docs,
+                )
                 break
     else:
         if consulta:
@@ -2111,6 +2134,11 @@ def pestana_analisis_pliegos(
         titulo = st.text_input(
             "Título / referencia (opcional)",
             key="pliego_titulo_libre",
+        )
+        organo = st.text_input(
+            "Órgano / contratista (para carpeta Drive)",
+            key="pliego_organo_libre",
+            placeholder="Ej. Ayuntamiento de…",
         )
 
     if expediente or url:
@@ -2143,6 +2171,7 @@ def pestana_analisis_pliegos(
         url,
         titulo,
         clave_prefix="tab_pliego",
+        organo=organo,
     )
 
 
@@ -2258,6 +2287,11 @@ def pestana_seguimiento() -> None:
                         fila.get("url", ""),
                         titulo,
                         clave_prefix=f"chkseg_{clave[:30]}",
+                        organo=str(
+                            fila.get("organo")
+                            or fila.get("organo_contratacion")
+                            or ""
+                        ),
                     )
 
 
