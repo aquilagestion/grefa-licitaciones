@@ -646,6 +646,9 @@ def _widget_resumen_pliego(
     clave = _clave_expediente(expediente, url)
     resumenes = st.session_state.setdefault("pdf_resumenes", {})
     docs_placsp = list(documentos or [])
+    # Clave estable: no depende del texto del expediente (evita vaciar el uploader al teclear).
+    stash_key = f"pdf_stash_{clave_prefix}"
+    stash: dict[str, bytes] = st.session_state.setdefault(stash_key, {})
 
     if sheets_store.is_configured():
         guardado = sheets_store.load_pliego_resumen(expediente, url)
@@ -699,37 +702,85 @@ def _widget_resumen_pliego(
             "Sube manualmente el PCAP y el PPT (PDF)."
         )
 
+    st.markdown("**Subir pliegos (varios PDF)**")
+    st.caption(
+        "Puedes subir el PCAP y el PPT en pasos sucesivos: cada archivo se acumula "
+        "en la lista (no sustituye al anterior). También puedes seleccionar varios a la vez."
+    )
     ficheros = st.file_uploader(
-        "Sube uno o varios pliegos (PDF) — idealmente PCAP y PPT",
+        "Añadir PDF a la cola de análisis",
         type=["pdf"],
         accept_multiple_files=True,
-        key=f"pdf_{clave_prefix}",
+        key=f"pdf_up_{clave_prefix}",
     )
-    if ficheros and st.button("✨ Generar resumen con IA", key=f"resumir_{clave_prefix}"):
-        with st.spinner(f"Analizando {len(ficheros)} PDF con Gemini…"):
-            try:
-                docs_up = [
-                    {
-                        "nombre": f.name,
-                        "tipo": pliegos_placsp.etiquetar_upload(f.name),
-                        "bytes": f.getvalue(),
-                    }
-                    for f in ficheros
-                ]
-                texto = pdf_summary.summarize_documentos(
-                    docs_up, expediente=expediente, titulo=titulo
+    # Streamlit sustituye la selección del uploader; acumulamos en sesión por nombre.
+    sig_key = f"{stash_key}_sig"
+    if ficheros:
+        firma = tuple(
+            sorted(
+                (
+                    Path(getattr(f, "name", "") or "documento.pdf").name,
+                    len(f.getvalue()),
                 )
-                resumenes[clave] = texto
-                if sheets_store.is_configured():
-                    sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
-                    st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                for f in ficheros
+            )
+        )
+        if firma != st.session_state.get(sig_key):
+            for f in ficheros:
+                nombre = Path(getattr(f, "name", "") or "documento.pdf").name
+                if not nombre.lower().endswith(".pdf"):
+                    nombre = f"{nombre}.pdf"
+                stash[nombre] = f.getvalue()
+            st.session_state[stash_key] = stash
+            st.session_state[sig_key] = firma
+
+    if stash:
+        st.success(
+            f"**{len(stash)} PDF en cola:** "
+            + ", ".join(
+                f"{pliegos_placsp.etiquetar_upload(n)} · {n}" for n in stash.keys()
+            )
+        )
+        col_gen, col_clr = st.columns([2, 1])
+        with col_clr:
+            if st.button("🗑️ Vaciar cola", key=f"vaciar_pdf_{clave_prefix}", width="stretch"):
+                st.session_state[stash_key] = {}
+                st.session_state.pop(f"{stash_key}_sig", None)
                 st.rerun()
-            except pdf_summary.PdfSummaryError as exc:
-                st.error(str(exc))
-            except sheets_store.SheetsError as exc:
-                st.warning(f"Resumen generado pero no guardado en Sheets: {exc}")
-                if clave in resumenes:
-                    st.markdown(resumenes[clave])
+        with col_gen:
+            if st.button(
+                "✨ Generar resumen con IA",
+                key=f"resumir_{clave_prefix}",
+                type="primary",
+                width="stretch",
+            ):
+                with st.spinner(f"Analizando {len(stash)} PDF con Gemini…"):
+                    try:
+                        docs_up = [
+                            {
+                                "nombre": nombre,
+                                "tipo": pliegos_placsp.etiquetar_upload(nombre),
+                                "bytes": contenido,
+                            }
+                            for nombre, contenido in stash.items()
+                        ]
+                        texto = pdf_summary.summarize_documentos(
+                            docs_up, expediente=expediente, titulo=titulo
+                        )
+                        resumenes[clave] = texto
+                        st.session_state[stash_key] = {}
+                        if sheets_store.is_configured():
+                            sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
+                            st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                        st.rerun()
+                    except pdf_summary.PdfSummaryError as exc:
+                        st.error(str(exc))
+                    except sheets_store.SheetsError as exc:
+                        st.warning(f"Resumen generado pero no guardado en Sheets: {exc}")
+                        if clave in resumenes:
+                            st.markdown(resumenes[clave])
+    else:
+        st.info("Aún no hay PDF en cola. Sube al menos el PCAP y el PPT.")
 
 
 def tarjeta_licitacion(fila: pd.Series) -> None:
@@ -1592,11 +1643,14 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
         )
 
 
-def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
+def pestana_analisis_pliegos(
+    oportunidades: pd.DataFrame,
+    catalogo: pd.DataFrame | None = None,
+) -> None:
     st.subheader("Análisis de pliegos con IA")
     st.caption(
         "Analiza PCAP + PPT (varios PDF) o descárgalos automáticamente desde PLACSP "
-        "cuando el expediente viene del feed. Resumen con Gemini."
+        "cuando el expediente está en el feed cargado. Resumen con Gemini."
     )
 
     if not pdf_summary.is_configured():
@@ -1607,38 +1661,72 @@ def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
         )
         return
 
-    opciones: list[tuple[str, str, str, str, list]] = []
-    if not oportunidades.empty:
-        for _, fila in oportunidades.iterrows():
-            exp = str(fila.get("expediente") or "—")
-            tit = str(fila.get("titulo") or "")[:70]
-            url = str(fila.get("url") or "")
-            etiqueta = f"{exp} — {tit}" if tit else exp
-            opciones.append(
-                (etiqueta, exp, url, str(fila.get("titulo") or ""), _docs_desde_fila(fila))
-            )
-
-    etiquetas = ["— Sin vincular a expediente —"] + [o[0] for o in opciones]
-    seleccion = st.selectbox(
-        "Vincular a oportunidad del monitor (opcional)",
-        etiquetas,
-        index=0,
-    )
-
+    base_busqueda = catalogo if catalogo is not None and not catalogo.empty else oportunidades
     expediente, url, titulo = "", "", ""
     documentos: list[dict] = []
+
+    st.markdown("**1. Localizar expediente**")
+    q_exp = st.text_input(
+        "Buscar por ID de expediente",
+        placeholder="Ej. 3.25/20830.0288 — busca en el feed cargado",
+        key="pliego_buscar_exp",
+    )
+    hallados = empty_dataframe()
+    if q_exp.strip() and not base_busqueda.empty:
+        hallados = grefa_filter.filter_by_expediente(base_busqueda, q_exp.strip())
+
+    opciones: list[tuple[str, str, str, str, list]] = []
+    fuente_opciones = hallados if not hallados.empty else (
+        oportunidades if not oportunidades.empty else empty_dataframe()
+    )
+    if not fuente_opciones.empty:
+        vista = fuente_opciones.head(80)
+        for _, fila in vista.iterrows():
+            exp = str(fila.get("expediente") or "—")
+            tit = str(fila.get("titulo") or "")[:70]
+            enlace = str(fila.get("url") or "")
+            etiqueta = f"{exp} — {tit}" if tit else exp
+            opciones.append(
+                (etiqueta, exp, enlace, str(fila.get("titulo") or ""), _docs_desde_fila(fila))
+            )
+
+    if q_exp.strip() and hallados.empty:
+        st.warning(
+            f"Ningún expediente coincide con «{q_exp.strip()}» en el feed cargado. "
+            "Puedes analizar pliegos subiendo los PDF a mano, o ampliar el feed "
+            "(más páginas / Actualizar datos)."
+        )
+    elif q_exp.strip() and not hallados.empty:
+        st.success(f"**{len(hallados)}** coincidencia(s). Elige una abajo o usa la primera.")
+
+    etiquetas = ["— Sin vincular / solo subir PDF —"] + [o[0] for o in opciones]
+    idx_default = 1 if (q_exp.strip() and opciones) else 0
+    # Al cambiar la búsqueda, forzar la selección al primer resultado.
+    if st.session_state.get("_pliego_q_prev") != q_exp:
+        st.session_state["_pliego_q_prev"] = q_exp
+        st.session_state["pliego_select_exp"] = etiquetas[min(idx_default, len(etiquetas) - 1)]
+    seleccion = st.selectbox(
+        "Expediente a analizar",
+        etiquetas,
+        key="pliego_select_exp",
+    )
+
     if seleccion != etiquetas[0]:
         for etiqueta, exp, enlace, tit, docs in opciones:
             if etiqueta == seleccion:
                 expediente, url, titulo, documentos = exp, enlace, tit, docs
                 break
     else:
-        expediente = st.text_input("ID expediente (opcional)", value="")
-        titulo = st.text_input("Título / referencia (opcional)", value="")
+        if q_exp.strip():
+            expediente = q_exp.strip()
+        titulo = st.text_input(
+            "Título / referencia (opcional)",
+            key="pliego_titulo_libre",
+        )
 
+    # Prefijo de widgets estable en esta pestaña (la cola de PDF no se pierde al cambiar ID).
     clave_prefix = "tab_pliego"
     if expediente or url:
-        clave_prefix = f"tab_{_clave_expediente(expediente, url)[:30]}"
         if sheets_store.is_configured():
             previo = sheets_store.load_pliego_resumen(expediente, url)
             if previo:
@@ -1646,6 +1734,7 @@ def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
                 with st.expander("Ver resumen guardado"):
                     st.markdown(previo)
 
+    st.markdown("**2. Documentos y análisis**")
     _widget_resumen_pliego(
         expediente,
         url,
@@ -1992,12 +2081,18 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
     col_exp, col_admin = st.columns([2, 2])
     with col_exp:
-        expediente = st.text_input("ID Expediente", placeholder="Búsqueda directa por código de licitación")
+        expediente = st.text_input(
+            "ID Expediente",
+            placeholder="Búsqueda directa por código de licitación",
+            key="buscador_exp",
+            help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
+        )
     with col_admin:
         niveles_admin = st.multiselect(
             "Ámbito del órgano",
             [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
             default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
+            key="buscador_niveles",
         )
 
     ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
@@ -2166,7 +2261,7 @@ def main() -> None:
         except Exception as exc:
             st.error(f"Histórico no disponible ahora: {type(exc).__name__}")
     with pestana_4:
-        pestana_analisis_pliegos(oportunidades)
+        pestana_analisis_pliegos(oportunidades, catalogo=puntuadas_todas)
     with pestana_5:
         pestana_seguimiento()
 

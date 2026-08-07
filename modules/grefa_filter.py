@@ -470,8 +470,18 @@ def filter_by_expediente(df: pd.DataFrame, expediente: str = "") -> pd.DataFrame
     """
     if df.empty or not expediente or not str(expediente).strip():
         return df
+    if "expediente" not in df.columns:
+        return df.iloc[0:0].copy()
 
-    objetivo_raw = str(expediente).strip().lower()
+    # Limpia pegados tipo "Id licitación: 3.25/20830.0288" o saltos de línea.
+    bruto = str(expediente).replace("\n", " ").replace("\r", " ").strip()
+    bruto = re.sub(
+        r"^(id\s*(de\s*)?(licitaci[oó]n|expediente)\s*[:.\-]?\s*)",
+        "",
+        bruto,
+        flags=re.IGNORECASE,
+    ).strip()
+    objetivo_raw = bruto.lower()
     objetivo_norm = _normalizar_expediente(objetivo_raw)
     if not objetivo_norm:
         return df
@@ -485,13 +495,15 @@ def filter_by_expediente(df: pd.DataFrame, expediente: str = "") -> pd.DataFrame
     mascara = exp_lower.str.contains(re.escape(objetivo_raw), regex=True, na=False)
     mascara |= url_lower.str.contains(re.escape(objetivo_raw), regex=True, na=False)
 
-    if len(objetivo_norm) >= 4:
+    if len(objetivo_norm) >= 3:
         exp_norm = serie_exp.map(_normalizar_expediente)
         url_norm = url_lower.map(_normalizar_expediente)
         tit_norm = serie_tit.map(_normalizar_expediente)
         mascara |= exp_norm.str.contains(objetivo_norm, regex=False, na=False)
         mascara |= url_norm.str.contains(objetivo_norm, regex=False, na=False)
         mascara |= tit_norm.str.contains(objetivo_norm, regex=False, na=False)
+        # Coincidencia exacta del ID normalizado (evita fallos con separadores raros).
+        mascara |= exp_norm == objetivo_norm
 
     return df[mascara].reset_index(drop=True)
 
@@ -550,35 +562,36 @@ def search_dataframe(
         filtrado = filter_by_texto_libre(filtrado, texto)
     if nif and str(nif).strip():
         filtrado = filter_by_nif(filtrado, nif, ambito=nif_ambito)
-    # Con búsqueda directa por NIF/expediente no aplicar ámbito: muchos órganos
-    # caen en «Otros» y el filtro los ocultaba aunque el NIF coincidiera.
+    # Con búsqueda directa por NIF/expediente no aplicar filtros secundarios:
+    # ámbito «Otros», provincia o rango de importe ocultaban coincidencias reales.
     busqueda_directa = bool(
         (nif and str(nif).strip()) or (expediente and str(expediente).strip())
     )
-    if niveles_admin and not busqueda_directa:
-        filtrado = filter_by_nivel_administracion(filtrado, niveles_admin)
+    if not busqueda_directa:
+        if niveles_admin:
+            filtrado = filter_by_nivel_administracion(filtrado, niveles_admin)
 
-    if presupuesto_min is not None or presupuesto_max is not None:
-        importes = filtrado["presupuesto_sin_iva"]
-        mascara = pd.Series(True, index=filtrado.index)
-        if presupuesto_min is not None:
-            mascara &= importes >= presupuesto_min
-        if presupuesto_max is not None:
-            mascara &= importes <= presupuesto_max
-        if incluir_sin_presupuesto:
-            mascara |= importes.isna()
-        filtrado = filtrado[mascara]
+        if presupuesto_min is not None or presupuesto_max is not None:
+            importes = filtrado["presupuesto_sin_iva"]
+            mascara = pd.Series(True, index=filtrado.index)
+            if presupuesto_min is not None:
+                mascara &= importes >= presupuesto_min
+            if presupuesto_max is not None:
+                mascara &= importes <= presupuesto_max
+            if incluir_sin_presupuesto:
+                mascara |= importes.isna()
+            filtrado = filtrado[mascara]
 
-    if ubicaciones:
-        filtrado = filtrado[filtrado["ubicacion"].isin(list(ubicaciones))]
-    filtrado = filter_by_estado(filtrado, estados)
-    filtrado = filter_by_fechas(
-        filtrado,
-        campo=fecha_campo,
-        desde=fecha_desde,
-        hasta=fecha_hasta,
-        incluir_sin_fecha=incluir_sin_fecha,
-    )
+        if ubicaciones:
+            filtrado = filtrado[filtrado["ubicacion"].isin(list(ubicaciones))]
+        filtrado = filter_by_estado(filtrado, estados)
+        filtrado = filter_by_fechas(
+            filtrado,
+            campo=fecha_campo,
+            desde=fecha_desde,
+            hasta=fecha_hasta,
+            incluir_sin_fecha=incluir_sin_fecha,
+        )
 
     if "organo_contratacion" in filtrado.columns:
         filtrado = with_nivel_administracion(filtrado)
