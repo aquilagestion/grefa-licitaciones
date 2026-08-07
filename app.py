@@ -34,7 +34,20 @@ from config.keyword_catalog import (  # noqa: E402
     active_keywords_grouped,
     default_term_catalog,
 )
-from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, historico_placsp, pdf_summary, pliegos_placsp, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
+from modules import (  # noqa: E402
+    auth,
+    daily_sync,
+    drive_docs,
+    email_alert,
+    grefa_filter,
+    google_chat,
+    historico_placsp,
+    pdf_summary,
+    pliegos_placsp,
+    sheets_catalog,
+    sheets_historico,
+    sheets_store,
+)
 from modules.admin_ambito import NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVEL_NACIONAL, NIVELES_ADMIN  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
@@ -630,6 +643,164 @@ def _docs_desde_fila(fila: pd.Series | dict | None) -> list[dict]:
     return []
 
 
+def _sembrar_checklist_desde_resumen(
+    expediente: str, url: str, titulo: str, resumen: str
+) -> None:
+    """Crea checklist en Sheets a partir del resumen IA (si aún no existe)."""
+    if not sheets_store.is_configured() or not expediente:
+        return
+    try:
+        existentes = sheets_store.load_checklist(expediente, url)
+        if existentes:
+            return
+        extras = sheets_store.parse_documentacion_desde_resumen(resumen)
+        sheets_store.ensure_checklist(expediente, url, titulo, items=extras)
+    except Exception:
+        pass
+
+
+def _widget_checklist_docs(
+    expediente: str,
+    url: str,
+    titulo: str,
+    *,
+    clave_prefix: str,
+) -> None:
+    """Checklist de documentación a preparar, con estados y subida a Drive."""
+    if not expediente and not url:
+        st.caption("Selecciona o indica un expediente para el checklist.")
+        return
+    if not sheets_store.is_configured():
+        st.info("Configura Google Sheets para guardar el checklist en Drive.")
+        return
+
+    st.markdown("**Checklist de documentación**")
+    st.caption(
+        "Pendiente · En preparación · Preparado · No aplica. "
+        "Puedes subir el fichero a Drive o pegar un enlace."
+    )
+
+    try:
+        items = sheets_store.load_checklist(expediente, url)
+    except sheets_store.SheetsError as exc:
+        st.error(str(exc))
+        return
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button(
+            "📋 Crear / cargar plantilla GREFA",
+            key=f"chk_crear_{clave_prefix}",
+            width="stretch",
+        ):
+            try:
+                resumen = (st.session_state.get("pdf_resumenes") or {}).get(
+                    _clave_expediente(expediente, url), ""
+                )
+                extras = sheets_store.parse_documentacion_desde_resumen(resumen)
+                items = sheets_store.ensure_checklist(
+                    expediente, url, titulo, items=extras
+                )
+                st.toast(f"Checklist listo ({len(items)} documentos).", icon="📋")
+                st.rerun()
+            except sheets_store.SheetsError as exc:
+                st.error(str(exc))
+    with col_b:
+        nuevo = st.text_input(
+            "Añadir documento",
+            key=f"chk_nuevo_{clave_prefix}",
+            placeholder="Ej. Certificado de penalidades…",
+        )
+        if nuevo.strip() and st.button(
+            "➕ Añadir", key=f"chk_add_{clave_prefix}", width="stretch"
+        ):
+            try:
+                sheets_store.upsert_checklist_item(
+                    expediente,
+                    url,
+                    nuevo.strip(),
+                    titulo=titulo,
+                    estado="Pendiente",
+                )
+                st.rerun()
+            except sheets_store.SheetsError as exc:
+                st.error(str(exc))
+
+    if not items:
+        st.info(
+            "Aún no hay checklist. Pulsa «Crear / cargar plantilla GREFA» "
+            "(o genera antes un resumen IA para incorporar requisitos del pliego)."
+        )
+        return
+
+    pendientes = sum(1 for i in items if i.get("estado") == "Pendiente")
+    en_prep = sum(1 for i in items if i.get("estado") == "En preparación")
+    listos = sum(1 for i in items if i.get("estado") == "Preparado")
+    st.caption(f"Resumen: {listos} preparados · {en_prep} en preparación · {pendientes} pendientes")
+
+    for idx, item in enumerate(items):
+        doc = item.get("documento") or f"Documento {idx + 1}"
+        row_n = int(item.get("_row") or 0) or None
+        with st.container(border=True):
+            st.markdown(f"**{doc}**")
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                estado = st.selectbox(
+                    "Estado",
+                    sheets_store.CHECKLIST_ESTADOS,
+                    index=(
+                        list(sheets_store.CHECKLIST_ESTADOS).index(item["estado"])
+                        if item.get("estado") in sheets_store.CHECKLIST_ESTADOS
+                        else 0
+                    ),
+                    key=f"chk_est_{clave_prefix}_{idx}",
+                )
+            with c2:
+                notas = st.text_input(
+                    "Notas",
+                    value=item.get("notas") or "",
+                    key=f"chk_notas_{clave_prefix}_{idx}",
+                )
+            enlace_drive = item.get("enlace_drive") or ""
+            if enlace_drive:
+                st.markdown(f"[📄 Abrir en Drive]({enlace_drive})")
+
+            up = st.file_uploader(
+                "Subir fichero a Drive",
+                type=None,
+                key=f"chk_up_{clave_prefix}_{idx}",
+                help="Se guarda en Drive (cuenta de servicio) y se enlaza aquí.",
+            )
+            pegado = st.text_input(
+                "O pegar enlace Drive",
+                value=enlace_drive,
+                key=f"chk_link_{clave_prefix}_{idx}",
+            )
+            if st.button("💾 Guardar ítem", key=f"chk_save_{clave_prefix}_{idx}"):
+                try:
+                    link_final = (pegado or "").strip()
+                    if up is not None:
+                        subido = drive_docs.upload_bytes(
+                            up.getvalue(),
+                            up.name or f"{doc}.bin",
+                        )
+                        link_final = subido.get("webViewLink") or link_final
+                    sheets_store.upsert_checklist_item(
+                        expediente,
+                        url,
+                        doc,
+                        titulo=titulo,
+                        estado=estado,
+                        notas=notas,
+                        enlace_drive=link_final,
+                        row=row_n,
+                    )
+                    st.toast("Checklist actualizado en Drive.", icon="✅")
+                    st.rerun()
+                except (sheets_store.SheetsError, drive_docs.DriveDocsError) as exc:
+                    st.error(str(exc))
+
+
 def _widget_resumen_pliego(
     expediente: str,
     url: str,
@@ -638,14 +809,19 @@ def _widget_resumen_pliego(
     clave_prefix: str,
     documentos: list[dict] | None = None,
 ) -> None:
-    """Multi-PDF (PCAP/PPT) + descarga desde PLACSP + resumen IA."""
+    """Multi-PDF (PCAP/PPT) + descarga desde ficha PLACSP + resumen IA."""
     if not pdf_summary.is_configured():
         st.caption("Configura `[gemini] api_key` en Secrets para activar el resumen IA.")
         return
 
     clave = _clave_expediente(expediente, url)
     resumenes = st.session_state.setdefault("pdf_resumenes", {})
-    docs_placsp = list(documentos or [])
+    cache_docs_key = f"placsp_docs_cache_{clave_prefix}"
+    docs_placsp = list(
+        st.session_state.get(cache_docs_key)
+        or documentos
+        or []
+    )
     # Clave estable: no depende del texto del expediente (evita vaciar el uploader al teclear).
     stash_key = f"pdf_stash_{clave_prefix}"
     stash: dict[str, bytes] = st.session_state.setdefault(stash_key, {})
@@ -662,27 +838,72 @@ def _widget_resumen_pliego(
             st.rerun()
         return
 
-    if docs_placsp:
+    if url:
         st.caption(
-            "Documentos detectados en PLACSP: "
-            + ", ".join(f"{d.get('tipo', '?')}: {d.get('nombre', 'doc')}" for d in docs_placsp[:6])
+            "Los pliegos se obtienen de los enlaces públicos de la **ficha PLACSP** "
+            "(GetDocumentById), igual que en la plataforma."
         )
-        if st.button(
-            "⬇️ Obtener PCAP + PPT de PLACSP y analizar",
-            key=f"placsp_docs_{clave_prefix}",
-            type="primary",
-        ):
-            with st.spinner("Descargando pliegos de PLACSP y analizando con Gemini…"):
+        if docs_placsp:
+            st.caption(
+                "Documentos detectados: "
+                + ", ".join(
+                    f"{d.get('tipo', '?')}: {d.get('nombre', 'doc')}"
+                    for d in docs_placsp[:8]
+                )
+            )
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            leer_ficha = st.button(
+                "🔗 Leer enlaces de la ficha PLACSP",
+                key=f"placsp_scan_{clave_prefix}",
+                width="stretch",
+            )
+        with col_f2:
+            analizar = st.button(
+                "⬇️ Descargar pliegos y analizar",
+                key=f"placsp_docs_{clave_prefix}",
+                type="primary",
+                width="stretch",
+            )
+
+        if leer_ficha:
+            with st.spinner("Leyendo documentos de la ficha PLACSP…"):
                 try:
+                    docs_placsp = pliegos_placsp.resolver_documentos(
+                        documentos, url, forzar_ficha=True
+                    )
+                    st.session_state[cache_docs_key] = docs_placsp
+                    if docs_placsp:
+                        st.success(f"{len(docs_placsp)} documento(s) con enlace público.")
+                    else:
+                        st.warning(
+                            "La ficha no expuso PDFs descargables (a veces requieren sesión)."
+                        )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo leer la ficha: {exc}")
+
+        if analizar:
+            with st.spinner("Obteniendo pliegos de PLACSP y analizando con Gemini…"):
+                try:
+                    docs_placsp = pliegos_placsp.resolver_documentos(
+                        docs_placsp or documentos, url, forzar_ficha=True
+                    )
+                    st.session_state[cache_docs_key] = docs_placsp
                     descargados = pliegos_placsp.download_documentos(
-                        docs_placsp, solo_tipos=("PCAP", "PPT"), max_docs=4
+                        docs_placsp,
+                        solo_tipos=("PCAP", "PPT", "PLIEGO"),
+                        max_docs=6,
                     )
                     ok = [d for d in descargados if d.get("bytes")]
                     fallos = [d for d in descargados if d.get("error")]
                     for fallo in fallos:
                         st.warning(f"{fallo.get('nombre')}: {fallo.get('error')}")
                     if not ok:
-                        st.error("No se pudo descargar ningún pliego público desde PLACSP.")
+                        st.error(
+                            "No se pudo descargar ningún pliego público desde PLACSP. "
+                            "Prueba a subir el PCAP y el PPT manualmente."
+                        )
                     else:
                         texto = pdf_summary.summarize_documentos(
                             ok, expediente=expediente, titulo=titulo
@@ -690,7 +911,10 @@ def _widget_resumen_pliego(
                         resumenes[clave] = texto
                         if sheets_store.is_configured():
                             sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
-                            st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                            _sembrar_checklist_desde_resumen(
+                                expediente, url, titulo, texto
+                            )
+                            st.toast("Resumen y checklist guardados en Drive.", icon="✅")
                         st.rerun()
                 except pdf_summary.PdfSummaryError as exc:
                     st.error(str(exc))
@@ -698,8 +922,7 @@ def _widget_resumen_pliego(
                     st.error(f"Error al obtener pliegos: {exc}")
     else:
         st.caption(
-            "No hay enlaces de pliegos en el feed cargado. "
-            "Sube manualmente el PCAP y el PPT (PDF)."
+            "Sin enlace PLACSP: sube manualmente el PCAP y el PPT (PDF)."
         )
 
     st.markdown("**Subir pliegos (varios PDF)**")
@@ -771,7 +994,10 @@ def _widget_resumen_pliego(
                         st.session_state[stash_key] = {}
                         if sheets_store.is_configured():
                             sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
-                            st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                            _sembrar_checklist_desde_resumen(
+                                expediente, url, titulo, texto
+                            )
+                            st.toast("Resumen y checklist guardados en Drive.", icon="✅")
                         st.rerun()
                     except pdf_summary.PdfSummaryError as exc:
                         st.error(str(exc))
@@ -1900,16 +2126,23 @@ def pestana_analisis_pliegos(
                     st.markdown(previo)
 
     st.markdown("**2. Documentos y análisis**")
-    if not gemini_ok:
+    if gemini_ok:
+        _widget_resumen_pliego(
+            expediente,
+            url,
+            titulo,
+            clave_prefix="tab_pliego",
+            documentos=documentos,
+        )
+    else:
         st.info("Configura Gemini para generar el resumen IA.")
-        return
 
-    _widget_resumen_pliego(
+    st.markdown("**3. Checklist de documentación a presentar**")
+    _widget_checklist_docs(
         expediente,
         url,
         titulo,
         clave_prefix="tab_pliego",
-        documentos=documentos,
     )
 
 
@@ -2010,12 +2243,21 @@ def pestana_seguimiento() -> None:
                     st.error(str(exc))
 
             if sheets_store.is_configured() and pdf_summary.is_configured():
-                with st.expander("Resumen de pliego"):
+                with st.expander("Resumen de pliego (ficha PLACSP)"):
                     _widget_resumen_pliego(
                         fila.get("expediente", ""),
                         fila.get("url", ""),
                         titulo,
                         clave_prefix=f"seg_{clave[:30]}",
+                        documentos=_docs_desde_fila(fila) if hasattr(fila, "get") else [],
+                    )
+            if sheets_store.is_configured():
+                with st.expander("Checklist documentación (Drive)"):
+                    _widget_checklist_docs(
+                        fila.get("expediente", ""),
+                        fila.get("url", ""),
+                        titulo,
+                        clave_prefix=f"chkseg_{clave[:30]}",
                     )
 
 

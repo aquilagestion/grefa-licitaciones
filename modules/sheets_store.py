@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime
 from typing import Any
@@ -36,6 +37,7 @@ CPV_SHEET = "CPV"
 KEYWORDS_SHEET = "PalabrasClave"
 OPPORTUNITIES_SHEET = "Oportunidades"
 PLIEGOS_SHEET = "Pliegos"
+CHECKLIST_SHEET = "ChecklistDocs"
 README_SHEET = "Instrucciones"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
@@ -65,6 +67,16 @@ PLIEGO_HEADERS = [
     "Resumen",
     "Fecha análisis",
 ]
+CHECKLIST_HEADERS = [
+    "ID Expediente",
+    "Enlace",
+    "Título",
+    "Documento",
+    "Estado",
+    "Notas",
+    "Enlace Drive",
+    "Fecha actualización",
+]
 
 #: Valor inicial de la columna editable de seguimiento.
 DEFAULT_TRACKING = "Pendiente de revisar"
@@ -76,6 +88,26 @@ SEGUIMIENTO_OPTIONS = (
     "Descartada",
     "Adjudicada a terceros",
     "Ganada",
+)
+
+CHECKLIST_ESTADOS = (
+    "Pendiente",
+    "En preparación",
+    "Preparado",
+    "No aplica",
+)
+
+#: Plantilla base de documentación a preparar al interesarse por una licitación.
+CHECKLIST_PLANTILLA = (
+    "DEUC / Declaración responsable",
+    "Solvencia económica",
+    "Solvencia técnica / experiencia",
+    "Oferta económica",
+    "Oferta técnica / memoria",
+    "Garantías / seguros",
+    "Documentación societaria (poderes, estatutos)",
+    "Certificados AEAT y Seguridad Social",
+    "Otros requisitos del pliego",
 )
 
 ACTIVO_OPTIONS = ("sí", "no")
@@ -537,6 +569,200 @@ def load_pliegos_index(hoja_id: str | None = None) -> dict[str, str]:
         return {}
 
 
+def _normalizar_item_checklist(texto: str) -> str:
+    return " ".join(str(texto or "").strip().split())
+
+
+def parse_documentacion_desde_resumen(resumen: str) -> list[str]:
+    """Extrae viñetas de la sección «Documentación a presentar» de un resumen IA."""
+    if not resumen or not str(resumen).strip():
+        return []
+    texto = str(resumen)
+    m = re.search(
+        r"##\s*Documentaci[oó]n a presentar\s*\n(.*?)(?=\n##\s|\Z)",
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return []
+    bloque = m.group(1)
+    items: list[str] = []
+    for linea in bloque.splitlines():
+        limpia = linea.strip()
+        limpia = re.sub(r"^[-*•]\s+", "", limpia)
+        limpia = re.sub(r"^\d+[.)]\s+", "", limpia).strip()
+        if len(limpia) < 4:
+            continue
+        if limpia.lower() in {"no consta", "ninguno", "n/a"}:
+            continue
+        items.append(_normalizar_item_checklist(limpia)[:200])
+    # Deduplicar preservando orden
+    vistos: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        clave = item.lower()
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        out.append(item)
+    return out[:25]
+
+
+def load_checklist(
+    expediente: str,
+    enlace: str,
+    hoja_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Ítems de checklist de documentación para un expediente."""
+    hoja = get_spreadsheet(hoja_id)
+    pestana = _worksheet(hoja, CHECKLIST_SHEET, CHECKLIST_HEADERS)
+    clave_objetivo = _clave(expediente, enlace)
+    filas: list[dict[str, str]] = []
+    try:
+        for registro in pestana.get_all_records():
+            if _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            ) != clave_objetivo:
+                continue
+            filas.append(
+                {
+                    "expediente": str(_campo(registro, "ID Expediente", "expediente")),
+                    "url": str(_campo(registro, "Enlace", "enlace")),
+                    "titulo": str(_campo(registro, "Título", "titulo")),
+                    "documento": str(_campo(registro, "Documento", "documento")),
+                    "estado": str(_campo(registro, "Estado", "estado")) or "Pendiente",
+                    "notas": str(_campo(registro, "Notas", "notas")),
+                    "enlace_drive": str(
+                        _campo(registro, "Enlace Drive", "enlace_drive", "drive")
+                    ),
+                    "fecha": str(
+                        _campo(registro, "Fecha actualización", "fecha_actualizacion")
+                    ),
+                    "_row": "",  # se rellena abajo
+                }
+            )
+    except Exception as exc:
+        raise SheetsError(f"No se pudo leer ChecklistDocs: {exc}") from exc
+
+    # Incluir nº de fila real para updates
+    try:
+        registros = pestana.get_all_records()
+        idx = 0
+        for i, registro in enumerate(registros, start=2):
+            if _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            ) != clave_objetivo:
+                continue
+            if idx < len(filas):
+                filas[idx]["_row"] = str(i)
+                idx += 1
+    except Exception:
+        pass
+    return filas
+
+
+def ensure_checklist(
+    expediente: str,
+    enlace: str,
+    titulo: str = "",
+    *,
+    items: list[str] | None = None,
+    hoja_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Crea el checklist si no existe (plantilla + ítems extra del pliego)."""
+    existentes = load_checklist(expediente, enlace, hoja_id=hoja_id)
+    if existentes:
+        return existentes
+
+    plantilla = list(CHECKLIST_PLANTILLA)
+    extras = [_normalizar_item_checklist(x) for x in (items or []) if str(x).strip()]
+    vistos = {p.lower() for p in plantilla}
+    for extra in extras:
+        if extra.lower() not in vistos:
+            plantilla.append(extra)
+            vistos.add(extra.lower())
+
+    hoja = get_spreadsheet(hoja_id)
+    pestana = _worksheet(hoja, CHECKLIST_SHEET, CHECKLIST_HEADERS)
+    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    filas = [
+        [expediente, enlace, titulo, doc, "Pendiente", "", "", momento]
+        for doc in plantilla
+    ]
+    try:
+        pestana.append_rows(filas, value_input_option="USER_ENTERED")
+    except Exception:
+        for fila in filas:
+            pestana.append_row(fila, value_input_option="USER_ENTERED")
+    return load_checklist(expediente, enlace, hoja_id=hoja_id)
+
+
+def upsert_checklist_item(
+    expediente: str,
+    enlace: str,
+    documento: str,
+    *,
+    titulo: str = "",
+    estado: str = "Pendiente",
+    notas: str = "",
+    enlace_drive: str = "",
+    row: int | None = None,
+    hoja_id: str | None = None,
+) -> None:
+    """Crea o actualiza un ítem del checklist."""
+    documento = _normalizar_item_checklist(documento)
+    if not documento:
+        raise SheetsError("El nombre del documento está vacío.")
+    if estado not in CHECKLIST_ESTADOS:
+        estado = "Pendiente"
+
+    hoja = get_spreadsheet(hoja_id)
+    pestana = _worksheet(hoja, CHECKLIST_SHEET, CHECKLIST_HEADERS)
+    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    fila = [
+        expediente,
+        enlace,
+        titulo,
+        documento,
+        estado,
+        notas,
+        enlace_drive,
+        momento,
+    ]
+    clave_objetivo = _clave(expediente, enlace)
+    try:
+        if row and int(row) >= 2:
+            pestana.update(
+                f"A{int(row)}:H{int(row)}",
+                [fila],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        registros = pestana.get_all_records()
+        for indice, registro in enumerate(registros, start=2):
+            misma = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            ) == clave_objetivo
+            mismo_doc = _normalizar_item_checklist(
+                _campo(registro, "Documento", "documento")
+            ).lower() == documento.lower()
+            if misma and mismo_doc:
+                pestana.update(
+                    f"A{indice}:H{indice}",
+                    [fila],
+                    value_input_option="USER_ENTERED",
+                )
+                return
+        pestana.append_row(fila, value_input_option="USER_ENTERED")
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error guardando checklist: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Inicialización completa del libro
 # ---------------------------------------------------------------------------
@@ -622,6 +848,8 @@ def _ensure_named_sheets(hoja) -> dict[str, Any]:
         (CPV_SHEET, CPV_HEADERS, 100),
         (KEYWORDS_SHEET, KEYWORD_HEADERS, 200),
         (OPPORTUNITIES_SHEET, OPPORTUNITY_HEADERS, 2000),
+        (PLIEGOS_SHEET, PLIEGO_HEADERS, 500),
+        (CHECKLIST_SHEET, CHECKLIST_HEADERS, 2000),
         (README_SHEET, ["Instrucciones"], 40),
     ):
         if titulo in existentes:
@@ -731,6 +959,11 @@ def initialize_spreadsheet(
         ["Pestaña Pliegos"],
         ["- Resúmenes IA de pliegos PDF generados desde la aplicación."],
         ["- Una fila por expediente (se actualiza si se vuelve a analizar)."],
+        [""],
+        ["Pestaña ChecklistDocs"],
+        ["- Documentación a preparar por expediente (Pendiente / En preparación / Preparado)."],
+        ["- Enlace Drive: fichero subido desde la app o pegado a mano."],
+        ["- Opcional: sheets.drive_folder_id en Secrets para guardar en una carpeta concreta."],
         [""],
         ["Pestaña Historico"],
         ["- Snapshot diario automático de oportunidades Alta y Media."],
