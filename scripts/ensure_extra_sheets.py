@@ -23,7 +23,10 @@ def main() -> int:
 
     try:
         sheets_historico._worksheet_historico(hoja_id)
-        print("  OK Historico")
+        print("  OK Historico (legado/sync)")
+        for year in range(2021, 2027):
+            sheets_historico._worksheet_year(year, hoja_id)
+            print(f"  OK Historico_{year}")
         sheets_historico._worksheet_config(hoja_id)
         print("  OK Config")
         hoja = sheets_store.get_spreadsheet(hoja_id)

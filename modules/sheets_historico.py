@@ -1,11 +1,12 @@
-"""Histórico diario y configuración de sincronización en Google Sheets."""
+"""Histórico diario y por años en Google Sheets."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -14,8 +15,9 @@ from modules.admin_ambito import classify_organo
 
 LOGGER = logging.getLogger(__name__)
 
-HISTORICO_SHEET = "Historico"
+HISTORICO_SHEET = "Historico"  # legado / sync reciente
 CONFIG_SHEET = "Config"
+YEAR_SHEET_PREFIX = "Historico_"
 
 HISTORICO_HEADERS = [
     "Fecha snapshot",
@@ -33,12 +35,20 @@ HISTORICO_HEADERS = [
     "NIF órgano",
     "Ámbito administración",
     "Ubicación",
+    "Adjudicatario",
+    "NIF adjudicatario",
 ]
 
 CONFIG_HEADERS = ["Clave", "Valor"]
 
 CONFIG_ULTIMA_EJECUCION = "ultima_ejecucion"
 CONFIG_CLAVES_ALTA = "claves_alta_vistas"
+
+_YEAR_RE = re.compile(r"(20\d{2})")
+
+
+def sheet_name_for_year(year: int) -> str:
+    return f"{YEAR_SHEET_PREFIX}{int(year)}"
 
 
 def _clave_expediente(expediente: str, enlace: str) -> str:
@@ -55,7 +65,7 @@ def _worksheet_config(hoja_id: str | None = None):
 
 
 def _find_worksheet(hoja, titulo: str):
-    """Localiza una pestaña por nombre (sin crearla). Tolera mayúsculas/espacios."""
+    """Localiza una pestaña por nombre (sin crearla)."""
     objetivo = str(titulo).strip().lower()
     for pestana in hoja.worksheets():
         if str(pestana.title).strip().lower() == objetivo:
@@ -67,8 +77,29 @@ def _find_worksheet(hoja, titulo: str):
 
 
 def _worksheet_historico(hoja_id: str | None = None):
+    """Pestaña legado Historico (sync diario reciente)."""
     hoja = store.get_spreadsheet(hoja_id)
     return store._worksheet(hoja, HISTORICO_SHEET, HISTORICO_HEADERS)
+
+
+def _worksheet_year(year: int, hoja_id: str | None = None):
+    hoja = store.get_spreadsheet(hoja_id)
+    return store._worksheet(hoja, sheet_name_for_year(year), HISTORICO_HEADERS)
+
+
+def list_historico_years(hoja_id: str | None = None) -> list[int]:
+    """Años con pestaña Historico_YYYY (y legado si aporta fechas)."""
+    if not store.is_configured():
+        return []
+    hoja = store.get_spreadsheet(hoja_id)
+    años: set[int] = set()
+    for pestana in hoja.worksheets():
+        titulo = str(pestana.title).strip()
+        if titulo.lower().startswith(YEAR_SHEET_PREFIX.lower()):
+            sufijo = titulo[len(YEAR_SHEET_PREFIX) :]
+            if sufijo.isdigit():
+                años.add(int(sufijo))
+    return sorted(años)
 
 
 def _leer_config_map(hoja_id: str | None = None) -> dict[str, str]:
@@ -164,11 +195,12 @@ def _fila_historico(fila: pd.Series, momento: str) -> list[str]:
         texto(fila.get("nif_organo")),
         ambito,
         texto(fila.get("ubicacion")),
+        texto(fila.get("adjudicatario")),
+        texto(fila.get("nif_adjudicatario")),
     ]
 
 
 def _indice_cabeceras(fila_cabecera: list[str]) -> dict[str, int]:
-    """Mapea nombre de cabecera (minúsculas) → índice de columna."""
     indices: dict[str, int] = {}
     for indice, nombre in enumerate(fila_cabecera):
         clave = str(nombre or "").strip().lower()
@@ -201,93 +233,142 @@ def _parse_presupuesto(valor: str) -> float | None:
         return None
 
 
-def load_historico_dataframe(hoja_id: str | None = None) -> pd.DataFrame:
-    """Lee la pestaña Histórico de Google Sheets como DataFrame unificado."""
+def _ano_desde_texto(*textos: str, default: int | None = None) -> int | None:
+    for texto in textos:
+        if not texto:
+            continue
+        # dd/mm/yyyy o yyyy-mm-dd
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(20\d{2})", str(texto))
+        if m:
+            return int(m.group(3))
+        m = re.search(r"(20\d{2})-\d{2}-\d{2}", str(texto))
+        if m:
+            return int(m.group(1))
+        m = _YEAR_RE.search(str(texto))
+        if m:
+            year = int(m.group(1))
+            if 2000 <= year <= 2100:
+                return year
+    return default
+
+
+def _valores_a_filas(valores: list[list[Any]], *, fuente: str = "") -> list[dict[str, Any]]:
+    if not valores or len(valores) < 2:
+        return []
+    indices = _indice_cabeceras(valores[0])
+    if "id expediente" not in indices and "expediente" not in indices:
+        return []
+
+    filas: list[dict[str, Any]] = []
+    for fila in valores[1:]:
+        if not fila or not any(str(c).strip() for c in fila):
+            continue
+        expediente = _celda(fila, indices, "ID Expediente", "expediente")
+        if not expediente:
+            continue
+        organo = _celda(fila, indices, "Órgano de Contratación", "organo")
+        ambito = _celda(fila, indices, "Ámbito administración", "ambito_administracion")
+        if not ambito and organo:
+            ambito = classify_organo(organo)
+        fecha_snapshot = _celda(fila, indices, "Fecha snapshot", "fecha_snapshot")
+        filas.append(
+            {
+                "fecha_snapshot": fecha_snapshot,
+                "relevancia": _celda(fila, indices, "Relevancia (%)", "relevancia"),
+                "categoria": _celda(fila, indices, "Categoría", "categoria"),
+                "expediente": expediente,
+                "titulo": _celda(fila, indices, "Título / Objeto", "titulo"),
+                "organo_contratacion": organo,
+                "presupuesto_sin_iva": _parse_presupuesto(
+                    _celda(fila, indices, "Presupuesto sin IVA", "presupuesto")
+                ),
+                "estado": _celda(fila, indices, "Estado PLACSP", "estado"),
+                "fecha_limite": _celda(fila, indices, "Fecha límite", "fecha_limite"),
+                "url": _celda(fila, indices, "Enlace", "enlace", "url"),
+                "cpvs_match": _celda(fila, indices, "CPV coincidentes", "cpvs_match"),
+                "keywords_match": _celda(fila, indices, "Palabras clave", "keywords_match"),
+                "nif_organo": _celda(fila, indices, "NIF órgano", "nif_organo"),
+                "nivel_administracion": ambito,
+                "ubicacion": _celda(fila, indices, "Ubicación", "ubicacion"),
+                "adjudicatario": _celda(fila, indices, "Adjudicatario", "adjudicatario"),
+                "nif_adjudicatario": _celda(
+                    fila, indices, "NIF adjudicatario", "nif_adjudicatario"
+                ),
+                "_fuente_sheet": fuente,
+            }
+        )
+    return filas
+
+
+def _leer_pestana_valores(pestana) -> list[list[Any]]:
+    try:
+        return pestana.get_all_values()
+    except Exception as exc:
+        raise store.SheetsError(f"No se pudo leer {pestana.title}: {exc}") from exc
+
+
+def load_historico_dataframe(
+    hoja_id: str | None = None,
+    *,
+    years: Sequence[int] | None = None,
+    include_legacy: bool = True,
+) -> pd.DataFrame:
+    """Lee Historico_YYYY (+ legado Historico si hace falta)."""
     if not store.is_configured():
         return pd.DataFrame()
 
     try:
         hoja = store.get_spreadsheet(hoja_id)
-        pestana = _find_worksheet(hoja, HISTORICO_SHEET)
-        if pestana is None:
-            raise store.SheetsError(
-                'No existe la pestaña "Historico" en la hoja. '
-                "Créala con scripts/ensure_extra_sheets.py."
+        disponibles = list_historico_years(hoja_id)
+        if years:
+            seleccion = [int(y) for y in years]
+        elif disponibles:
+            seleccion = disponibles
+        else:
+            seleccion = []
+
+        filas: list[dict[str, Any]] = []
+        for year in seleccion:
+            pestana = _find_worksheet(hoja, sheet_name_for_year(year))
+            if pestana is None:
+                continue
+            filas.extend(
+                _valores_a_filas(_leer_pestana_valores(pestana), fuente=sheet_name_for_year(year))
             )
-        # Solo lectura: nunca crear/renombrar pestañas aquí.
-        valores = pestana.get_all_values()
+
+        if include_legacy and not filas:
+            legado = _find_worksheet(hoja, HISTORICO_SHEET)
+            if legado is not None:
+                filas.extend(_valores_a_filas(_leer_pestana_valores(legado), fuente=HISTORICO_SHEET))
     except store.SheetsError:
         raise
     except Exception as exc:
         raise store.SheetsError(f"No se pudo leer el histórico en Sheets: {exc}") from exc
 
-    if not valores or len(valores) < 2:
+    if not filas:
         return pd.DataFrame()
 
-    indices = _indice_cabeceras(valores[0])
-    if "id expediente" not in indices and "expediente" not in indices:
-        # Cabeceras ausentes o pestaña vacía tras un update parcial.
-        raise store.SheetsError(
-            "La pestaña Histórico no tiene cabeceras reconocibles. "
-            "Recarga la hoja o ejecuta scripts/ensure_extra_sheets.py."
-        )
-
-    filas: list[dict[str, Any]] = []
-    try:
-        for fila in valores[1:]:
-            if not fila or not any(str(c).strip() for c in fila):
-                continue
-            expediente = _celda(fila, indices, "ID Expediente", "expediente")
-            if not expediente:
-                continue
-            organo = _celda(fila, indices, "Órgano de Contratación", "organo")
-            ambito = _celda(fila, indices, "Ámbito administración", "ambito_administracion")
-            if not ambito and organo:
-                ambito = classify_organo(organo)
-            filas.append(
-                {
-                    "fecha_snapshot": _celda(fila, indices, "Fecha snapshot", "fecha_snapshot"),
-                    "relevancia": _celda(fila, indices, "Relevancia (%)", "relevancia"),
-                    "categoria": _celda(fila, indices, "Categoría", "categoria"),
-                    "expediente": expediente,
-                    "titulo": _celda(fila, indices, "Título / Objeto", "titulo"),
-                    "organo_contratacion": organo,
-                    "presupuesto_sin_iva": _parse_presupuesto(
-                        _celda(fila, indices, "Presupuesto sin IVA", "presupuesto")
-                    ),
-                    "estado": _celda(fila, indices, "Estado PLACSP", "estado"),
-                    "fecha_limite": _celda(fila, indices, "Fecha límite", "fecha_limite"),
-                    "url": _celda(fila, indices, "Enlace", "enlace", "url"),
-                    "cpvs_match": _celda(fila, indices, "CPV coincidentes", "cpvs_match"),
-                    "keywords_match": _celda(fila, indices, "Palabras clave", "keywords_match"),
-                    "nif_organo": _celda(fila, indices, "NIF órgano", "nif_organo"),
-                    "nivel_administracion": ambito,
-                    "ubicacion": _celda(fila, indices, "Ubicación", "ubicacion"),
-                }
-            )
-    except Exception as exc:
-        raise store.SheetsError(f"Error al interpretar el histórico: {exc}") from exc
-
-    return pd.DataFrame(filas)
+    df = pd.DataFrame(filas)
+    if "url" in df.columns:
+        df = df.drop_duplicates(subset=["expediente", "url"], keep="first")
+    else:
+        df = df.drop_duplicates(subset=["expediente"], keep="first")
+    return df.reset_index(drop=True)
 
 
-def load_claves_historico(hoja_id: str | None = None) -> set[str]:
-    """Claves expediente|url ya presentes en la pestaña Histórico."""
-    if not store.is_configured():
+def load_claves_historico(
+    hoja_id: str | None = None,
+    *,
+    years: Sequence[int] | None = None,
+) -> set[str]:
+    """Claves expediente|url en pestañas de histórico (años o legado)."""
+    df = load_historico_dataframe(hoja_id, years=years, include_legacy=True)
+    if df.empty:
         return set()
-    try:
-        pestana = _worksheet_historico(hoja_id)
-        return {
-            _clave_expediente(
-                store._campo(reg, "ID Expediente", "expediente"),
-                store._campo(reg, "Enlace", "enlace"),
-            )
-            for reg in pestana.get_all_records()
-        }
-    except store.SheetsError:
-        raise
-    except Exception as exc:
-        raise store.SheetsError(f"No se pudo leer claves del histórico: {exc}") from exc
+    return {
+        _clave_expediente(fila.get("expediente", ""), fila.get("url", ""))
+        for _, fila in df.iterrows()
+    }
 
 
 def _momento_importacion(fila: pd.Series, etiqueta: str) -> str:
@@ -300,6 +381,55 @@ def _momento_importacion(fila: pd.Series, etiqueta: str) -> str:
     return etiqueta
 
 
+def _ano_fila_import(fila: pd.Series, default_year: int | None) -> int:
+    fecha = fila.get("fecha_actualizacion")
+    if fecha is not None and not (isinstance(fecha, float) and pd.isna(fecha)):
+        try:
+            return int(pd.to_datetime(fecha).year)
+        except (TypeError, ValueError):
+            pass
+    year = _ano_desde_texto(str(fila.get("expediente", "")), default=default_year)
+    return int(year or default_year or datetime.now().year)
+
+
+def _append_rows(pestana, filas: list[list[str]], chunk_size: int = 500) -> None:
+    for inicio in range(0, len(filas), chunk_size):
+        pestana.append_rows(filas[inicio : inicio + chunk_size], value_input_option="USER_ENTERED")
+
+
+def _bulk_write(pestana, valores: list[list[Any]], chunk: int = 4000) -> None:
+    pestana.clear()
+    if not valores:
+        return
+    for inicio in range(0, len(valores), chunk):
+        trozo = valores[inicio : inicio + chunk]
+        pestana.update(trozo, f"A{inicio + 1}", value_input_option="USER_ENTERED")
+
+
+def replace_year_historico(
+    df: pd.DataFrame,
+    year: int,
+    *,
+    categorias: tuple[str, ...] = ("Alta", "Media"),
+    hoja_id: str | None = None,
+    etiqueta_snapshot: str | None = None,
+) -> int:
+    """Sustituye Historico_YYYY con el DF puntuado (Alta/Media)."""
+    if not store.is_configured():
+        return 0
+    filtrado = df[df["categoria"].isin(list(categorias))].copy() if not df.empty else df
+    etiqueta = etiqueta_snapshot or f"Importación PLACSP {year}"
+    pestana = _worksheet_year(year, hoja_id)
+
+    matriz = [HISTORICO_HEADERS]
+    for _, fila in filtrado.iterrows():
+        momento = _momento_importacion(fila, etiqueta)
+        matriz.append(_fila_historico(fila, momento))
+
+    _bulk_write(pestana, matriz)
+    return max(len(matriz) - 1, 0)
+
+
 def append_historico_bulk(
     df: pd.DataFrame,
     *,
@@ -308,8 +438,10 @@ def append_historico_bulk(
     claves_existentes: set[str] | None = None,
     etiqueta_snapshot: str = "Importación histórica PLACSP",
     chunk_size: int = 500,
+    default_year: int | None = None,
+    replace_year: bool = False,
 ) -> tuple[int, set[str]]:
-    """Importación masiva al histórico; deduplica contra claves ya presentes."""
+    """Importación masiva; escribe en Historico_YYYY según la fecha de cada fila."""
     if df.empty or not store.is_configured():
         return 0, claves_existentes or set()
 
@@ -317,26 +449,90 @@ def append_historico_bulk(
     if filtrado.empty:
         return 0, claves_existentes or set()
 
-    existentes = claves_existentes if claves_existentes is not None else load_claves_historico(hoja_id)
-    pestana = _worksheet_historico(hoja_id)
+    if replace_year and default_year is not None:
+        escritas = replace_year_historico(
+            filtrado,
+            default_year,
+            categorias=categorias,
+            hoja_id=hoja_id,
+            etiqueta_snapshot=etiqueta_snapshot,
+        )
+        claves = {
+            _clave_expediente(fila.get("expediente", ""), fila.get("url", ""))
+            for _, fila in filtrado.iterrows()
+        }
+        if claves_existentes is not None:
+            claves_existentes |= claves
+            return escritas, claves_existentes
+        return escritas, claves
 
-    nuevas_filas: list[list[str]] = []
+    existentes = (
+        claves_existentes
+        if claves_existentes is not None
+        else load_claves_historico(hoja_id)
+    )
+
+    por_ano: dict[int, list[list[str]]] = {}
     for _, fila in filtrado.iterrows():
         clave = _clave_expediente(fila.get("expediente", ""), fila.get("url", ""))
         if clave in existentes:
             continue
         existentes.add(clave)
+        year = _ano_fila_import(fila, default_year)
         momento = _momento_importacion(fila, etiqueta_snapshot)
-        nuevas_filas.append(_fila_historico(fila, momento))
+        por_ano.setdefault(year, []).append(_fila_historico(fila, momento))
 
-    if not nuevas_filas:
-        return 0, existentes
+    total = 0
+    for year, nuevas in sorted(por_ano.items()):
+        pestana = _worksheet_year(year, hoja_id)
+        _append_rows(pestana, nuevas, chunk_size=chunk_size)
+        total += len(nuevas)
 
-    for inicio in range(0, len(nuevas_filas), chunk_size):
-        trozo = nuevas_filas[inicio : inicio + chunk_size]
-        pestana.append_rows(trozo, value_input_option="USER_ENTERED")
+    return total, existentes
 
-    return len(nuevas_filas), existentes
+
+def migrate_legacy_to_year_sheets(hoja_id: str | None = None) -> dict[int, int]:
+    """Copia la pestaña legado Historico a Historico_YYYY (sin borrar el legado)."""
+    if not store.is_configured():
+        return {}
+
+    hoja = store.get_spreadsheet(hoja_id)
+    legado = _find_worksheet(hoja, HISTORICO_SHEET)
+    if legado is None:
+        return {}
+
+    filas = _valores_a_filas(_leer_pestana_valores(legado), fuente=HISTORICO_SHEET)
+    if not filas:
+        return {}
+
+    por_ano: dict[int, list[dict[str, Any]]] = {}
+    for fila in filas:
+        year = _ano_desde_texto(
+            fila.get("fecha_snapshot", ""),
+            fila.get("expediente", ""),
+            default=datetime.now().year,
+        ) or datetime.now().year
+        por_ano.setdefault(int(year), []).append(fila)
+
+    resultado: dict[int, int] = {}
+    for year, items in sorted(por_ano.items()):
+        pestana = _worksheet_year(year, hoja_id)
+        existentes = {
+            _clave_expediente(r.get("expediente", ""), r.get("url", ""))
+            for r in _valores_a_filas(_leer_pestana_valores(pestana))
+        }
+        nuevas: list[list[str]] = []
+        for item in items:
+            clave = _clave_expediente(item.get("expediente", ""), item.get("url", ""))
+            if clave in existentes:
+                continue
+            existentes.add(clave)
+            serie = pd.Series(item)
+            nuevas.append(_fila_historico(serie, item.get("fecha_snapshot") or f"Migrado {year}"))
+        if nuevas:
+            _append_rows(pestana, nuevas)
+        resultado[year] = len(nuevas)
+    return resultado
 
 
 def append_historico_snapshot(
@@ -345,7 +541,7 @@ def append_historico_snapshot(
     categorias: tuple[str, ...] = ("Alta", "Media"),
     hoja_id: str | None = None,
 ) -> int:
-    """Añade filas del snapshot diario (Alta/Media). Devuelve filas añadidas."""
+    """Snapshot diario Alta/Media → Historico_{año actual} (+ legado Historico)."""
     if df.empty or not store.is_configured():
         return 0
 
@@ -355,14 +551,16 @@ def append_historico_snapshot(
 
     momento = datetime.now().strftime("%d/%m/%Y %H:%M")
     prefijo_hoy = datetime.now().strftime("%d/%m/%Y")
-    pestana = _worksheet_historico(hoja_id)
+    year = datetime.now().year
+    pestana_ano = _worksheet_year(year, hoja_id)
+    pestana_legado = _worksheet_historico(hoja_id)
 
     existentes_hoy = {
         _clave_expediente(
             store._campo(reg, "ID Expediente", "expediente"),
             store._campo(reg, "Enlace", "enlace"),
         )
-        for reg in pestana.get_all_records()
+        for reg in pestana_ano.get_all_records()
         if str(store._campo(reg, "Fecha snapshot", "fecha_snapshot", default="")).startswith(
             prefijo_hoy
         )
@@ -376,7 +574,8 @@ def append_historico_snapshot(
         nuevas_filas.append(_fila_historico(fila, momento))
 
     if nuevas_filas:
-        pestana.append_rows(nuevas_filas, value_input_option="USER_ENTERED")
+        pestana_ano.append_rows(nuevas_filas, value_input_option="USER_ENTERED")
+        pestana_legado.append_rows(nuevas_filas, value_input_option="USER_ENTERED")
     return len(nuevas_filas)
 
 

@@ -1690,11 +1690,23 @@ def pestana_seguimiento() -> None:
                     )
 
 
-@st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
-def _cargar_historico_drive_cached(spreadsheet_id: str) -> pd.DataFrame:
-    """Cache de servidor. No usar session_state para el DataFrame (rompe Cloud)."""
+@st.cache_data(ttl=300)
+def _listar_anos_historico_cached(spreadsheet_id: str) -> list[int]:
     _ = spreadsheet_id
-    return sheets_historico.load_historico_dataframe()
+    return sheets_historico.list_historico_years()
+
+
+@st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
+def _cargar_historico_drive_cached(
+    spreadsheet_id: str, years_key: str = ""
+) -> pd.DataFrame:
+    """Cache de servidor por hoja + años seleccionados."""
+    _ = spreadsheet_id
+    years = [int(y) for y in years_key.split(",") if y.strip().isdigit()] or None
+    return sheets_historico.load_historico_dataframe(
+        years=years,
+        include_legacy=not bool(years),
+    )
 
 
 def _combinar_fuentes_historico(
@@ -1703,7 +1715,7 @@ def _combinar_fuentes_historico(
     incluir_parquet: bool,
     drive_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Une feed vivo, Parquet local y pestaña Histórico de Drive."""
+    """Une feed vivo, Parquet local y pestañas Historico_YYYY de Drive."""
     partes: list[pd.DataFrame] = []
     if incluir_parquet and historico_placsp.is_available():
         partes.append(historico_placsp.load())
@@ -1743,8 +1755,8 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
 def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.subheader("Histórico en Drive y búsqueda avanzada")
     st.caption(
-        "Consulta el histórico en Google Sheets y el feed en vivo. "
-        "Filtra por ID de expediente, NIF o ámbito del órgano (local, autonómico, nacional)."
+        "Histórico por años en Google Sheets (`Historico_2021`…). "
+        "Filtra por ID expediente, NIF de órgano/adjudicatario o ámbito administrativo."
     )
 
     drive_disponible = sheets_store.is_configured()
@@ -1754,24 +1766,46 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     col_drive, col_vivo = st.columns(2)
     with col_drive:
         if drive_disponible:
+            try:
+                años_disp = _listar_anos_historico_cached(
+                    sheets_store.spreadsheet_id() or "default"
+                )
+            except Exception:
+                años_disp = []
+            if not años_disp:
+                años_disp = list(range(2021, 2027))
+                st.caption("Aún no hay pestañas por año; se usará la pestaña legado `Historico`.")
+            años_sel = st.multiselect(
+                "Años (pestañas Drive)",
+                options=años_disp,
+                default=años_disp[-3:] if len(años_disp) >= 3 else años_disp,
+                key="hist_anos",
+            )
             incluir_drive = st.checkbox(
                 "Incluir histórico en Drive",
                 value=False,
                 key="hist_incluir_drive",
-                help="Activa y pulsa Cargar. No se guarda el listado en la sesión del navegador.",
             )
             refrescar = st.button("📥 Cargar histórico de Drive", key="hist_cargar_drive")
             if incluir_drive:
                 hoja_id = sheets_store.spreadsheet_id() or "default"
+                years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
                 if refrescar:
                     try:
                         _cargar_historico_drive_cached.clear()
                     except Exception:
                         pass
                 try:
-                    drive_df = _cargar_historico_drive_cached(hoja_id)
+                    drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
                     filas_drive = int(len(drive_df))
-                    st.caption(f"{filas_drive:,} filas en Drive (caché 10 min).")
+                    con_adj = (
+                        int((drive_df["nif_adjudicatario"].astype(str).str.strip() != "").sum())
+                        if "nif_adjudicatario" in drive_df.columns
+                        else 0
+                    )
+                    st.caption(
+                        f"{filas_drive:,} filas · {con_adj:,} con NIF adjudicatario (caché 10 min)."
+                    )
                 except Exception as exc:
                     st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
                     drive_df = None
@@ -1834,7 +1868,10 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
-        st.warning("Sin coincidencias. Activa «Incluir histórico en Drive» y pulsa Cargar.")
+        st.warning(
+            "Sin coincidencias. Elige años, activa «Incluir histórico en Drive» y pulsa Cargar. "
+            "Para NIF de adjudicatario hace falta reimportación con ZIPs (columnas nuevas)."
+        )
         return
 
     botones_exportacion(resultados, "historico_nif")

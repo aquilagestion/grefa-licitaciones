@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Importa histórico PLACSP (ZIPs oficiales) a la pestaña Historico de Google Sheets.
+"""Importa histórico PLACSP (ZIPs) a pestañas Historico_YYYY de Google Sheets.
 
-Solo vuelca licitaciones Alta/Media según el scoring GREFA (mismo criterio que la app).
-El histórico completo de PLACSP no cabe en Sheets; esta importación es la versión útil.
+Solo vuelca licitaciones Alta/Media según scoring GREFA (incluye NIF órgano/adjudicatario).
 
 Ejemplos:
-  python scripts/import_historico_to_sheets.py --from-year 2021
-  python scripts/import_historico_to_sheets.py --year 2024 --year 2025
-  python scripts/import_historico_to_sheets.py --zip C:\\descargas\\licitaciones_2023.zip
+  python scripts/import_historico_to_sheets.py --from-year 2021 --to-year 2025
+  python scripts/import_historico_to_sheets.py --year 2024 --replace
+  python scripts/import_historico_to_sheets.py --year 2025 --skip-download
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from modules import grefa_filter, historico_placsp, sheets_catalog, sheets_histo
 
 
 def _bootstrap_env() -> None:
-    """Carga spreadsheet_id y credenciales desde .streamlit/secrets.toml si faltan."""
     secrets_path = BASE / ".streamlit" / "secrets.toml"
     if not secrets_path.is_file():
         return
@@ -42,15 +40,12 @@ def _bootstrap_env() -> None:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
             return
-
     with secrets_path.open("rb") as fichero:
         datos = tomllib.load(fichero)
-
     if not os.environ.get("GREFA_SPREADSHEET_ID"):
         sid = datos.get("sheets", {}).get("spreadsheet_id")
         if sid:
             os.environ["GREFA_SPREADSHEET_ID"] = str(sid)
-
     if not os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") and not os.environ.get(
         "GOOGLE_APPLICATION_CREDENTIALS"
     ):
@@ -62,11 +57,10 @@ def _bootstrap_env() -> None:
 def _cargar_criterios() -> tuple[list[str], list[str], list[dict]]:
     if sheets_store.is_configured():
         try:
-            cpvs, keywords, _catalogo_cpv, catalogo_terminos = sheets_catalog.load_selection()
+            cpvs, keywords, _c, catalogo_terminos = sheets_catalog.load_selection()
             return list(cpvs.keys()), flatten_keywords(keywords), catalogo_terminos
         except sheets_store.SheetsError as exc:
-            print(f"Aviso: no se leyeron criterios de Sheets ({exc}); valores por defecto.")
-
+            print(f"Aviso: criterios por defecto ({exc})")
     catalogo_cpv = default_cpv_catalog()
     catalogo_terminos = default_term_catalog()
     return (
@@ -79,6 +73,7 @@ def _cargar_criterios() -> tuple[list[str], list[str], list[dict]]:
 def _procesar_zip(
     zip_path: Path,
     *,
+    year: int | None,
     cpvs: list[str],
     keywords: list[str],
     conceptos: list[dict],
@@ -86,6 +81,7 @@ def _procesar_zip(
     hoja_id: str,
     etiqueta: str,
     max_files: int | None,
+    replace: bool,
 ) -> tuple[int, set[str], int, int]:
     with tempfile.TemporaryDirectory(prefix="grefa_placsp_sheet_") as tmp:
         with zipfile.ZipFile(zip_path) as archivo:
@@ -105,108 +101,100 @@ def _procesar_zip(
         hoja_id=hoja_id,
         claves_existentes=claves,
         etiqueta_snapshot=etiqueta,
+        default_year=year,
+        replace_year=bool(replace and year is not None),
     )
     return añadidas, claves, total_parseadas, relevantes
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Importar histórico PLACSP a Google Sheets")
-    parser.add_argument("--from-year", type=int, default=2021, help="Primer año (con --to-year)")
-    parser.add_argument("--to-year", type=int, default=2025, help="Último año inclusive")
-    parser.add_argument("--year", type=int, action="append", help="Año concreto (repetible)")
-    parser.add_argument("--zip", type=str, help="Ruta a un ZIP ya descargado")
-    parser.add_argument("--max-files", type=int, default=None, help="Máx. ficheros .atom por ZIP")
+    parser = argparse.ArgumentParser(description="Importar histórico PLACSP a Historico_YYYY")
+    parser.add_argument("--from-year", type=int, default=2021)
+    parser.add_argument("--to-year", type=int, default=2025)
+    parser.add_argument("--year", type=int, action="append")
+    parser.add_argument("--zip", type=str)
+    parser.add_argument("--max-files", type=int, default=None)
+    parser.add_argument("--skip-download", action="store_true")
     parser.add_argument(
-        "--skip-download",
+        "--replace",
         action="store_true",
-        help="Usar ZIP en data/cache si ya existe",
+        help="Sustituir Historico_YYYY completo (incluye NIF adjudicatario)",
     )
     args = parser.parse_args()
 
     _bootstrap_env()
-
     if not sheets_store.is_configured():
-        print("ERROR: configure GREFA_SPREADSHEET_ID y credenciales de servicio.")
+        print("ERROR: configure GREFA_SPREADSHEET_ID y credenciales.")
         return 1
 
-    hoja_id = sheets_store.spreadsheet_id()
+    hoja_id = sheets_store.spreadsheet_id() or ""
     print(f"Hoja: {sheets_store.spreadsheet_url(hoja_id)}")
-
-    try:
-        sheets_historico._worksheet_historico(hoja_id)
-    except sheets_store.SheetsError as exc:
-        print(f"ERROR: {exc}")
-        return 1
 
     cpvs, keywords, conceptos = _cargar_criterios()
     print(f"Criterios: {len(cpvs)} CPV, {len(keywords)} palabras clave")
 
-    claves = sheets_historico.load_claves_historico(hoja_id)
-    print(f"Claves ya en Histórico: {len(claves)}")
+    claves: set[str] = set() if args.replace else sheets_historico.load_claves_historico(hoja_id)
+    print(f"Claves ya en histórico: {len(claves)}")
 
-    años: list[int] = sorted(set(args.year or range(args.from_year, args.to_year + 1)))
     total_añadidas = 0
-
     if args.zip:
         zip_path = Path(args.zip).expanduser().resolve()
         if not zip_path.is_file():
             print(f"ERROR: no existe {zip_path}")
             return 1
-        etiqueta = f"Importación PLACSP ({zip_path.stem})"
-        print(f"Procesando {zip_path.name}…")
+        year = None
+        for token in zip_path.stem.split("_"):
+            if token.isdigit() and len(token) == 4:
+                year = int(token)
         añadidas, claves, parseadas, relevantes = _procesar_zip(
             zip_path,
+            year=year,
             cpvs=cpvs,
             keywords=keywords,
             conceptos=conceptos,
             claves=claves,
-            hoja_id=hoja_id or "",
-            etiqueta=etiqueta,
+            hoja_id=hoja_id,
+            etiqueta=f"Importación PLACSP ({zip_path.stem})",
             max_files=args.max_files,
+            replace=args.replace,
         )
-        print(
-            f"  Parseadas: {parseadas} · Alta/Media: {relevantes} · "
-            f"Nuevas en Sheet: {añadidas}"
-        )
+        print(f"Parseadas {parseadas} · Alta/Media {relevantes} · Escritas {añadidas}")
         total_añadidas += añadidas
     else:
+        años = sorted(set(args.year or range(args.from_year, args.to_year + 1)))
         for year in años:
             destino = historico_placsp.CACHE_DIR / f"licitaciones_{year}.zip"
             if destino.is_file() and args.skip_download:
-                print(f"Año {year}: usando ZIP en caché ({destino.name})")
+                print(f"Año {year}: ZIP en caché")
             else:
-                print(f"Año {year}: descargando ZIP oficial…")
+                print(f"Año {year}: descargando…")
                 try:
                     historico_placsp.download_year_zip(year, destino)
                 except Exception as exc:
-                    print(f"  ERROR descarga {year}: {exc}")
+                    print(f"  ERROR descarga: {exc}")
                     continue
-
-            etiqueta = f"Importación PLACSP {year}"
-            print(f"Año {year}: procesando…")
+            print(f"Año {year}: procesando → Historico_{year}…")
             try:
                 añadidas, claves, parseadas, relevantes = _procesar_zip(
                     destino,
+                    year=year,
                     cpvs=cpvs,
                     keywords=keywords,
                     conceptos=conceptos,
                     claves=claves,
-                    hoja_id=hoja_id or "",
-                    etiqueta=etiqueta,
+                    hoja_id=hoja_id,
+                    etiqueta=f"Importación PLACSP {year}",
                     max_files=args.max_files,
+                    replace=args.replace,
                 )
             except Exception as exc:
-                print(f"  ERROR procesando {year}: {exc}")
+                print(f"  ERROR: {exc}")
                 continue
-
-            print(
-                f"  Parseadas: {parseadas} · Alta/Media: {relevantes} · "
-                f"Nuevas en Sheet: {añadidas}"
-            )
+            print(f"  Parseadas {parseadas} · Alta/Media {relevantes} · Escritas {añadidas}")
             total_añadidas += añadidas
 
-    print(f"\nListo. Filas nuevas en Histórico: {total_añadidas}")
-    print(f"Total claves en Histórico: {len(claves)}")
+    print(f"\nListo. Filas escritas: {total_añadidas}")
+    print(f"Años en hoja: {sheets_historico.list_historico_years(hoja_id)}")
     return 0
 
 
