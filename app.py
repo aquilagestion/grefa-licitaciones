@@ -1643,45 +1643,215 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
         )
 
 
+def _anos_candidatos_desde_expediente(texto: str) -> list[int]:
+    """Infiere años a consultar en Drive a partir del ID (p. ej. 3.25/… → 2025)."""
+    import re
+
+    t = str(texto or "").strip()
+    años: list[int] = []
+    for m in re.finditer(r"(20\d{2})", t):
+        años.append(int(m.group(1)))
+    for m in re.finditer(r"\.(\d{2})/", t):
+        años.append(2000 + int(m.group(1)))
+    ahora = datetime.now().year
+    if not años:
+        años = [ahora, ahora - 1]
+    out: list[int] = []
+    for y in años:
+        if 2015 <= y <= ahora + 1 and y not in out:
+            out.append(y)
+    return out[:3] or [ahora]
+
+
+def _filtrar_por_expediente_seguro(df: pd.DataFrame, consulta: str) -> pd.DataFrame:
+    """Usa filter_by_expediente si existe; si no, coincidencia simple (Cloud cacheado)."""
+    if df is None or df.empty or not str(consulta).strip():
+        return empty_dataframe()
+    if "expediente" not in df.columns:
+        return empty_dataframe()
+    filtrar = getattr(grefa_filter, "filter_by_expediente", None)
+    if callable(filtrar):
+        try:
+            return filtrar(df, consulta)
+        except Exception:
+            pass
+    q = str(consulta).strip().lower()
+    serie = df["expediente"].fillna("").astype(str).str.lower()
+    return df[serie.str.contains(q, regex=False, na=False)].reset_index(drop=True)
+
+
+def _corpus_busqueda_pliegos(
+    catalogo: pd.DataFrame | None,
+    oportunidades: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, str]:
+    """Une feed en sesión, catálogo puntuado, oportunidades e histórico Drive en caché."""
+    partes: list[pd.DataFrame] = []
+    notas: list[str] = []
+
+    datos = st.session_state.get("datos")
+    if isinstance(datos, pd.DataFrame) and not datos.empty:
+        partes.append(datos)
+        notas.append(f"feed vivo ({len(datos):,})")
+
+    if catalogo is not None and isinstance(catalogo, pd.DataFrame) and not catalogo.empty:
+        partes.append(catalogo)
+        notas.append(f"catálogo ({len(catalogo):,})")
+
+    if (
+        oportunidades is not None
+        and isinstance(oportunidades, pd.DataFrame)
+        and not oportunidades.empty
+    ):
+        partes.append(oportunidades)
+
+    if st.session_state.get("hist_drive_loaded") and sheets_store.is_configured():
+        try:
+            hoja_id = sheets_store.spreadsheet_id() or "default"
+            years_key = str(st.session_state.get("hist_drive_years_key") or "")
+            drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
+            if isinstance(drive_df, pd.DataFrame) and not drive_df.empty:
+                partes.append(drive_df)
+                notas.append(f"Drive caché ({len(drive_df):,})")
+        except Exception:
+            pass
+
+    if not partes:
+        return empty_dataframe(), "sin datos cargados"
+
+    combinado = pd.concat(partes, ignore_index=True, sort=False)
+    if "url" in combinado.columns:
+        combinado = combinado.drop_duplicates(subset=["expediente", "url"], keep="first")
+    else:
+        combinado = combinado.drop_duplicates(subset=["expediente"], keep="first")
+    return combinado.reset_index(drop=True), " + ".join(notas) if notas else f"{len(combinado):,} filas"
+
+
 def pestana_analisis_pliegos(
     oportunidades: pd.DataFrame,
     catalogo: pd.DataFrame | None = None,
 ) -> None:
     st.subheader("Análisis de pliegos con IA")
     st.caption(
-        "Analiza PCAP + PPT (varios PDF) o descárgalos automáticamente desde PLACSP "
-        "cuando el expediente está en el feed cargado. Resumen con Gemini."
+        "Localiza el expediente (feed + histórico Drive) y analiza PCAP + PPT "
+        "con Gemini, o súbelos manualmente."
     )
 
-    if not pdf_summary.is_configured():
+    gemini_ok = pdf_summary.is_configured()
+    if not gemini_ok:
         st.warning(
-            "Gemini no está configurado. Crea una API key gratuita en "
-            "[Google AI Studio](https://aistudio.google.com/apikey) y añádela en "
-            "Streamlit Secrets como `[gemini] api_key`."
+            "Gemini no está configurado. Puedes localizar el expediente, pero para "
+            "analizar hace falta `[gemini] api_key` en Secrets "
+            "([Google AI Studio](https://aistudio.google.com/apikey))."
         )
-        return
 
-    base_busqueda = catalogo if catalogo is not None and not catalogo.empty else oportunidades
     expediente, url, titulo = "", "", ""
     documentos: list[dict] = []
 
     st.markdown("**1. Localizar expediente**")
-    q_exp = st.text_input(
-        "Buscar por ID de expediente",
-        placeholder="Ej. 3.25/20830.0288 — busca en el feed cargado",
-        key="pliego_buscar_exp",
-    )
+    base_busqueda, origen_corpus = _corpus_busqueda_pliegos(catalogo, oportunidades)
+    st.caption(f"Ámbito de búsqueda: {origen_corpus}.")
+
+    col_q, col_btn = st.columns([3, 1])
+    with col_q:
+        q_exp = st.text_input(
+            "Buscar por ID de expediente",
+            placeholder="Ej. 3.25/20830.0288",
+            key="pliego_buscar_exp",
+        )
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        forzar_drive = st.button(
+            "Buscar en Drive",
+            key="pliego_buscar_drive",
+            help="Consulta las pestañas Historico_YYYY de Google Sheets.",
+            width="stretch",
+        )
+
+    consulta = (q_exp or "").strip()
     hallados = empty_dataframe()
-    if q_exp.strip() and not base_busqueda.empty:
-        hallados = grefa_filter.filter_by_expediente(base_busqueda, q_exp.strip())
+    if consulta:
+        hallados = _filtrar_por_expediente_seguro(base_busqueda, consulta)
+
+    # Si no está en el feed/caché, consultar Drive del año inferido (una sola vez por clic).
+    auto_drive = st.session_state.pop("pliego_auto_drive_q", None) == consulta
+    if consulta and hallados.empty and sheets_store.is_configured() and (forzar_drive or auto_drive):
+        años = _anos_candidatos_desde_expediente(consulta)
+        with st.spinner(f"Buscando «{consulta}» en Drive ({', '.join(map(str, años))})…"):
+            try:
+                sheets_historico.clear_worksheet_list_cache()
+            except Exception:
+                pass
+            try:
+                drive_df = sheets_historico.load_historico_dataframe(
+                    years=años, include_legacy=True
+                )
+                hallados = _filtrar_por_expediente_seguro(drive_df, consulta)
+                if hallados.empty and forzar_drive:
+                    drive_df = sheets_historico.load_historico_dataframe(
+                        years=list(range(max(años[0] - 1, 2019), min(años[0] + 2, 2027))),
+                        include_legacy=True,
+                    )
+                    hallados = _filtrar_por_expediente_seguro(drive_df, consulta)
+                if not hallados.empty:
+                    # Conservar resultado entre reruns sin volver a llamar a la API.
+                    st.session_state["pliego_hallados_drive"] = {
+                        "q": consulta,
+                        "rows": hallados.to_dict(orient="records"),
+                    }
+            except Exception as exc:
+                msg = str(exc)
+                if "429" in msg or "Quota" in msg.lower():
+                    st.warning("Cuota de Google Sheets agotada. Espera 1 minuto y reintenta.")
+                else:
+                    st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
+
+    # Reutilizar último resultado Drive de esta consulta (sin reconsultar Sheets).
+    if consulta and hallados.empty:
+        cache_drive = st.session_state.get("pliego_hallados_drive") or {}
+        if cache_drive.get("q") == consulta and cache_drive.get("rows"):
+            hallados = pd.DataFrame(cache_drive["rows"])
+
+    if consulta and hallados.empty:
+        años = _anos_candidatos_desde_expediente(consulta)
+        st.warning(
+            f"No hay coincidencias para «{consulta}» en {origen_corpus}. "
+            f"Prueba **Buscar en Drive** (años sugeridos: {', '.join(map(str, años))}) "
+            "o sube los PDF a mano."
+        )
+        if not forzar_drive and sheets_store.is_configured():
+            if st.button(
+                f"🔎 Buscar «{consulta}» en histórico Drive ({', '.join(map(str, años))})",
+                key="pliego_auto_drive_btn",
+            ):
+                st.session_state["pliego_auto_drive_q"] = consulta
+                st.rerun()
+    elif consulta and not hallados.empty:
+        st.success(f"**{len(hallados)}** coincidencia(s) para «{consulta}».")
+        cols_vista = [
+            c
+            for c in (
+                "expediente",
+                "titulo",
+                "organo_contratacion",
+                "estado",
+                "url",
+            )
+            if c in hallados.columns
+        ]
+        st.dataframe(
+            tabla_para_mostrar(hallados.head(20), cols_vista),
+            width="stretch",
+            hide_index=True,
+            height=min(280, 52 + 35 * min(len(hallados), 8)),
+        )
 
     opciones: list[tuple[str, str, str, str, list]] = []
     fuente_opciones = hallados if not hallados.empty else (
-        oportunidades if not oportunidades.empty else empty_dataframe()
+        oportunidades if isinstance(oportunidades, pd.DataFrame) and not oportunidades.empty
+        else empty_dataframe()
     )
     if not fuente_opciones.empty:
-        vista = fuente_opciones.head(80)
-        for _, fila in vista.iterrows():
+        for _, fila in fuente_opciones.head(80).iterrows():
             exp = str(fila.get("expediente") or "—")
             tit = str(fila.get("titulo") or "")[:70]
             enlace = str(fila.get("url") or "")
@@ -1690,21 +1860,14 @@ def pestana_analisis_pliegos(
                 (etiqueta, exp, enlace, str(fila.get("titulo") or ""), _docs_desde_fila(fila))
             )
 
-    if q_exp.strip() and hallados.empty:
-        st.warning(
-            f"Ningún expediente coincide con «{q_exp.strip()}» en el feed cargado. "
-            "Puedes analizar pliegos subiendo los PDF a mano, o ampliar el feed "
-            "(más páginas / Actualizar datos)."
-        )
-    elif q_exp.strip() and not hallados.empty:
-        st.success(f"**{len(hallados)}** coincidencia(s). Elige una abajo o usa la primera.")
-
     etiquetas = ["— Sin vincular / solo subir PDF —"] + [o[0] for o in opciones]
-    idx_default = 1 if (q_exp.strip() and opciones) else 0
-    # Al cambiar la búsqueda, forzar la selección al primer resultado.
-    if st.session_state.get("_pliego_q_prev") != q_exp:
-        st.session_state["_pliego_q_prev"] = q_exp
+    idx_default = 1 if (consulta and opciones and not hallados.empty) else 0
+    # Evitar ValueError de Streamlit si la opción guardada ya no existe.
+    actual = st.session_state.get("pliego_select_exp")
+    if st.session_state.get("_pliego_q_prev") != consulta or actual not in etiquetas:
+        st.session_state["_pliego_q_prev"] = consulta
         st.session_state["pliego_select_exp"] = etiquetas[min(idx_default, len(etiquetas) - 1)]
+
     seleccion = st.selectbox(
         "Expediente a analizar",
         etiquetas,
@@ -1717,16 +1880,18 @@ def pestana_analisis_pliegos(
                 expediente, url, titulo, documentos = exp, enlace, tit, docs
                 break
     else:
-        if q_exp.strip():
-            expediente = q_exp.strip()
+        if consulta:
+            expediente = consulta
         titulo = st.text_input(
             "Título / referencia (opcional)",
             key="pliego_titulo_libre",
         )
 
-    # Prefijo de widgets estable en esta pestaña (la cola de PDF no se pierde al cambiar ID).
-    clave_prefix = "tab_pliego"
     if expediente or url:
+        st.caption(
+            f"Seleccionado: **{expediente or '—'}**"
+            + (f" · {len(documentos)} documento(s) PLACSP" if documentos else " · sin enlaces de pliego en origen")
+        )
         if sheets_store.is_configured():
             previo = sheets_store.load_pliego_resumen(expediente, url)
             if previo:
@@ -1735,11 +1900,15 @@ def pestana_analisis_pliegos(
                     st.markdown(previo)
 
     st.markdown("**2. Documentos y análisis**")
+    if not gemini_ok:
+        st.info("Configura Gemini para generar el resumen IA.")
+        return
+
     _widget_resumen_pliego(
         expediente,
         url,
         titulo,
-        clave_prefix=clave_prefix,
+        clave_prefix="tab_pliego",
         documentos=documentos,
     )
 
