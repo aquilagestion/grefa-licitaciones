@@ -870,8 +870,8 @@ def _widget_resumen_pliego(
 
     if url:
         st.caption(
-            "Los pliegos se obtienen de los enlaces públicos de la **ficha PLACSP** "
-            "(GetDocumentById), igual que en la plataforma."
+            "Se leen los documentos de la ficha PLACSP. Si el PDF «Pliego» es un índice "
+            "(p. ej. ADIF), se siguen los enlaces internos al PCAP y al PPT."
         )
         if docs_placsp:
             st.caption(
