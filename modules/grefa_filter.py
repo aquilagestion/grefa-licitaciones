@@ -380,6 +380,12 @@ def _campo_busqueda_texto(df: pd.DataFrame) -> pd.Series:
         + _columna_texto(df, "tipo_contrato")
         + " "
         + _columna_texto(df, "keywords_match")
+        + " "
+        + _columna_texto(df, "nif_organo")
+        + " "
+        + _columna_texto(df, "nif_adjudicatario")
+        + " "
+        + _columna_texto(df, "adjudicatario")
     )
     return blob.map(normalize_text)
 
@@ -418,6 +424,32 @@ def apply_filtros_busqueda(
     return filtrado
 
 
+def filter_by_nif(
+    df: pd.DataFrame,
+    nif: str = "",
+    *,
+    ambito: str = "ambos",
+) -> pd.DataFrame:
+    """Filtra por NIF del órgano, adjudicatario o ambos."""
+    if df.empty or not nif or not str(nif).strip():
+        return df
+    from modules.ingestion import _normalizar_nif
+
+    objetivo = _normalizar_nif(str(nif))
+    if not objetivo:
+        return df
+
+    def coincide(serie: pd.Series) -> pd.Series:
+        return serie.fillna("").astype(str).map(_normalizar_nif).str.contains(objetivo, na=False)
+
+    mascara = pd.Series(False, index=df.index)
+    if ambito in {"organo", "ambos"} and "nif_organo" in df.columns:
+        mascara |= coincide(df["nif_organo"])
+    if ambito in {"adjudicatario", "ambos"} and "nif_adjudicatario" in df.columns:
+        mascara |= coincide(df["nif_adjudicatario"])
+    return df[mascara].reset_index(drop=True)
+
+
 def search_dataframe(
     df: pd.DataFrame,
     texto: str = "",
@@ -430,6 +462,8 @@ def search_dataframe(
     fecha_desde: pd.Timestamp | None = None,
     fecha_hasta: pd.Timestamp | None = None,
     incluir_sin_fecha: bool = True,
+    nif: str = "",
+    nif_ambito: str = "ambos",
 ) -> pd.DataFrame:
     """Búsqueda libre y filtros del buscador general."""
     if df.empty:
@@ -438,6 +472,8 @@ def search_dataframe(
     filtrado = df
     if texto and texto.strip():
         filtrado = filter_by_texto_libre(filtrado, texto)
+    if nif and str(nif).strip():
+        filtrado = filter_by_nif(filtrado, nif, ambito=nif_ambito)
 
     if presupuesto_min is not None or presupuesto_max is not None:
         importes = filtrado["presupuesto_sin_iva"]

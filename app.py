@@ -34,7 +34,7 @@ from config.keyword_catalog import (  # noqa: E402
     active_keywords_grouped,
     default_term_catalog,
 )
-from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, pdf_summary, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
+from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, historico_placsp, pdf_summary, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
     timestamped_filename,
@@ -689,6 +689,9 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             </p>
             <p class="meta"><strong>Expediente:</strong> {fila.get('expediente') or '—'}
                 &nbsp;·&nbsp; <strong>Palabras clave:</strong> {keywords}</p>
+            <p class="meta"><strong>NIF órgano:</strong> {fila.get('nif_organo') or '—'}
+                &nbsp;·&nbsp; <strong>Adjudicatario:</strong> {fila.get('adjudicatario') or '—'}
+                {f" ({fila.get('nif_adjudicatario')})" if fila.get('nif_adjudicatario') else ""}</p>
             <p class="meta">{cpvs}</p>
         </div>
         """,
@@ -1686,6 +1689,85 @@ def pestana_seguimiento() -> None:
                     )
 
 
+def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
+    st.subheader("Histórico PLACSP y búsqueda por NIF")
+    st.caption(
+        "Consulta expedientes por NIF del órgano de contratación o del adjudicatario. "
+        "Combina el feed en vivo con un histórico importado desde los ZIP oficiales."
+    )
+
+    meta = historico_placsp.metadata()
+    if historico_placsp.is_available():
+        st.success(
+            f"Histórico local cargado: **{int(meta.get('filas', 0)):,}** expedientes "
+            f"(actualizado: {meta.get('actualizado', '—')[:10] if meta.get('actualizado') else '—'})."
+        )
+    else:
+        st.info(
+            "Aún no hay histórico importado en este servidor. "
+            "En local o en un PC con acceso a PLACSP ejecuta:\n\n"
+            "`python scripts/import_historico_placsp.py --year 2024 --year 2025`"
+        )
+
+    incluir_historico = st.checkbox(
+        "Incluir histórico importado",
+        value=historico_placsp.is_available(),
+        disabled=not historico_placsp.is_available(),
+    )
+
+    base = puntuadas
+    if incluir_historico and historico_placsp.is_available():
+        historico = historico_placsp.load()
+        base = historico_placsp.merge_with_live(puntuadas, historico)
+
+    col_nif, col_ambito = st.columns([2, 1])
+    with col_nif:
+        nif = st.text_input("NIF", placeholder="Ej. B12345678, P2807900B…")
+    with col_ambito:
+        ambito_etiqueta = st.selectbox(
+            "Buscar NIF en",
+            ["Ambos", "Órgano de contratación", "Adjudicatario"],
+        )
+    ambito_map = {
+        "Ambos": "ambos",
+        "Órgano de contratación": "organo",
+        "Adjudicatario": "adjudicatario",
+    }
+
+    texto = st.text_input("Texto libre adicional (opcional)", placeholder="Título, CPV, provincia…")
+
+    resultados = grefa_filter.search_dataframe(
+        base,
+        texto=texto,
+        nif=nif,
+        nif_ambito=ambito_map[ambito_etiqueta],
+    )
+
+    st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
+    if resultados.empty:
+        st.warning("Sin coincidencias. Prueba otro NIF o importa más histórico.")
+        return
+
+    botones_exportacion(resultados, "historico_nif")
+
+    columnas = [
+        "expediente", "titulo", "organo_contratacion", "nif_organo",
+        "adjudicatario", "nif_adjudicatario", "estado", "presupuesto_sin_iva",
+        "ubicacion", "fecha_actualizacion", "url",
+    ]
+    if "relevancia" in resultados.columns and resultados["relevancia"].notna().any():
+        columnas = ["relevancia", "categoria"] + columnas
+
+    vista_tabla = tabla_para_mostrar(resultados, columnas)
+    st.dataframe(
+        vista_tabla,
+        width="stretch",
+        hide_index=True,
+        column_config=CONFIG_COLUMNAS,
+        height=620,
+    )
+
+
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
@@ -1834,10 +1916,11 @@ def main() -> None:
     if puntuadas.empty:
         st.warning("No hay datos cargados. Pulsa «Actualizar datos ahora» en la barra lateral.")
 
-    pestana_1, pestana_2, pestana_3, pestana_4 = st.tabs(
+    pestana_1, pestana_2, pestana_3, pestana_4, pestana_5 = st.tabs(
         [
             "🎯 Oportunidades GREFA",
             "🔎 Buscador General PLACSP",
+            "🗂️ Histórico y NIF",
             "📄 Análisis de pliegos",
             "📋 Seguimiento",
         ]
@@ -1853,8 +1936,10 @@ def main() -> None:
         else:
             pestana_buscador(puntuadas)
     with pestana_3:
-        pestana_analisis_pliegos(oportunidades)
+        pestana_historico_nif(puntuadas)
     with pestana_4:
+        pestana_analisis_pliegos(oportunidades)
+    with pestana_5:
         pestana_seguimiento()
 
     st.divider()

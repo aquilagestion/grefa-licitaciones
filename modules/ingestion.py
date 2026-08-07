@@ -56,6 +56,9 @@ COLUMNS: tuple[str, ...] = (
     "tipo_contrato",
     "fecha_limite",
     "descripcion",
+    "nif_organo",
+    "nif_adjudicatario",
+    "adjudicatario",
 )
 
 #: Etiquetas legibles para la interfaz y las exportaciones.
@@ -73,6 +76,9 @@ COLUMN_LABELS: dict[str, str] = {
     "tipo_contrato": "Tipo de contrato",
     "fecha_limite": "Fecha límite de presentación",
     "descripcion": "Descripción",
+    "nif_organo": "NIF órgano",
+    "nif_adjudicatario": "NIF adjudicatario",
+    "adjudicatario": "Adjudicatario",
     "relevancia": "Relevancia GREFA (%)",
     "categoria": "Categoría",
     "badge": "Etiqueta",
@@ -179,6 +185,73 @@ _SUMMARY_PATTERNS = {
     "estado": re.compile(r"Estado\s*:\s*([^;\n]+)", re.IGNORECASE),
 }
 
+_NIF_ES_RE = re.compile(
+    r"^(?:"
+    r"[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]|"
+    r"\d{8}[A-Z]|"
+    r"[XYZ]\d{7}[A-Z]|"
+    r"[PAFQS]\d{7,8}[A-Z0-9]?"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _normalizar_nif(valor: str) -> str:
+    return re.sub(r"[\s\-/]", "", (valor or "").upper())
+
+
+def _es_nif_espanol(valor: str) -> bool:
+    limpio = _normalizar_nif(valor)
+    if not limpio or len(limpio) < 8 or len(limpio) > 10:
+        return False
+    if limpio.startswith("L") and len(limpio) >= 9:
+        return False
+    if limpio.isdigit() and len(limpio) > 9:
+        return False
+    return bool(_NIF_ES_RE.match(limpio))
+
+
+def _ids_party(element) -> list[str]:
+    if element is None:
+        return []
+    ids: list[str] = []
+    for ident in _findall(element, "PartyIdentification"):
+        for id_nodo in _findall(ident, "ID", direct=True):
+            if id_nodo.text:
+                ids.append(id_nodo.text.strip())
+    return ids
+
+
+def _elegir_nif(ids: Sequence[str]) -> str:
+    for candidato in ids:
+        if _es_nif_espanol(candidato):
+            return _normalizar_nif(candidato)
+    return ""
+
+
+def _nif_organo(carpeta) -> str:
+    parte = _find(carpeta, "LocatedContractingParty") if carpeta is not None else None
+    if parte is None:
+        return ""
+    party = _find(parte, "Party", direct=True)
+    if party is None:
+        party = parte
+    return _elegir_nif(_ids_party(party))
+
+
+def _adjudicatario(carpeta) -> tuple[str, str]:
+    if carpeta is None:
+        return "", ""
+    for ganador in _findall(carpeta, "WinningParty"):
+        party = _find(ganador, "Party", direct=True)
+        if party is None:
+            party = ganador
+        nombre = _text(party, "Name", direct=True) or _text(ganador, "Name", direct=True)
+        nif = _elegir_nif(_ids_party(party))
+        if nombre or nif:
+            return nif, _clean_html(nombre)
+    return "", ""
+
 
 def _entry_link(entry) -> str:
     enlaces = entry.findall(f"{{{ATOM_NS}}}link")
@@ -279,6 +352,8 @@ def _parse_entry(entry) -> dict[str, Any]:
         if periodo is not None:
             fecha_limite = _text(periodo, "EndDate")
 
+    nif_adjudicatario, adjudicatario = _adjudicatario(carpeta)
+
     return {
         "expediente": expediente,
         "titulo": _clean_html(titulo),
@@ -294,6 +369,9 @@ def _parse_entry(entry) -> dict[str, Any]:
         "tipo_contrato": tipo_contrato,
         "fecha_limite": fecha_limite,
         "descripcion": _clean_html(descripcion) or _clean_html(resumen),
+        "nif_organo": _nif_organo(carpeta),
+        "nif_adjudicatario": nif_adjudicatario,
+        "adjudicatario": adjudicatario,
     }
 
 
@@ -323,6 +401,9 @@ def _parse_with_feedparser(raw: bytes) -> tuple[list[dict[str, Any]], str]:
                 "tipo_contrato": "",
                 "fecha_limite": "",
                 "descripcion": resumen,
+                "nif_organo": "",
+                "nif_adjudicatario": "",
+                "adjudicatario": "",
             }
         )
 
@@ -386,7 +467,8 @@ def build_dataframe(registros: Sequence[dict[str, Any]]) -> pd.DataFrame:
 
     df["cpvs"] = df["cpvs"].apply(lambda valor: list(valor) if isinstance(valor, (list, tuple)) else [])
     for columna in ("expediente", "titulo", "organo_contratacion", "url", "ubicacion",
-                    "cpvs_texto", "estado", "tipo_contrato", "descripcion"):
+                    "cpvs_texto", "estado", "tipo_contrato", "descripcion",
+                    "nif_organo", "nif_adjudicatario", "adjudicatario"):
         df[columna] = df[columna].fillna("").astype(str).str.strip()
 
     if not df.empty:
