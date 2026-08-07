@@ -1901,23 +1901,58 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
 
 
 def _anos_candidatos_desde_expediente(texto: str) -> list[int]:
-    """Infiere años a consultar en Drive a partir del ID (p. ej. 3.25/… → 2025)."""
+    """Años a consultar en Drive: primero el actual, luego hacia atrás.
+
+    El sufijo ``.25/`` de un ID (p. ej. ``3.25/20830.0288``) es solo una pista:
+    muchos expedientes de 2025/2026 viven en la pestaña del año de publicación
+    (a menudo el año en curso), no en Historico_2025.
+    """
     import re
 
-    t = str(texto or "").strip()
-    años: list[int] = []
-    for m in re.finditer(r"(20\d{2})", t):
-        años.append(int(m.group(1)))
-    for m in re.finditer(r"\.(\d{2})/", t):
-        años.append(2000 + int(m.group(1)))
     ahora = datetime.now().year
-    if not años:
-        años = [ahora, ahora - 1]
+    t = str(texto or "").strip()
+    inferidos: list[int] = []
+    for m in re.finditer(r"(20\d{2})", t):
+        inferidos.append(int(m.group(1)))
+    for m in re.finditer(r"\.(\d{2})/", t):
+        yy = 2000 + int(m.group(1))
+        if 2015 <= yy <= ahora + 1:
+            inferidos.append(yy)
+
+    # Orden: año actual → inferidos → resto hacia atrás hasta 2019
     out: list[int] = []
-    for y in años:
-        if 2015 <= y <= ahora + 1 and y not in out:
+    for y in [ahora, *inferidos, *range(ahora - 1, 2018, -1)]:
+        if 2019 <= y <= ahora + 1 and y not in out:
             out.append(y)
-    return out[:3] or [ahora]
+    return out or [ahora]
+
+
+def _buscar_expediente_drive_por_años(
+    consulta: str, años: list[int]
+) -> tuple[pd.DataFrame, int | None, list[str]]:
+    """Busca el expediente año a año (2026 → 2025 → …) hasta encontrarlo."""
+    probados: list[str] = []
+    try:
+        sheets_historico.clear_worksheet_list_cache()
+    except Exception:
+        pass
+
+    for year in años:
+        probados.append(str(year))
+        try:
+            drive_df = sheets_historico.load_historico_dataframe(
+                years=[year], include_legacy=False
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "quota" in msg.lower():
+                raise
+            continue
+        hit = _filtrar_por_expediente_seguro(drive_df, consulta)
+        if not hit.empty:
+            return hit, year, probados
+
+    return empty_dataframe(), None, probados
 
 
 def _filtrar_por_expediente_seguro(df: pd.DataFrame, consulta: str) -> pd.DataFrame:
@@ -2020,7 +2055,8 @@ def pestana_analisis_pliegos(
         forzar_drive = st.button(
             "Buscar en Drive",
             key="pliego_buscar_drive",
-            help="Consulta las pestañas Historico_YYYY de Google Sheets.",
+            help="Busca en Historico_2026, luego 2025, 2024… hasta encontrarlo.",
+            type="primary",
             width="stretch",
         )
 
@@ -2029,58 +2065,79 @@ def pestana_analisis_pliegos(
     if consulta:
         hallados = _filtrar_por_expediente_seguro(base_busqueda, consulta)
 
-    # Si no está en el feed/caché, consultar Drive del año inferido (una sola vez por clic).
-    auto_drive = st.session_state.pop("pliego_auto_drive_q", None) == consulta
-    if consulta and hallados.empty and sheets_store.is_configured() and (forzar_drive or auto_drive):
-        años = _anos_candidatos_desde_expediente(consulta)
-        with st.spinner(f"Buscando «{consulta}» en Drive ({', '.join(map(str, años))})…"):
-            try:
-                sheets_historico.clear_worksheet_list_cache()
-            except Exception:
-                pass
-            try:
-                drive_df = sheets_historico.load_historico_dataframe(
-                    years=años, include_legacy=True
-                )
-                hallados = _filtrar_por_expediente_seguro(drive_df, consulta)
-                if hallados.empty and forzar_drive:
-                    drive_df = sheets_historico.load_historico_dataframe(
-                        years=list(range(max(años[0] - 1, 2019), min(años[0] + 2, 2027))),
-                        include_legacy=True,
-                    )
-                    hallados = _filtrar_por_expediente_seguro(drive_df, consulta)
-                if not hallados.empty:
-                    # Conservar resultado entre reruns sin volver a llamar a la API.
-                    st.session_state["pliego_hallados_drive"] = {
-                        "q": consulta,
-                        "rows": hallados.to_dict(orient="records"),
-                    }
-            except Exception as exc:
-                msg = str(exc)
-                if "429" in msg or "Quota" in msg.lower():
-                    st.warning("Cuota de Google Sheets agotada. Espera 1 minuto y reintenta.")
-                else:
-                    st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
-
-    # Reutilizar último resultado Drive de esta consulta (sin reconsultar Sheets).
+    # Reutilizar resultado Drive previo de esta misma consulta.
     if consulta and hallados.empty:
         cache_drive = st.session_state.get("pliego_hallados_drive") or {}
         if cache_drive.get("q") == consulta and cache_drive.get("rows"):
             hallados = pd.DataFrame(cache_drive["rows"])
+            año_hit = cache_drive.get("year")
+            if año_hit:
+                st.caption(f"Encontrado en Drive · Historico_{año_hit} (caché).")
+
+    # Si no está en el feed: Drive año a año (2026 → 2025 → …).
+    auto_drive = st.session_state.pop("pliego_auto_drive_q", None) == consulta
+    # Una sola pasada automática por consulta (p. ej. al pegar el ID completo).
+    auto_once = (
+        bool(consulta)
+        and hallados.empty
+        and len(consulta) >= 8
+        and sheets_store.is_configured()
+        and st.session_state.get("pliego_drive_tried_q") != consulta
+    )
+    if consulta and hallados.empty and sheets_store.is_configured() and (
+        forzar_drive or auto_drive or auto_once
+    ):
+        st.session_state["pliego_drive_tried_q"] = consulta
+        años = _anos_candidatos_desde_expediente(consulta)
+        with st.spinner(
+            f"Buscando «{consulta}» en Drive: {años[0]} → {años[1] if len(años) > 1 else '…'}…"
+        ):
+            try:
+                hallados, año_ok, probados = _buscar_expediente_drive_por_años(
+                    consulta, años
+                )
+                if not hallados.empty:
+                    st.session_state["pliego_hallados_drive"] = {
+                        "q": consulta,
+                        "year": año_ok,
+                        "rows": hallados.to_dict(orient="records"),
+                    }
+                    st.success(
+                        f"Encontrado en **Historico_{año_ok}** "
+                        f"(probado: {' → '.join(probados)})."
+                    )
+                else:
+                    st.caption(
+                        "Drive revisado sin coincidencias: "
+                        + " → ".join(probados)
+                        + "."
+                    )
+            except Exception as exc:
+                msg = str(exc)
+                if "429" in msg or "Quota" in msg.lower():
+                    st.warning(
+                        "Cuota de Google Sheets agotada. Espera 1 minuto y pulsa "
+                        "**Buscar en Drive**."
+                    )
+                else:
+                    st.warning(
+                        f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}"
+                    )
 
     if consulta and hallados.empty:
         años = _anos_candidatos_desde_expediente(consulta)
         st.warning(
             f"No hay coincidencias para «{consulta}» en {origen_corpus}. "
-            f"Prueba **Buscar en Drive** (años sugeridos: {', '.join(map(str, años))}) "
+            f"Pulsa **Buscar en Drive** (orden: {' → '.join(map(str, años[:4]))}…) "
             "o sube los PDF a mano."
         )
-        if not forzar_drive and sheets_store.is_configured():
+        if sheets_store.is_configured():
             if st.button(
-                f"🔎 Buscar «{consulta}» en histórico Drive ({', '.join(map(str, años))})",
+                f"🔎 Buscar en Drive ({años[0]} → {años[1] if len(años) > 1 else '…'})",
                 key="pliego_auto_drive_btn",
             ):
                 st.session_state["pliego_auto_drive_q"] = consulta
+                st.session_state.pop("pliego_drive_tried_q", None)
                 st.rerun()
     elif consulta and not hallados.empty:
         st.success(f"**{len(hallados)}** coincidencia(s) para «{consulta}».")
