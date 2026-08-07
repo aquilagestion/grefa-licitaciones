@@ -64,16 +64,13 @@ def _worksheet_config(hoja_id: str | None = None):
     return store._worksheet(hoja, CONFIG_SHEET, CONFIG_HEADERS)
 
 
-def _find_worksheet(hoja, titulo: str):
+def _find_worksheet(hoja, titulo: str, pestanas: list | None = None):
     """Localiza una pestaña por nombre (sin crearla)."""
     objetivo = str(titulo).strip().lower()
-    for pestana in hoja.worksheets():
+    for pestana in pestanas if pestanas is not None else _worksheets_cached(hoja):
         if str(pestana.title).strip().lower() == objetivo:
             return pestana
-    try:
-        return hoja.worksheet(titulo)
-    except Exception:
-        return None
+    return None
 
 
 def _worksheet_historico(hoja_id: str | None = None):
@@ -88,18 +85,32 @@ def _worksheet_year(year: int, hoja_id: str | None = None):
 
 
 def list_historico_years(hoja_id: str | None = None) -> list[int]:
-    """Años con pestaña Historico_YYYY (y legado si aporta fechas)."""
+    """Años con pestaña Historico_YYYY."""
     if not store.is_configured():
         return []
     hoja = store.get_spreadsheet(hoja_id)
     años: set[int] = set()
-    for pestana in hoja.worksheets():
+    for pestana in _worksheets_cached(hoja):
         titulo = str(pestana.title).strip()
         if titulo.lower().startswith(YEAR_SHEET_PREFIX.lower()):
             sufijo = titulo[len(YEAR_SHEET_PREFIX) :]
             if sufijo.isdigit():
                 años.add(int(sufijo))
     return sorted(años)
+
+
+def _worksheets_cached(hoja) -> list:
+    """Una sola llamada worksheets() por spreadsheet en memoria de proceso."""
+    clave = getattr(hoja, "id", None) or id(hoja)
+    cache = getattr(_worksheets_cached, "_cache", {})
+    if clave not in cache:
+        cache[clave] = list(hoja.worksheets())
+        _worksheets_cached._cache = cache  # type: ignore[attr-defined]
+    return cache[clave]
+
+
+def clear_worksheet_list_cache() -> None:
+    _worksheets_cached._cache = {}  # type: ignore[attr-defined]
 
 
 def _leer_config_map(hoja_id: str | None = None) -> dict[str, str]:
@@ -300,11 +311,24 @@ def _valores_a_filas(valores: list[list[Any]], *, fuente: str = "") -> list[dict
     return filas
 
 
-def _leer_pestana_valores(pestana) -> list[list[Any]]:
-    try:
-        return pestana.get_all_values()
-    except Exception as exc:
-        raise store.SheetsError(f"No se pudo leer {pestana.title}: {exc}") from exc
+def _leer_pestana_valores(pestana, *, reintentos: int = 5) -> list[list[Any]]:
+    import time
+
+    ultimo: Exception | None = None
+    for intento in range(reintentos):
+        try:
+            return pestana.get_all_values()
+        except Exception as exc:
+            ultimo = exc
+            texto = str(exc).lower()
+            if "429" in texto or "quota" in texto:
+                time.sleep(min(2 ** intento, 30))
+                continue
+            raise store.SheetsError(f"No se pudo leer {pestana.title}: {exc}") from exc
+    raise store.SheetsError(
+        f"Cuota de Google Sheets agotada al leer {pestana.title}. "
+        "Espera un minuto y pulsa Cargar de nuevo."
+    ) from ultimo
 
 
 def load_historico_dataframe(
@@ -319,7 +343,15 @@ def load_historico_dataframe(
 
     try:
         hoja = store.get_spreadsheet(hoja_id)
-        disponibles = list_historico_years(hoja_id)
+        pestanas = _worksheets_cached(hoja)
+        disponibles = sorted(
+            {
+                int(str(p.title)[len(YEAR_SHEET_PREFIX) :])
+                for p in pestanas
+                if str(p.title).strip().lower().startswith(YEAR_SHEET_PREFIX.lower())
+                and str(p.title)[len(YEAR_SHEET_PREFIX) :].isdigit()
+            }
+        )
         if years:
             seleccion = [int(y) for y in years]
         elif disponibles:
@@ -329,7 +361,7 @@ def load_historico_dataframe(
 
         filas: list[dict[str, Any]] = []
         for year in seleccion:
-            pestana = _find_worksheet(hoja, sheet_name_for_year(year))
+            pestana = _find_worksheet(hoja, sheet_name_for_year(year), pestanas)
             if pestana is None:
                 continue
             filas.extend(
@@ -337,7 +369,7 @@ def load_historico_dataframe(
             )
 
         if include_legacy and not filas:
-            legado = _find_worksheet(hoja, HISTORICO_SHEET)
+            legado = _find_worksheet(hoja, HISTORICO_SHEET, pestanas)
             if legado is not None:
                 filas.extend(_valores_a_filas(_leer_pestana_valores(legado), fuente=HISTORICO_SHEET))
     except store.SheetsError:

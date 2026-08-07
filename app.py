@@ -1694,20 +1694,15 @@ def pestana_seguimiento() -> None:
                     )
 
 
-@st.cache_data(ttl=60)
-def _listar_anos_historico_cached(spreadsheet_id: str) -> list[int]:
-    _ = spreadsheet_id
-    try:
-        return list(sheets_historico.list_historico_years())
-    except Exception:
-        return []
+# Años posibles sin llamar a la API (evita 429). Al cargar se usan las pestañas que existan.
+_ANOS_HISTORICO_UI = list(range(2019, 2027))
 
 
-@st.cache_data(ttl=600, show_spinner="Cargando histórico desde Google Drive…")
+@st.cache_data(ttl=3600, show_spinner="Cargando histórico desde Google Drive…")
 def _cargar_historico_drive_cached(
     spreadsheet_id: str, years_key: str = ""
 ) -> pd.DataFrame:
-    """Cache de servidor por hoja + años seleccionados."""
+    """Cache larga (1 h) por hoja + años. Solo se invalida con el botón Cargar."""
     _ = spreadsheet_id
     years = [int(y) for y in years_key.split(",") if y.strip().isdigit()] or None
     try:
@@ -1716,7 +1711,6 @@ def _cargar_historico_drive_cached(
             include_legacy=not bool(years),
         )
     except TypeError:
-        # Caché de módulo antiguo en Cloud: leer legado sin kwargs nuevos.
         return sheets_historico.load_historico_dataframe()
 
 
@@ -1777,43 +1771,31 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     col_drive, col_vivo = st.columns(2)
     with col_drive:
         if drive_disponible:
-            try:
-                años_disp = _listar_anos_historico_cached(
-                    sheets_store.spreadsheet_id() or "default"
-                )
-            except Exception:
-                años_disp = []
-            if not años_disp:
-                años_disp = list(range(2021, 2027))
-                st.caption("Aún no hay pestañas por año; se usará la pestaña legado `Historico`.")
             años_sel = st.multiselect(
                 "Años (pestañas Drive)",
-                options=años_disp,
-                default=años_disp[-3:] if len(años_disp) >= 3 else años_disp,
+                options=_ANOS_HISTORICO_UI,
+                default=[2025, 2026],
                 key="hist_anos",
+                help="Elige pocos años: cada pestaña cuenta como lecturas API de Google.",
             )
-            incluir_drive = st.checkbox(
-                "Incluir histórico en Drive",
-                value=True,
-                key="hist_incluir_drive",
-            )
-            refrescar = st.button("📥 Cargar / actualizar histórico de Drive", key="hist_cargar_drive")
-            expediente_previo = str(st.session_state.get("hist_exp") or "").strip()
-            # Con ID de expediente se cargan todos los años automáticamente.
-            years_for_load = (
-                sorted(años_disp)
-                if expediente_previo
-                else sorted(años_sel)
-            )
+            st.caption("Pulsa **Cargar** una vez; luego puedes filtrar sin volver a leer Drive.")
+            cargar = st.button("📥 Cargar histórico de Drive", key="hist_cargar_drive", type="primary")
+            if cargar:
+                years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
+                st.session_state["hist_drive_years_key"] = years_key
+                try:
+                    sheets_historico.clear_worksheet_list_cache()
+                    _cargar_historico_drive_cached.clear()
+                except Exception:
+                    pass
+                st.session_state["hist_drive_loaded"] = True
+
+            incluir_drive = bool(st.session_state.get("hist_drive_loaded"))
             if incluir_drive:
                 hoja_id = sheets_store.spreadsheet_id() or "default"
-                years_key = ",".join(str(y) for y in years_for_load) if years_for_load else ""
-                if refrescar:
-                    try:
-                        _cargar_historico_drive_cached.clear()
-                        _listar_anos_historico_cached.clear()
-                    except Exception:
-                        pass
+                years_key = st.session_state.get("hist_drive_years_key") or ",".join(
+                    str(y) for y in sorted(años_sel)
+                )
                 try:
                     drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
                     filas_drive = int(len(drive_df))
@@ -1822,14 +1804,24 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
                         if "nif_adjudicatario" in drive_df.columns
                         else 0
                     )
-                    st.caption(
-                        f"{filas_drive:,} filas · {con_adj:,} con NIF adjudicatario (caché 10 min)."
+                    st.success(
+                        f"Drive en caché: **{filas_drive:,}** filas "
+                        f"({con_adj:,} con NIF adjudicatario). Años: {years_key or 'legado'}."
                     )
-                    if expediente_previo:
-                        st.caption("Búsqueda por expediente: se han cargado todos los años disponibles.")
                 except Exception as exc:
-                    st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
+                    msg = str(exc)
+                    if "429" in msg or "Quota" in msg:
+                        st.warning(
+                            "Cuota de Google Sheets agotada (demasiadas lecturas). "
+                            "Espera **60–90 segundos** y pulsa Cargar otra vez. "
+                            "Carga solo 1–2 años (p. ej. 2026)."
+                        )
+                    else:
+                        st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
                     drive_df = None
+                    incluir_drive = False
+            else:
+                st.info("Elige años y pulsa **Cargar histórico de Drive**.")
         else:
             incluir_drive = False
             st.info("Google Sheets no configurado.")
@@ -1894,11 +1886,9 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
         st.warning(
-            "Sin coincidencias. Comprueba que «Incluir histórico en Drive» esté activo "
-            "(se carga al marcar la casilla). "
-            "El histórico en Drive solo contiene oportunidades **Alta/Media GREFA**; "
-            "si la licitación quedó en Baja relevancia, no estará importada. "
-            "Prueba el ID tal como aparece en PLACSP o un trozo del código."
+            "Sin coincidencias. Pulsa **Cargar histórico de Drive** (elige el año correcto, "
+            "p. ej. 2026 para `3.25/…`). El histórico solo incluye Alta/Media GREFA. "
+            "Si ves error 429, espera un minuto y recarga solo 1 año."
         )
         return
 
@@ -2009,11 +1999,6 @@ def main() -> None:
     if not st.session_state.get("_modulos_criticos_reloaded"):
         _recargar_modulos_criticos()
         st.session_state["_modulos_criticos_reloaded"] = True
-        try:
-            _listar_anos_historico_cached.clear()
-            _cargar_historico_drive_cached.clear()
-        except Exception:
-            pass
 
     usuario = auth.requiere_acceso()
 
