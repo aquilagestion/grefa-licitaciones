@@ -682,10 +682,32 @@ def _widget_checklist_docs(
         f"Los ficheros se guardan en Drive → `{carpeta_prevista}`."
     )
 
+    # No golpear Sheets hasta que el usuario lo pida (evita 429 al abrir la pestaña).
+    cargar_key = f"chk_loaded_{clave_prefix}_{_clave_expediente(expediente, url)[:40]}"
+    col_load, _ = st.columns([1, 2])
+    with col_load:
+        if st.button(
+            "📂 Abrir checklist en Sheets",
+            key=f"chk_open_{clave_prefix}",
+            type="primary",
+            width="stretch",
+        ):
+            st.session_state[cargar_key] = True
+
+    if not st.session_state.get(cargar_key):
+        st.info("Pulsa «Abrir checklist en Sheets» cuando quieras trabajar la documentación.")
+        return
+
     try:
         items = sheets_store.load_checklist(expediente, url)
-    except sheets_store.SheetsError as exc:
-        st.error(str(exc))
+    except Exception as exc:
+        st.warning(
+            f"No se pudo leer el checklist ahora: {exc}. "
+            "Si es cuota 429, espera un minuto y vuelve a pulsar Abrir."
+        )
+        if st.button("Reintentar", key=f"chk_retry_{clave_prefix}"):
+            st.session_state[cargar_key] = True
+            st.rerun()
         return
 
     col_a, col_b = st.columns(2)
@@ -705,7 +727,7 @@ def _widget_checklist_docs(
                 )
                 st.toast(f"Checklist listo ({len(items)} documentos).", icon="📋")
                 st.rerun()
-            except sheets_store.SheetsError as exc:
+            except Exception as exc:
                 st.error(str(exc))
     with col_b:
         nuevo = st.text_input(
@@ -725,7 +747,7 @@ def _widget_checklist_docs(
                     estado="Pendiente",
                 )
                 st.rerun()
-            except sheets_store.SheetsError as exc:
+            except Exception as exc:
                 st.error(str(exc))
 
     if not items:
@@ -805,7 +827,7 @@ def _widget_checklist_docs(
                     )
                     st.toast("Documento y checklist guardados en Drive.", icon="✅")
                     st.rerun()
-                except (sheets_store.SheetsError, drive_docs.DriveDocsError) as exc:
+                except Exception as exc:
                     st.error(str(exc))
 
 
@@ -2147,7 +2169,10 @@ def pestana_analisis_pliegos(
             + (f" · {len(documentos)} documento(s) PLACSP" if documentos else " · sin enlaces de pliego en origen")
         )
         if sheets_store.is_configured():
-            previo = sheets_store.load_pliego_resumen(expediente, url)
+            try:
+                previo = sheets_store.load_pliego_resumen(expediente, url)
+            except Exception:
+                previo = None
             if previo:
                 st.info("Ya hay un resumen guardado en Sheets para este expediente.")
                 with st.expander("Ver resumen guardado"):

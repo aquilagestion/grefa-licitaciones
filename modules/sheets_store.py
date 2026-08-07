@@ -217,45 +217,91 @@ def reset_cache() -> None:
 # ---------------------------------------------------------------------------
 # Utilidades internas
 # ---------------------------------------------------------------------------
+def _mensaje_api_sheets(exc: BaseException) -> str:
+    texto = str(exc)
+    bajo = texto.lower()
+    if "429" in texto or "quota" in bajo or "rate" in bajo:
+        return (
+            "Cuota de Google Sheets agotada (demasiadas lecturas). "
+            "Espera 60–90 segundos y reintenta."
+        )
+    if "403" in texto or "permission" in bajo or "forbidden" in bajo:
+        return (
+            "Sin permiso en Google Sheets. Comparte la hoja como Editor con la "
+            "cuenta de servicio."
+        )
+    return texto or type(exc).__name__
+
+
 def _worksheet(hoja, titulo: str, cabeceras: list[str]):
     """Devuelve la pestaña pedida, creándola con cabeceras si no existe."""
     pestana = None
     objetivo = str(titulo).strip().lower()
     try:
-        for candidata in hoja.worksheets():
-            if str(candidata.title).strip().lower() == objetivo:
-                pestana = candidata
-                break
-    except Exception:
-        pestana = None
-
-    if pestana is None:
         try:
-            pestana = hoja.worksheet(titulo)
+            for candidata in hoja.worksheets():
+                if str(candidata.title).strip().lower() == objetivo:
+                    pestana = candidata
+                    break
         except Exception:
             pestana = None
 
-    if pestana is None:
-        try:
-            pestana = hoja.add_worksheet(title=titulo, rows=200, cols=max(len(cabeceras), 10))
-            pestana.update([cabeceras], "A1")
-            return pestana
-        except Exception as exc:
-            # Carrera típica: la pestaña existe pero worksheet() falló antes.
-            if "already exists" in str(exc).lower():
-                for candidata in hoja.worksheets():
-                    if str(candidata.title).strip().lower() == objetivo:
-                        pestana = candidata
-                        break
-            if pestana is None:
-                raise SheetsError(f"No se pudo abrir/crear la pestaña {titulo}: {exc}") from exc
+        if pestana is None:
+            try:
+                pestana = hoja.worksheet(titulo)
+            except Exception:
+                pestana = None
 
-    valores = [v.strip() for v in pestana.row_values(1) if str(v).strip()]
-    esperadas = [c.strip() for c in cabeceras]
-    if [v.lower() for v in valores] != [c.lower() for c in esperadas]:
-        # Solo reescribe cabeceras; no toca el resto de filas.
-        pestana.update([cabeceras], "A1")
-    return pestana
+        if pestana is None:
+            try:
+                pestana = hoja.add_worksheet(
+                    title=titulo, rows=2000, cols=max(len(cabeceras), 10)
+                )
+                pestana.update([cabeceras], "A1")
+                return pestana
+            except Exception as exc:
+                # Carrera típica: la pestaña existe pero worksheet() falló antes.
+                msg = str(exc).lower()
+                if "already exists" in msg:
+                    try:
+                        pestana = hoja.worksheet(titulo)
+                    except Exception:
+                        try:
+                            for candidata in hoja.worksheets():
+                                if str(candidata.title).strip().lower() == objetivo:
+                                    pestana = candidata
+                                    break
+                        except Exception as exc2:
+                            raise SheetsError(
+                                f"No se pudo abrir la pestaña {titulo}: "
+                                f"{_mensaje_api_sheets(exc2)}"
+                            ) from exc2
+                if pestana is None:
+                    raise SheetsError(
+                        f"No se pudo abrir/crear la pestaña {titulo}: "
+                        f"{_mensaje_api_sheets(exc)}"
+                    ) from exc
+
+        try:
+            valores = [v.strip() for v in pestana.row_values(1) if str(v).strip()]
+        except Exception as exc:
+            raise SheetsError(
+                f"No se pudo leer cabeceras de {titulo}: {_mensaje_api_sheets(exc)}"
+            ) from exc
+        esperadas = [c.strip() for c in cabeceras]
+        if [v.lower() for v in valores] != [c.lower() for c in esperadas]:
+            # Solo reescribe cabeceras; no toca el resto de filas.
+            try:
+                pestana.update([cabeceras], "A1")
+            except Exception as exc:
+                LOGGER.warning("No se pudieron actualizar cabeceras de %s: %s", titulo, exc)
+        return pestana
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"Error de Google Sheets con la pestaña {titulo}: {_mensaje_api_sheets(exc)}"
+        ) from exc
 
 
 def _es_activo(valor: Any) -> bool:
@@ -615,12 +661,13 @@ def load_checklist(
     hoja_id: str | None = None,
 ) -> list[dict[str, str]]:
     """Ítems de checklist de documentación para un expediente."""
-    hoja = get_spreadsheet(hoja_id)
-    pestana = _worksheet(hoja, CHECKLIST_SHEET, CHECKLIST_HEADERS)
-    clave_objetivo = _clave(expediente, enlace)
-    filas: list[dict[str, str]] = []
     try:
-        for registro in pestana.get_all_records():
+        hoja = get_spreadsheet(hoja_id)
+        pestana = _worksheet(hoja, CHECKLIST_SHEET, CHECKLIST_HEADERS)
+        clave_objetivo = _clave(expediente, enlace)
+        filas: list[dict[str, str]] = []
+        registros = pestana.get_all_records()
+        for i, registro in enumerate(registros, start=2):
             if _clave(
                 _campo(registro, "ID Expediente", "expediente"),
                 _campo(registro, "Enlace", "enlace"),
@@ -640,28 +687,16 @@ def load_checklist(
                     "fecha": str(
                         _campo(registro, "Fecha actualización", "fecha_actualizacion")
                     ),
-                    "_row": "",  # se rellena abajo
+                    "_row": str(i),
                 }
             )
+        return filas
+    except SheetsError:
+        raise
     except Exception as exc:
-        raise SheetsError(f"No se pudo leer ChecklistDocs: {exc}") from exc
-
-    # Incluir nº de fila real para updates
-    try:
-        registros = pestana.get_all_records()
-        idx = 0
-        for i, registro in enumerate(registros, start=2):
-            if _clave(
-                _campo(registro, "ID Expediente", "expediente"),
-                _campo(registro, "Enlace", "enlace"),
-            ) != clave_objetivo:
-                continue
-            if idx < len(filas):
-                filas[idx]["_row"] = str(i)
-                idx += 1
-    except Exception:
-        pass
-    return filas
+        raise SheetsError(
+            f"No se pudo leer ChecklistDocs: {_mensaje_api_sheets(exc)}"
+        ) from exc
 
 
 def ensure_checklist(
