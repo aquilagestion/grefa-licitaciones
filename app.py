@@ -34,7 +34,7 @@ from config.keyword_catalog import (  # noqa: E402
     active_keywords_grouped,
     default_term_catalog,
 )
-from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, historico_placsp, pdf_summary, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
+from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, historico_placsp, pdf_summary, pliegos_placsp, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
 from modules.admin_ambito import NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVEL_NACIONAL, NIVELES_ADMIN  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
@@ -618,20 +618,34 @@ def _cargar_seguimiento_cache() -> dict:
         return {}
 
 
+def _docs_desde_fila(fila: pd.Series | dict | None) -> list[dict]:
+    if fila is None:
+        return []
+    try:
+        docs = fila.get("documentos") if hasattr(fila, "get") else None
+    except Exception:
+        docs = None
+    if isinstance(docs, list):
+        return [d for d in docs if isinstance(d, dict) and d.get("url")]
+    return []
+
+
 def _widget_resumen_pliego(
     expediente: str,
     url: str,
     titulo: str,
     *,
     clave_prefix: str,
+    documentos: list[dict] | None = None,
 ) -> None:
-    """Uploader + botón para resumir un PDF vinculado a un expediente."""
+    """Multi-PDF (PCAP/PPT) + descarga desde PLACSP + resumen IA."""
     if not pdf_summary.is_configured():
         st.caption("Configura `[gemini] api_key` en Secrets para activar el resumen IA.")
         return
 
     clave = _clave_expediente(expediente, url)
     resumenes = st.session_state.setdefault("pdf_resumenes", {})
+    docs_placsp = list(documentos or [])
 
     if sheets_store.is_configured():
         guardado = sheets_store.load_pliego_resumen(expediente, url)
@@ -645,23 +659,71 @@ def _widget_resumen_pliego(
             st.rerun()
         return
 
-    fichero = st.file_uploader(
-        "Sube el pliego (PDF)",
+    if docs_placsp:
+        st.caption(
+            "Documentos detectados en PLACSP: "
+            + ", ".join(f"{d.get('tipo', '?')}: {d.get('nombre', 'doc')}" for d in docs_placsp[:6])
+        )
+        if st.button(
+            "⬇️ Obtener PCAP + PPT de PLACSP y analizar",
+            key=f"placsp_docs_{clave_prefix}",
+            type="primary",
+        ):
+            with st.spinner("Descargando pliegos de PLACSP y analizando con Gemini…"):
+                try:
+                    descargados = pliegos_placsp.download_documentos(
+                        docs_placsp, solo_tipos=("PCAP", "PPT"), max_docs=4
+                    )
+                    ok = [d for d in descargados if d.get("bytes")]
+                    fallos = [d for d in descargados if d.get("error")]
+                    for fallo in fallos:
+                        st.warning(f"{fallo.get('nombre')}: {fallo.get('error')}")
+                    if not ok:
+                        st.error("No se pudo descargar ningún pliego público desde PLACSP.")
+                    else:
+                        texto = pdf_summary.summarize_documentos(
+                            ok, expediente=expediente, titulo=titulo
+                        )
+                        resumenes[clave] = texto
+                        if sheets_store.is_configured():
+                            sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
+                            st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                        st.rerun()
+                except pdf_summary.PdfSummaryError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Error al obtener pliegos: {exc}")
+    else:
+        st.caption(
+            "No hay enlaces de pliegos en el feed cargado. "
+            "Sube manualmente el PCAP y el PPT (PDF)."
+        )
+
+    ficheros = st.file_uploader(
+        "Sube uno o varios pliegos (PDF) — idealmente PCAP y PPT",
         type=["pdf"],
+        accept_multiple_files=True,
         key=f"pdf_{clave_prefix}",
     )
-    if fichero and st.button("✨ Generar resumen con IA", key=f"resumir_{clave_prefix}"):
-        with st.spinner("Analizando pliego con Gemini… (puede tardar 30-60 s)"):
+    if ficheros and st.button("✨ Generar resumen con IA", key=f"resumir_{clave_prefix}"):
+        with st.spinner(f"Analizando {len(ficheros)} PDF con Gemini…"):
             try:
-                texto = pdf_summary.summarize_pdf(
-                    fichero.getvalue(),
-                    expediente=expediente,
-                    titulo=titulo,
+                docs_up = [
+                    {
+                        "nombre": f.name,
+                        "tipo": pliegos_placsp.etiquetar_upload(f.name),
+                        "bytes": f.getvalue(),
+                    }
+                    for f in ficheros
+                ]
+                texto = pdf_summary.summarize_documentos(
+                    docs_up, expediente=expediente, titulo=titulo
                 )
                 resumenes[clave] = texto
                 if sheets_store.is_configured():
                     sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
                     st.toast("Resumen guardado en la pestaña Pliegos.", icon="✅")
+                st.rerun()
             except pdf_summary.PdfSummaryError as exc:
                 st.error(str(exc))
             except sheets_store.SheetsError as exc:
@@ -719,12 +781,13 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
     if seguimiento:
         st.caption(f"📋 Seguimiento: **{seguimiento.get('seguimiento', '—')}**")
 
-    with st.expander("📄 Resumir pliego (IA)"):
+    with st.expander("📄 Resumir pliegos (IA)"):
         _widget_resumen_pliego(
             expediente,
             url,
             str(fila.get("titulo") or ""),
             clave_prefix=f"tarjeta_{clave[:40]}",
+            documentos=_docs_desde_fila(fila),
         )
 
 
@@ -1532,8 +1595,8 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
 def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
     st.subheader("Análisis de pliegos con IA")
     st.caption(
-        "Sube un pliego PDF y obtén un resumen estructurado (objeto, solvencia, criterios, plazos). "
-        "Usa Gemini (tier gratuito de Google AI Studio)."
+        "Analiza PCAP + PPT (varios PDF) o descárgalos automáticamente desde PLACSP "
+        "cuando el expediente viene del feed. Resumen con Gemini."
     )
 
     if not pdf_summary.is_configured():
@@ -1544,14 +1607,16 @@ def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
         )
         return
 
-    opciones: list[tuple[str, str, str, str]] = []
+    opciones: list[tuple[str, str, str, str, list]] = []
     if not oportunidades.empty:
         for _, fila in oportunidades.iterrows():
             exp = str(fila.get("expediente") or "—")
             tit = str(fila.get("titulo") or "")[:70]
             url = str(fila.get("url") or "")
             etiqueta = f"{exp} — {tit}" if tit else exp
-            opciones.append((etiqueta, exp, url, str(fila.get("titulo") or "")))
+            opciones.append(
+                (etiqueta, exp, url, str(fila.get("titulo") or ""), _docs_desde_fila(fila))
+            )
 
     etiquetas = ["— Sin vincular a expediente —"] + [o[0] for o in opciones]
     seleccion = st.selectbox(
@@ -1561,10 +1626,11 @@ def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
     )
 
     expediente, url, titulo = "", "", ""
+    documentos: list[dict] = []
     if seleccion != etiquetas[0]:
-        for etiqueta, exp, enlace, tit in opciones:
+        for etiqueta, exp, enlace, tit, docs in opciones:
             if etiqueta == seleccion:
-                expediente, url, titulo = exp, enlace, tit
+                expediente, url, titulo, documentos = exp, enlace, tit, docs
                 break
     else:
         expediente = st.text_input("ID expediente (opcional)", value="")
@@ -1585,6 +1651,7 @@ def pestana_analisis_pliegos(oportunidades: pd.DataFrame) -> None:
         url,
         titulo,
         clave_prefix=clave_prefix,
+        documentos=documentos,
     )
 
 

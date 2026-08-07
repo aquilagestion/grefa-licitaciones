@@ -56,9 +56,12 @@ def load() -> pd.DataFrame:
         df = pd.read_parquet(ruta)
         for columna in COLUMNS:
             if columna not in df.columns:
-                df[columna] = "" if columna not in {"presupuesto_sin_iva", "presupuesto_con_iva", "cpvs"} else (
-                    [] if columna == "cpvs" else None
-                )
+                if columna in {"cpvs", "documentos"}:
+                    df[columna] = [[] for _ in range(len(df))]
+                elif columna in {"presupuesto_sin_iva", "presupuesto_con_iva"}:
+                    df[columna] = None
+                else:
+                    df[columna] = ""
         return df[list(COLUMNS)]
     except Exception as exc:
         LOGGER.warning("No se pudo leer el histórico Parquet: %s", exc)

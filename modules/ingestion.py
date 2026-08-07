@@ -59,6 +59,7 @@ COLUMNS: tuple[str, ...] = (
     "nif_organo",
     "nif_adjudicatario",
     "adjudicatario",
+    "documentos",
 )
 
 #: Etiquetas legibles para la interfaz y las exportaciones.
@@ -354,6 +355,8 @@ def _parse_entry(entry) -> dict[str, Any]:
 
     nif_adjudicatario, adjudicatario = _adjudicatario(carpeta)
 
+    from modules.pliegos_placsp import extract_documentos_from_carpeta
+
     return {
         "expediente": expediente,
         "titulo": _clean_html(titulo),
@@ -372,6 +375,7 @@ def _parse_entry(entry) -> dict[str, Any]:
         "nif_organo": _nif_organo(carpeta),
         "nif_adjudicatario": nif_adjudicatario,
         "adjudicatario": adjudicatario,
+        "documentos": extract_documentos_from_carpeta(carpeta),
     }
 
 
@@ -404,6 +408,7 @@ def _parse_with_feedparser(raw: bytes) -> tuple[list[dict[str, Any]], str]:
                 "nif_organo": "",
                 "nif_adjudicatario": "",
                 "adjudicatario": "",
+                "documentos": [],
             }
         )
 
@@ -466,6 +471,9 @@ def build_dataframe(registros: Sequence[dict[str, Any]]) -> pd.DataFrame:
     ).dt.date
 
     df["cpvs"] = df["cpvs"].apply(lambda valor: list(valor) if isinstance(valor, (list, tuple)) else [])
+    df["documentos"] = df["documentos"].apply(
+        lambda valor: list(valor) if isinstance(valor, (list, tuple)) else []
+    )
     for columna in ("expediente", "titulo", "organo_contratacion", "url", "ubicacion",
                     "cpvs_texto", "estado", "tipo_contrato", "descripcion",
                     "nif_organo", "nif_adjudicatario", "adjudicatario"):

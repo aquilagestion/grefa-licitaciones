@@ -17,25 +17,29 @@ MAX_TEXTO_EXTRAIDO = 120_000
 PROMPT_PLIEGO = """Eres un analista de licitaciones públicas para el equipo GREFA
 (Grupo para la Recuperación de la Fauna Autóctona).
 
-Analiza el pliego adjunto y redacta un resumen en **español**, claro y accionable,
+Analiza el/los pliego(s) adjunto(s). Puede haber varios documentos (p. ej. PCAP =
+Pliego de Cláusulas Administrativas Particulares y PPT = Pliego de Prescripciones
+Técnicas). Intégralos en un único resumen en **español**, claro y accionable,
 con estas secciones (usa títulos markdown):
 
 ## Objeto del contrato
 ## Presupuesto e importes (si constan)
-## Requisitos de solvencia y clasificación
+## Requisitos de solvencia y clasificación (sobre todo PCAP)
 ## Criterios de adjudicación
+## Alcance técnico / prestaciones (sobre todo PPT)
 ## Plazos clave (presentación, ejecución, garantías)
 ## Documentación a presentar
 ## Puntos de atención para GREFA
 ## Recomendación breve (Presentar / Estudiar / Descartar) y por qué
 
-Si algún dato no aparece en el documento, indícalo como «No consta».
-Sé conciso pero no omitas requisitos eliminatorios."""
+Si algún dato no aparece en los documentos, indícalo como «No consta».
+Sé conciso pero no omitas requisitos eliminatorios. Indica de qué documento
+sale cada dato clave cuando haya varios."""
 
 PROMPT_TEXTO = """Eres un analista de licitaciones públicas para GREFA.
-Resume el siguiente extracto de pliego en español con las mismas secciones que
-un pliego completo (objeto, solvencia, criterios, plazos, documentación, atención GREFA,
-recomendación). Si falta información, indica «No consta».
+Resume el siguiente extracto de pliego(s) en español con las mismas secciones que
+un pliego completo (objeto, solvencia, criterios, alcance técnico, plazos,
+documentación, atención GREFA, recomendación). Si falta información, indica «No consta».
 
 ---
 {texto}
@@ -116,34 +120,71 @@ def summarize_pdf(
     titulo: str = "",
 ) -> str:
     """Resume un pliego PDF. Intenta enviar el PDF a Gemini; si falla, extrae texto."""
-    if not pdf_bytes:
-        raise PdfSummaryError("El fichero PDF está vacío.")
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        raise PdfSummaryError(
-            f"El PDF supera {MAX_PDF_BYTES // (1024 * 1024)} MB. "
-            "Reduce el tamaño o divide el documento."
-        )
+    return summarize_documentos(
+        [{"nombre": "pliego.pdf", "tipo": "OTRO", "bytes": pdf_bytes}],
+        expediente=expediente,
+        titulo=titulo,
+    )
 
-    contexto = ""
+
+def summarize_documentos(
+    documentos: list[dict[str, Any]],
+    *,
+    expediente: str = "",
+    titulo: str = "",
+) -> str:
+    """Resume uno o varios PDFs (p. ej. PCAP + PPT) en un único informe."""
+    utiles = [
+        d
+        for d in documentos
+        if isinstance(d, dict) and d.get("bytes") and len(d.get("bytes") or b"") > 0
+    ]
+    if not utiles:
+        raise PdfSummaryError("No hay PDFs válidos para analizar.")
+
+    for doc in utiles:
+        datos = doc["bytes"]
+        if len(datos) > MAX_PDF_BYTES:
+            raise PdfSummaryError(
+                f"{doc.get('nombre', 'PDF')} supera "
+                f"{MAX_PDF_BYTES // (1024 * 1024)} MB."
+            )
+
+    contexto_parts = []
     if expediente or titulo:
-        contexto = f"Expediente: {expediente or '—'}\nTítulo: {titulo or '—'}"
+        contexto_parts.append(f"Expediente: {expediente or '—'}\nTítulo: {titulo or '—'}")
+    listado = ", ".join(
+        f"{d.get('tipo', 'OTRO')}: {d.get('nombre', 'documento.pdf')}" for d in utiles
+    )
+    contexto_parts.append(f"Documentos analizados: {listado}")
+    contexto = "\n".join(contexto_parts)
 
+    # Gemini admite varios PDF en el mismo prompt.
     try:
-        return _generar_con_gemini(
-            [{"mime_type": "application/pdf", "data": pdf_bytes}],
-            contexto=contexto,
-        )
+        partes: list[Any] = []
+        for doc in utiles[:4]:
+            etiqueta = f"[{doc.get('tipo', 'OTRO')}] {doc.get('nombre', 'documento.pdf')}"
+            partes.append(etiqueta)
+            partes.append({"mime_type": "application/pdf", "data": doc["bytes"]})
+        return _generar_con_gemini(partes, contexto=contexto)
     except PdfSummaryError as exc:
-        LOGGER.info("PDF directo falló (%s); se intenta extracción de texto.", exc)
+        LOGGER.info("PDF multi directo falló (%s); se intenta texto.", exc)
 
-    texto = _extraer_texto_pdf(pdf_bytes)
-    if len(texto.strip()) < 200:
+    bloques: list[str] = []
+    for doc in utiles:
+        texto = _extraer_texto_pdf(doc["bytes"])
+        if texto.strip():
+            bloques.append(
+                f"### {doc.get('tipo', 'OTRO')} — {doc.get('nombre', 'documento.pdf')}\n{texto}"
+            )
+    combinado = "\n\n".join(bloques)[:MAX_TEXTO_EXTRAIDO]
+    if len(combinado.strip()) < 200:
         raise PdfSummaryError(
-            "El PDF parece escaneado o sin texto seleccionable. "
-            "Sube un PDF con texto o un pliego nativo digital."
+            "Los PDF parecen escaneados o sin texto seleccionable. "
+            "Sube PDFs con texto o nativos digitales."
         )
 
-    prompt = PROMPT_TEXTO.format(texto=texto[:MAX_TEXTO_EXTRAIDO])
+    prompt = PROMPT_TEXTO.format(texto=combinado)
     if contexto:
         prompt = f"{contexto}\n\n{prompt}"
     return _generar_con_gemini([prompt])
