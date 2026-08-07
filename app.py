@@ -1783,16 +1783,24 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             )
             incluir_drive = st.checkbox(
                 "Incluir histórico en Drive",
-                value=False,
+                value=True,
                 key="hist_incluir_drive",
             )
-            refrescar = st.button("📥 Cargar histórico de Drive", key="hist_cargar_drive")
+            refrescar = st.button("📥 Cargar / actualizar histórico de Drive", key="hist_cargar_drive")
+            expediente_previo = str(st.session_state.get("hist_exp") or "").strip()
+            # Con ID de expediente se cargan todos los años automáticamente.
+            years_for_load = (
+                sorted(años_disp)
+                if expediente_previo
+                else sorted(años_sel)
+            )
             if incluir_drive:
                 hoja_id = sheets_store.spreadsheet_id() or "default"
-                years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
+                years_key = ",".join(str(y) for y in years_for_load) if years_for_load else ""
                 if refrescar:
                     try:
                         _cargar_historico_drive_cached.clear()
+                        _listar_anos_historico_cached.clear()
                     except Exception:
                         pass
                 try:
@@ -1806,6 +1814,8 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
                     st.caption(
                         f"{filas_drive:,} filas · {con_adj:,} con NIF adjudicatario (caché 10 min)."
                     )
+                    if expediente_previo:
+                        st.caption("Búsqueda por expediente: se han cargado todos los años disponibles.")
                 except Exception as exc:
                     st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
                     drive_df = None
@@ -1831,7 +1841,11 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 
     col_exp, col_nif = st.columns([2, 2])
     with col_exp:
-        expediente = st.text_input("ID Expediente", placeholder="Ej. 2024/001234…", key="hist_exp")
+        expediente = st.text_input(
+            "ID Expediente",
+            placeholder="Ej. 2024/001234… (también busca en la URL PLACSP)",
+            key="hist_exp",
+        )
     with col_nif:
         nif = st.text_input("NIF", placeholder="Ej. B12345678…", key="hist_nif")
 
@@ -1869,8 +1883,11 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
         st.warning(
-            "Sin coincidencias. Elige años, activa «Incluir histórico en Drive» y pulsa Cargar. "
-            "Para NIF de adjudicatario hace falta reimportación con ZIPs (columnas nuevas)."
+            "Sin coincidencias. Comprueba que «Incluir histórico en Drive» esté activo "
+            "(se carga al marcar la casilla). "
+            "El histórico en Drive solo contiene oportunidades **Alta/Media GREFA**; "
+            "si la licitación quedó en Baja relevancia, no estará importada. "
+            "Prueba el ID tal como aparece en PLACSP o un trozo del código."
         )
         return
 
@@ -2013,14 +2030,16 @@ def main() -> None:
     cpvs_activos = list(st.session_state["cpvs"].keys())
     keywords_activas = flatten_keywords(st.session_state["keywords"])
     conceptos_activos = [t for t in st.session_state["catalogo_terminos"] if t.get("activo")]
-    puntuadas = grefa_filter.score_licitaciones(
+    puntuadas_todas = grefa_filter.score_licitaciones(
         datos,
         cpvs_activos,
         keywords_activas,
         conceptos=conceptos_activos,
     )
+    # Filtros de estado/fecha solo para oportunidades/buscador; el histórico
+    # necesita también Adjudicada/Resuelta (p. ej. licitaciones ya ganadas).
     puntuadas = grefa_filter.filter_by_estado(
-        puntuadas, st.session_state.get("estados_aplicados") or None
+        puntuadas_todas, st.session_state.get("estados_aplicados") or None
     )
 
     usar_fechas = bool(st.session_state.get("usar_fechas_aplicado", False))
@@ -2069,13 +2088,13 @@ def main() -> None:
         else:
             pestana_oportunidades(oportunidades, vista)
     with pestana_2:
-        if puntuadas.empty:
+        if puntuadas_todas.empty:
             st.info("Carga licitaciones para usar el buscador.")
         else:
-            pestana_buscador(puntuadas)
+            pestana_buscador(puntuadas_todas)
     with pestana_3:
         try:
-            pestana_historico_nif(puntuadas)
+            pestana_historico_nif(puntuadas_todas)
         except Exception as exc:
             st.error(f"Histórico no disponible ahora: {type(exc).__name__}")
     with pestana_4:

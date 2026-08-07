@@ -457,13 +457,43 @@ def filter_by_nivel_administracion(
     ].reset_index(drop=True)
 
 
+def _normalizar_expediente(valor: str) -> str:
+    """Minúsculas y solo alfanuméricos, para comparar IDs con distintos separadores."""
+    return re.sub(r"[^0-9a-z]+", "", str(valor or "").strip().lower())
+
+
 def filter_by_expediente(df: pd.DataFrame, expediente: str = "") -> pd.DataFrame:
-    """Búsqueda directa por ID de expediente (coincidencia parcial, sin distinguir mayúsculas)."""
+    """Búsqueda por ID de expediente (parcial, tolerante a guiones/espacios/mayúsculas).
+
+    También mira la URL PLACSP, porque a veces el código visible no coincide
+    exactamente con el ContractFolderID del feed.
+    """
     if df.empty or not expediente or not str(expediente).strip():
         return df
-    objetivo = str(expediente).strip().lower()
-    serie = df["expediente"].fillna("").astype(str).str.lower()
-    return df[serie.str.contains(re.escape(objetivo), regex=True, na=False)].reset_index(drop=True)
+
+    objetivo_raw = str(expediente).strip().lower()
+    objetivo_norm = _normalizar_expediente(objetivo_raw)
+    if not objetivo_norm:
+        return df
+
+    serie_exp = df["expediente"].fillna("").astype(str)
+    serie_url = df["url"].fillna("").astype(str) if "url" in df.columns else pd.Series("", index=df.index)
+    serie_tit = df["titulo"].fillna("").astype(str) if "titulo" in df.columns else pd.Series("", index=df.index)
+
+    exp_lower = serie_exp.str.lower()
+    url_lower = serie_url.str.lower()
+    mascara = exp_lower.str.contains(re.escape(objetivo_raw), regex=True, na=False)
+    mascara |= url_lower.str.contains(re.escape(objetivo_raw), regex=True, na=False)
+
+    if len(objetivo_norm) >= 4:
+        exp_norm = serie_exp.map(_normalizar_expediente)
+        url_norm = url_lower.map(_normalizar_expediente)
+        tit_norm = serie_tit.map(_normalizar_expediente)
+        mascara |= exp_norm.str.contains(objetivo_norm, regex=False, na=False)
+        mascara |= url_norm.str.contains(objetivo_norm, regex=False, na=False)
+        mascara |= tit_norm.str.contains(objetivo_norm, regex=False, na=False)
+
+    return df[mascara].reset_index(drop=True)
 
 
 def filter_by_nif(
