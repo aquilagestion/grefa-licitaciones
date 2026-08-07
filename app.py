@@ -35,6 +35,7 @@ from config.keyword_catalog import (  # noqa: E402
     default_term_catalog,
 )
 from modules import auth, daily_sync, email_alert, grefa_filter, google_chat, historico_placsp, pdf_summary, sheets_catalog, sheets_historico, sheets_store  # noqa: E402
+from modules.admin_ambito import NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVEL_NACIONAL, NIVELES_ADMIN  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
 from modules.exporter import (  # noqa: E402
     timestamped_filename,
@@ -1689,51 +1690,125 @@ def pestana_seguimiento() -> None:
                     )
 
 
-def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
-    st.subheader("Histórico PLACSP y búsqueda por NIF")
-    st.caption(
-        "Consulta expedientes por NIF del órgano de contratación o del adjudicatario. "
-        "Combina el feed en vivo con un histórico importado desde los ZIP oficiales."
-    )
+def _combinar_fuentes_historico(
+    puntuadas: pd.DataFrame,
+    *,
+    incluir_parquet: bool,
+    incluir_drive: bool,
+) -> pd.DataFrame:
+    """Une feed vivo, Parquet local y pestaña Histórico de Drive."""
+    partes: list[pd.DataFrame] = []
+    if incluir_parquet and historico_placsp.is_available():
+        partes.append(historico_placsp.load())
+    if incluir_drive and sheets_store.is_configured():
+        drive = st.session_state.get("historico_drive_cache")
+        if drive is None:
+            try:
+                drive = sheets_historico.load_historico_dataframe()
+                st.session_state["historico_drive_cache"] = drive
+            except sheets_store.SheetsError as exc:
+                st.warning(f"No se pudo leer el histórico en Drive: {exc}")
+                drive = pd.DataFrame()
+        if isinstance(drive, pd.DataFrame) and not drive.empty:
+            partes.append(drive)
+    if not puntuadas.empty:
+        partes.append(puntuadas)
 
-    meta = historico_placsp.metadata()
-    if historico_placsp.is_available():
-        st.success(
-            f"Histórico local cargado: **{int(meta.get('filas', 0)):,}** expedientes "
-            f"(actualizado: {meta.get('actualizado', '—')[:10] if meta.get('actualizado') else '—'})."
-        )
+    if not partes:
+        return empty_dataframe()
+    if len(partes) == 1:
+        combinado = partes[0].copy()
     else:
-        st.info(
-            "Aún no hay histórico importado en este servidor. "
-            "En local o en un PC con acceso a PLACSP ejecuta:\n\n"
-            "`python scripts/import_historico_placsp.py --year 2024 --year 2025`"
-        )
+        combinado = pd.concat(partes, ignore_index=True, sort=False)
+        if "url" in combinado.columns:
+            combinado = combinado.drop_duplicates(subset=["expediente", "url"], keep="first")
+        else:
+            combinado = combinado.drop_duplicates(subset=["expediente"], keep="first")
 
-    incluir_historico = st.checkbox(
-        "Incluir histórico importado",
-        value=historico_placsp.is_available(),
-        disabled=not historico_placsp.is_available(),
+    return grefa_filter.with_nivel_administracion(combinado.reset_index(drop=True))
+
+
+def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
+    st.subheader("Histórico en Drive y búsqueda avanzada")
+    st.caption(
+        "Consulta el histórico compartido en Google Sheets (pestaña **Histórico**), "
+        "el archivo local importado desde PLACSP y el feed en vivo. "
+        "Filtra por ID de expediente, NIF o ámbito del órgano (local, autonómico, nacional)."
     )
 
-    base = puntuadas
-    if incluir_historico and historico_placsp.is_available():
-        historico = historico_placsp.load()
-        base = historico_placsp.merge_with_live(puntuadas, historico)
+    col_drive, col_parquet = st.columns(2)
+    drive_disponible = sheets_store.is_configured()
+    parquet_disponible = historico_placsp.is_available()
 
-    col_nif, col_ambito = st.columns([2, 1])
+    with col_drive:
+        if drive_disponible:
+            if "historico_drive_cache" not in st.session_state:
+                try:
+                    st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
+                except sheets_store.SheetsError:
+                    st.session_state["historico_drive_cache"] = pd.DataFrame()
+            filas_drive = len(st.session_state.get("historico_drive_cache", pd.DataFrame()))
+            incluir_drive = st.checkbox(
+                f"Incluir histórico en Drive ({filas_drive:,} filas)",
+                value=True,
+            )
+            if st.button("Actualizar histórico desde Drive", key="refresh_historico_drive"):
+                try:
+                    st.session_state["historico_drive_cache"] = sheets_historico.load_historico_dataframe()
+                    st.rerun()
+                except sheets_store.SheetsError as exc:
+                    st.error(str(exc))
+        else:
+            incluir_drive = False
+            st.info("Google Sheets no configurado: no hay histórico en Drive.")
+
+    with col_parquet:
+        meta = historico_placsp.metadata()
+        if parquet_disponible:
+            incluir_parquet = st.checkbox(
+                f"Incluir histórico local Parquet ({int(meta.get('filas', 0)):,} filas)",
+                value=True,
+            )
+        else:
+            incluir_parquet = False
+            st.info(
+                "Sin Parquet local. Importa con:\n\n"
+                "`python scripts/import_historico_placsp.py --year 2024`\n\n"
+                "Para volcar a Drive:\n\n"
+                "`python scripts/import_historico_to_sheets.py --from-year 2021`"
+            )
+
+    incluir_vivo = st.checkbox("Incluir feed en vivo / datos cargados", value=True)
+    base = _combinar_fuentes_historico(
+        puntuadas if incluir_vivo else empty_dataframe(),
+        incluir_parquet=incluir_parquet,
+        incluir_drive=incluir_drive,
+    )
+
+    col_exp, col_nif = st.columns([2, 2])
+    with col_exp:
+        expediente = st.text_input("ID Expediente", placeholder="Ej. 2024/001234, PAC-2023-45…")
     with col_nif:
         nif = st.text_input("NIF", placeholder="Ej. B12345678, P2807900B…")
-    with col_ambito:
+
+    col_ambito_nif, col_ambito_admin = st.columns([1, 2])
+    with col_ambito_nif:
         ambito_etiqueta = st.selectbox(
             "Buscar NIF en",
             ["Ambos", "Órgano de contratación", "Adjudicatario"],
         )
+    with col_ambito_admin:
+        niveles_admin = st.multiselect(
+            "Ámbito del órgano",
+            [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
+            default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
+        )
+
     ambito_map = {
         "Ambos": "ambos",
         "Órgano de contratación": "organo",
         "Adjudicatario": "adjudicatario",
     }
-
     texto = st.text_input("Texto libre adicional (opcional)", placeholder="Título, CPV, provincia…")
 
     resultados = grefa_filter.search_dataframe(
@@ -1741,24 +1816,26 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
         texto=texto,
         nif=nif,
         nif_ambito=ambito_map[ambito_etiqueta],
+        expediente=expediente,
+        niveles_admin=niveles_admin,
     )
 
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
-        st.warning("Sin coincidencias. Prueba otro NIF o importa más histórico.")
+        st.warning("Sin coincidencias. Prueba otro filtro o importa más histórico a Drive.")
         return
 
     botones_exportacion(resultados, "historico_nif")
 
     columnas = [
-        "expediente", "titulo", "organo_contratacion", "nif_organo",
+        "expediente", "titulo", "organo_contratacion", "nivel_administracion", "nif_organo",
         "adjudicatario", "nif_adjudicatario", "estado", "presupuesto_sin_iva",
-        "ubicacion", "fecha_actualizacion", "url",
+        "ubicacion", "fecha_actualizacion", "fecha_snapshot", "url",
     ]
     if "relevancia" in resultados.columns and resultados["relevancia"].notna().any():
         columnas = ["relevancia", "categoria"] + columnas
 
-    vista_tabla = tabla_para_mostrar(resultados, columnas)
+    vista_tabla = tabla_para_mostrar(resultados, [c for c in columnas if c in resultados.columns])
     st.dataframe(
         vista_tabla,
         width="stretch",
@@ -1779,6 +1856,16 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     tope = float(importes.max()) if not importes.empty else 0.0
 
     ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
+    col_exp, col_admin = st.columns([2, 2])
+    with col_exp:
+        expediente = st.text_input("ID Expediente", placeholder="Búsqueda directa por código de licitación")
+    with col_admin:
+        niveles_admin = st.multiselect(
+            "Ámbito del órgano",
+            [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
+            default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
+        )
+
     ubicaciones = st.multiselect("Ubicación / Provincia", ubicaciones_disponibles)
 
     estados_globales = st.session_state.get("estados_aplicados") or None
@@ -1810,6 +1897,8 @@ def pestana_buscador(df: pd.DataFrame) -> None:
         presupuesto_max=rango[1],
         ubicaciones=ubicaciones,
         incluir_sin_presupuesto=incluir_sin_importe,
+        expediente=expediente,
+        niveles_admin=niveles_admin,
     )
 
     st.markdown(f"**{len(resultados)}** licitaciones coinciden con los filtros.")
@@ -1823,7 +1912,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
         resultados,
         [
             "relevancia", "categoria", "expediente", "titulo", "organo_contratacion",
-            "presupuesto_sin_iva", "ubicacion", "tipo_contrato", "cpvs_texto",
+            "nivel_administracion", "presupuesto_sin_iva", "ubicacion", "tipo_contrato", "cpvs_texto",
             "fecha_actualizacion", "fecha_limite", "estado", "url",
         ],
     )

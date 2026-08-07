@@ -424,6 +424,48 @@ def apply_filtros_busqueda(
     return filtrado
 
 
+def with_nivel_administracion(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade o completa la columna ``nivel_administracion``."""
+    if df.empty:
+        return df
+    from modules.admin_ambito import classify_organo
+
+    copia = df.copy()
+    if "nivel_administracion" not in copia.columns:
+        copia["nivel_administracion"] = ""
+    vacios = copia["nivel_administracion"].fillna("").astype(str).str.strip() == ""
+    if vacios.any():
+        copia.loc[vacios, "nivel_administracion"] = copia.loc[vacios, "organo_contratacion"].map(
+            classify_organo
+        )
+    return copia
+
+
+def filter_by_nivel_administracion(
+    df: pd.DataFrame,
+    niveles: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Filtra por ámbito del órgano: Nacional, Autonómico, Local u Otros."""
+    if df.empty or not niveles:
+        return df
+    seleccion = {str(nivel).strip() for nivel in niveles if str(nivel).strip()}
+    if not seleccion:
+        return df
+    enriquecido = with_nivel_administracion(df)
+    return enriquecido[
+        enriquecido["nivel_administracion"].astype(str).isin(seleccion)
+    ].reset_index(drop=True)
+
+
+def filter_by_expediente(df: pd.DataFrame, expediente: str = "") -> pd.DataFrame:
+    """Búsqueda directa por ID de expediente (coincidencia parcial, sin distinguir mayúsculas)."""
+    if df.empty or not expediente or not str(expediente).strip():
+        return df
+    objetivo = str(expediente).strip().lower()
+    serie = df["expediente"].fillna("").astype(str).str.lower()
+    return df[serie.str.contains(re.escape(objetivo), regex=True, na=False)].reset_index(drop=True)
+
+
 def filter_by_nif(
     df: pd.DataFrame,
     nif: str = "",
@@ -464,16 +506,22 @@ def search_dataframe(
     incluir_sin_fecha: bool = True,
     nif: str = "",
     nif_ambito: str = "ambos",
+    expediente: str = "",
+    niveles_admin: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """Búsqueda libre y filtros del buscador general."""
     if df.empty:
         return df
 
     filtrado = df
+    if expediente and str(expediente).strip():
+        filtrado = filter_by_expediente(filtrado, expediente)
     if texto and texto.strip():
         filtrado = filter_by_texto_libre(filtrado, texto)
     if nif and str(nif).strip():
         filtrado = filter_by_nif(filtrado, nif, ambito=nif_ambito)
+    if niveles_admin:
+        filtrado = filter_by_nivel_administracion(filtrado, niveles_admin)
 
     if presupuesto_min is not None or presupuesto_max is not None:
         importes = filtrado["presupuesto_sin_iva"]
@@ -497,6 +545,8 @@ def search_dataframe(
         incluir_sin_fecha=incluir_sin_fecha,
     )
 
+    if "organo_contratacion" in filtrado.columns:
+        filtrado = with_nivel_administracion(filtrado)
     return filtrado.reset_index(drop=True)
 
 
