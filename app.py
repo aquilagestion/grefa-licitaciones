@@ -301,9 +301,43 @@ CUSTOM_CSS = """
     div[data-testid="stVerticalBlock"]:has(.toolbar-oport-flag) div[data-testid="stMetricLabel"] {
         font-size: 0.65rem;
     }
+    /* Menú de secciones siempre visible arriba */
+    .nav-principal-flag { display: none; }
+    div[data-testid="stVerticalBlock"]:has(> div > .nav-principal-flag),
+    div[data-testid="stVerticalBlock"]:has(.nav-principal-flag) {
+        position: sticky;
+        top: 0;
+        z-index: 1000;
+        background: #ffffffee;
+        backdrop-filter: blur(6px);
+        padding: 0.35rem 0 0.45rem 0;
+        margin: 0 0 0.55rem 0;
+        border-bottom: 1px solid #e2e6e3;
+    }
+    div[data-testid="stVerticalBlock"]:has(.nav-principal-flag) [data-testid="stRadio"] {
+        margin-bottom: 0;
+    }
+    div[data-testid="stVerticalBlock"]:has(.nav-principal-flag) [data-testid="stRadio"] > div {
+        flex-wrap: wrap;
+        gap: 0.25rem 0.5rem;
+    }
+    section.main .block-container {
+        padding-top: 1rem;
+        overflow: visible;
+    }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+NAV_OPCIONES = [
+    "🎯 Oportunidades GREFA",
+    "🔎 Buscador General PLACSP",
+    "🗂️ Histórico y NIF",
+    "⭐ Mis Licitaciones",
+    "📄 Análisis de pliegos",
+    "✅ Comprobador de documentos",
+    "📋 Seguimiento",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +385,7 @@ def init_state() -> None:
         "pliego_expediente_sel": "",
         "buscador_filtros_aplicados": None,
         "hist_filtros_aplicados": None,
+        "nav_principal": NAV_OPCIONES[0],
         "pliego_consulta_aplicada": "",
     }
     for clave, valor in valores_iniciales.items():
@@ -2371,6 +2406,148 @@ def pestana_analisis_pliegos(
     )
 
 
+def pestana_comprobador_documentos() -> None:
+    """Revisa documentación de oferta elaborada por GREFA antes de presentarla."""
+    st.subheader("Comprobador de documentos")
+    st.caption(
+        "Sube el documento (o documentos) que vas a presentar. Opcionalmente adjunta "
+        "el PCAP/PPT u otros requisitos. La IA indica si parece **apto**, qué **falta** "
+        "y qué **errores** puede tener. No sustituye la revisión jurídica final."
+    )
+
+    if not pdf_summary.is_configured():
+        st.warning(
+            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
+            "([Google AI Studio](https://aistudio.google.com/apikey))."
+        )
+        return
+
+    col_meta1, col_meta2 = st.columns(2)
+    with col_meta1:
+        expediente = st.text_input(
+            "ID expediente (opcional)",
+            key="comp_expediente",
+            placeholder="Ej. 2026/…",
+        )
+    with col_meta2:
+        titulo = st.text_input(
+            "Título / referencia (opcional)",
+            key="comp_titulo",
+            placeholder="Objeto del contrato o nombre interno",
+        )
+
+    st.markdown("**1. Documentación a presentar (obligatorio)**")
+    oferta_files = st.file_uploader(
+        "PDF de oferta, memoria, DECLAREs, anexos…",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="comp_oferta_pdfs",
+    )
+
+    st.markdown("**2. Pliego / requisitos de referencia (recomendado)**")
+    pliego_files = st.file_uploader(
+        "PCAP, PPT u otros PDF del expediente",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="comp_pliego_pdfs",
+    )
+
+    requisitos = st.text_area(
+        "Checklist o requisitos adicionales (opcional)",
+        key="comp_requisitos",
+        placeholder=(
+            "Ej.:\n- DEUC / DECLARA\n- Certificado de estar al corriente AEAT/SS\n"
+            "- Memoria técnica firmada\n- Oferta económica en modelo Anexo X"
+        ),
+        height=120,
+    )
+
+    analizar = st.button(
+        "🔎 Comprobar documentación",
+        type="primary",
+        key="comp_btn_analizar",
+        disabled=not oferta_files,
+    )
+
+    if not oferta_files:
+        st.info("Sube al menos un PDF de la documentación a presentar.")
+        informe_prev = st.session_state.get("comp_informe")
+        if informe_prev:
+            with st.expander("Último informe", expanded=True):
+                st.markdown(informe_prev)
+        return
+
+    if not analizar:
+        informe_prev = st.session_state.get("comp_informe")
+        if informe_prev:
+            with st.expander("Último informe", expanded=False):
+                st.markdown(informe_prev)
+        return
+
+    docs_oferta = [
+        {
+            "nombre": Path(getattr(f, "name", "") or "oferta.pdf").name,
+            "tipo": "OFERTA",
+            "bytes": f.getvalue(),
+        }
+        for f in oferta_files
+    ]
+    docs_pliego = [
+        {
+            "nombre": Path(getattr(f, "name", "") or "pliego.pdf").name,
+            "tipo": pliegos_placsp.etiquetar_upload(
+                Path(getattr(f, "name", "") or "pliego.pdf").name
+            ),
+            "bytes": f.getvalue(),
+        }
+        for f in (pliego_files or [])
+    ]
+
+    with st.spinner("Revisando documentación con Gemini…"):
+        try:
+            informe = pdf_summary.comprobar_documentos(
+                docs_oferta,
+                documentos_pliego=docs_pliego or None,
+                expediente=(expediente or "").strip(),
+                titulo=(titulo or "").strip(),
+                requisitos_texto=(requisitos or "").strip(),
+            )
+            st.session_state["comp_informe"] = informe
+            st.session_state["comp_informe_meta"] = {
+                "expediente": (expediente or "").strip(),
+                "n_oferta": len(docs_oferta),
+                "n_pliego": len(docs_pliego),
+            }
+        except pdf_summary.PdfSummaryError as exc:
+            st.error(str(exc))
+            return
+        except Exception as exc:
+            st.error(f"Error inesperado: {exc}")
+            return
+
+    veredicto = ""
+    for linea in informe.splitlines():
+        baja = linea.strip().lower()
+        if "apto para presentar" in baja or "presentable con reservas" in baja or "no apto" in baja:
+            veredicto = linea.strip()
+            break
+    if "❌" in veredicto or "no apto" in veredicto.lower():
+        st.error(veredicto or "Veredicto: no apto / incompleto")
+    elif "⚠️" in veredicto or "reservas" in veredicto.lower():
+        st.warning(veredicto or "Veredicto: presentable con reservas")
+    else:
+        st.success(veredicto or "Análisis completado")
+
+    st.markdown(informe)
+    st.download_button(
+        "⬇️ Descargar informe (.md)",
+        data=informe.encode("utf-8"),
+        file_name=f"comprobacion_{(expediente or 'documento').replace('/', '-')}.md",
+        mime="text/markdown",
+        key="comp_dl_informe",
+    )
+
+
 def pestana_mis_licitaciones() -> None:
     st.subheader("Mis Licitaciones")
     st.caption(
@@ -2642,6 +2819,15 @@ def _cargar_historico_drive_cached(
         return sheets_historico.load_historico_dataframe()
 
 
+@st.cache_data(ttl=21600, show_spinner="Cargando histórico local…")
+def _cargar_historico_local_cached(years_key: str = "") -> pd.DataFrame:
+    """Lee data/historico_grefa.parquet solo cuando se busca (cache por años)."""
+    from modules import historico_local
+
+    years = [int(y) for y in years_key.split(",") if y.strip().isdigit()] or None
+    return historico_local.load(years=years)
+
+
 def _combinar_fuentes_historico(
     puntuadas: pd.DataFrame,
     *,
@@ -2690,34 +2876,14 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 
     st.subheader("Histórico y búsqueda avanzada")
     st.caption(
-        "La búsqueda usa un **fichero local** (Parquet): sin cuota de Google Sheets. "
-        "Filtra por ID expediente, NIF de órgano/adjudicatario o ámbito."
+        "Configura los filtros y pulsa **Buscar**. "
+        "Hasta entonces no se carga el Parquet ni se consulta nada."
     )
 
-    # ── Fuente principal: Parquet local (0 lecturas Sheets) ──
-    local_df: pd.DataFrame | None = None
-    if historico_local.is_available():
-        años_local = st.multiselect(
-            "Años (fichero local)",
-            options=_ANOS_HISTORICO_UI,
-            default=list(historico_local.metadata().get("años") or [2025, 2026]),
-            key="hist_anos_local",
-            help="Filtro sobre data/historico_grefa.parquet (sin llamar a Google).",
-        )
-        try:
-            local_df = historico_local.load(years=años_local or None)
-            con_adj = (
-                int((local_df["nif_adjudicatario"].astype(str).str.strip() != "").sum())
-                if not local_df.empty and "nif_adjudicatario" in local_df.columns
-                else 0
-            )
-            st.success(
-                f"{historico_local.resumen()} · cargadas **{len(local_df):,}** "
-                f"({con_adj:,} con NIF adjudicatario)."
-            )
-        except Exception as exc:
-            st.warning(f"No se pudo leer el fichero local: {exc}")
-            local_df = None
+    local_ok = historico_local.is_available()
+    if local_ok:
+        st.caption(historico_local.resumen())
+        años_meta = list(historico_local.metadata().get("años") or [2025, 2026])
     else:
         st.warning(
             "No hay fichero local (`data/historico_grefa.parquet`). "
@@ -2726,12 +2892,9 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             "o desde ZIPs PLACSP (sin Sheets):\n\n"
             "`python -u scripts/build_historico_local.py --from-year 2021 --to-year 2026 --skip-download`"
         )
+        años_meta = [2025, 2026]
 
-    drive_df: pd.DataFrame | None = None
-    incluir_drive = False
-    incluir_vivo = False
-    incluir_parquet_legado = False
-
+    # Fuentes opcionales: solo se leen al pulsar Buscar (o Cargar Drive).
     with st.expander("Fuentes opcionales (consumen cuota si usas Drive)", expanded=False):
         drive_disponible = sheets_store.is_configured()
         col_drive, col_vivo = st.columns(2)
@@ -2744,8 +2907,7 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
                     key="hist_anos",
                     help="Solo si falta el Parquet. Cada año = lecturas API.",
                 )
-                cargar = st.button("📥 Cargar Drive", key="hist_cargar_drive")
-                if cargar:
+                if st.button("📥 Preparar Drive", key="hist_cargar_drive"):
                     years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
                     st.session_state["hist_drive_years_key"] = years_key
                     try:
@@ -2754,61 +2916,64 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
                     except Exception:
                         pass
                     st.session_state["hist_drive_loaded"] = True
-                incluir_drive = bool(st.session_state.get("hist_drive_loaded"))
-                if incluir_drive:
-                    hoja_id = sheets_store.spreadsheet_id() or "default"
-                    years_key = st.session_state.get("hist_drive_years_key") or ",".join(
-                        str(y) for y in sorted(años_sel)
+                    st.caption(f"Drive preparado ({years_key}). Se usará al pulsar Buscar.")
+                elif st.session_state.get("hist_drive_loaded"):
+                    st.caption(
+                        "Drive listo: "
+                        f"{st.session_state.get('hist_drive_years_key') or '—'}. "
+                        "Inclúyelo al buscar."
                     )
-                    try:
-                        drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
-                        st.caption(f"Drive: {len(drive_df):,} filas ({years_key}).")
-                    except Exception as exc:
-                        st.warning(f"Drive: {exc}")
-                        drive_df = None
-                        incluir_drive = False
             else:
                 st.caption("Sheets no configurado.")
+                años_sel = []
         with col_vivo:
-            incluir_vivo = st.checkbox(
-                "Incluir feed en vivo", value=False, key="hist_incluir_vivo"
-            )
+            st.checkbox("Incluir feed en vivo", value=False, key="hist_incluir_vivo")
             if historico_placsp.is_available():
-                incluir_parquet_legado = st.checkbox(
+                st.checkbox(
                     "Parquet PLACSP legado", value=False, key="hist_incluir_parquet"
                 )
-            else:
-                incluir_parquet_legado = False
 
-    col_exp, col_nif = st.columns([2, 2])
-    with col_exp:
-        expediente = st.text_input(
-            "ID Expediente",
-            placeholder="Ej. 2024/001234… (también busca en la URL PLACSP)",
-            key="hist_exp",
+    st.session_state.setdefault("hist_anos_local", años_meta)
+    st.session_state.setdefault("hist_niveles", list(NIVELES_ADMIN))
+
+    with st.form("form_historico_buscar", clear_on_submit=False):
+        años_local = st.multiselect(
+            "Años (fichero local)",
+            options=_ANOS_HISTORICO_UI,
+            key="hist_anos_local",
+            help="No se lee el fichero hasta pulsar Buscar.",
         )
-    with col_nif:
-        nif = st.text_input("NIF", placeholder="Ej. B12345678…", key="hist_nif")
+        col_exp, col_nif = st.columns([2, 2])
+        with col_exp:
+            expediente = st.text_input(
+                "ID Expediente",
+                placeholder="Ej. 2024/001234… (también busca en la URL PLACSP)",
+                key="hist_exp",
+            )
+        with col_nif:
+            nif = st.text_input("NIF", placeholder="Ej. B12345678…", key="hist_nif")
 
-    col_ambito_nif, col_ambito_admin = st.columns([1, 2])
-    with col_ambito_nif:
-        ambito_etiqueta = st.selectbox(
-            "Buscar NIF en",
-            ["Ambos", "Órgano de contratación", "Adjudicatario"],
-            key="hist_nif_ambito",
+        col_ambito_nif, col_ambito_admin = st.columns([1, 2])
+        with col_ambito_nif:
+            ambito_etiqueta = st.selectbox(
+                "Buscar NIF en",
+                ["Ambos", "Órgano de contratación", "Adjudicatario"],
+                key="hist_nif_ambito",
+            )
+        with col_ambito_admin:
+            niveles_admin = st.multiselect(
+                "Ámbito del órgano",
+                [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
+                key="hist_niveles",
+                help="Si buscas por NIF o ID expediente, este filtro no se aplica.",
+            )
+
+        texto = st.text_input(
+            "Texto libre (opcional)", placeholder="Título, CPV…", key="hist_texto"
         )
-    with col_ambito_admin:
-        niveles_admin = st.multiselect(
-            "Ámbito del órgano",
-            [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
-            default=list(NIVELES_ADMIN),
-            key="hist_niveles",
-            help="Si buscas por NIF o ID expediente, este filtro no se aplica.",
-        )
+        buscar = st.form_submit_button("🔍 Buscar", type="primary")
 
-    texto = st.text_input("Texto libre (opcional)", placeholder="Título, CPV…", key="hist_texto")
-
-    if st.button("🔍 Buscar", key="hist_btn_buscar", type="primary"):
+    if buscar:
         st.session_state["hist_filtros_aplicados"] = {
             "expediente": (expediente or "").strip(),
             "nif": (nif or "").strip(),
@@ -2819,18 +2984,52 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             }.get(ambito_etiqueta, "ambos"),
             "niveles_admin": list(niveles_admin),
             "texto": (texto or "").strip(),
-            "incluir_vivo": incluir_vivo,
-            "incluir_parquet": incluir_parquet_legado,
-            "incluir_drive": incluir_drive,
-            "incluir_local": True,
+            "años_local": list(años_local),
+            "incluir_vivo": bool(st.session_state.get("hist_incluir_vivo")),
+            "incluir_parquet": bool(st.session_state.get("hist_incluir_parquet")),
+            "incluir_drive": bool(st.session_state.get("hist_drive_loaded")),
+            "incluir_local": local_ok,
             "years_key": st.session_state.get("hist_drive_years_key") or "",
             "_probe_drive": False,
         }
 
     aplicados = st.session_state.get("hist_filtros_aplicados")
     if not aplicados:
-        st.info("Elige filtros y pulsa **Buscar**. Se consulta el fichero local (sin Sheets).")
+        st.info("Elige filtros y pulsa **Buscar**. Hasta entonces no se carga nada.")
         return
+
+    # ── Carga diferida: solo tras pulsar Buscar ──
+    local_df: pd.DataFrame | None = None
+    if aplicados.get("incluir_local", True) and local_ok:
+        years_key = ",".join(
+            str(y) for y in sorted(aplicados.get("años_local") or [])
+        )
+        try:
+            local_df = _cargar_historico_local_cached(years_key)
+            con_adj = (
+                int((local_df["nif_adjudicatario"].astype(str).str.strip() != "").sum())
+                if not local_df.empty and "nif_adjudicatario" in local_df.columns
+                else 0
+            )
+            st.success(
+                f"Local: **{len(local_df):,}** filas"
+                + (f" (años {years_key})" if years_key else "")
+                + f" · {con_adj:,} con NIF adjudicatario."
+            )
+        except Exception as exc:
+            st.warning(f"No se pudo leer el fichero local: {exc}")
+            local_df = None
+
+    drive_df: pd.DataFrame | None = None
+    if aplicados.get("incluir_drive") and sheets_store.is_configured():
+        hoja_id = sheets_store.spreadsheet_id() or "default"
+        years_key = str(aplicados.get("years_key") or "")
+        try:
+            drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
+            st.caption(f"Drive: {len(drive_df):,} filas ({years_key or 'todos'}).")
+        except Exception as exc:
+            st.warning(f"Drive: {exc}")
+            drive_df = None
 
     partes: list[pd.DataFrame] = []
     if aplicados.get("incluir_local", True) and local_df is not None and not local_df.empty:
@@ -2925,7 +3124,7 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
-        "Configura los filtros y pulsa **Buscar**. "
+        "Configura los filtros y pulsa **Buscar** (no se filtra al tocar Ámbito o presupuesto). "
         "Si indicas un ID de expediente, también se consulta el histórico Drive (2026→2025…)."
     )
 
@@ -2933,23 +3132,11 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     tope = float(importes.max()) if not importes.empty else 0.0
 
     ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
-    col_exp, col_admin = st.columns([2, 2])
-    with col_exp:
-        st.text_input(
-            "ID Expediente",
-            placeholder="Búsqueda directa por código de licitación",
-            key="buscador_exp",
-            help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
-        )
-    with col_admin:
-        st.multiselect(
-            "Ámbito del órgano",
-            [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
-            default=[NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL],
-            key="buscador_niveles",
-        )
-
-    st.multiselect("Ubicación / Provincia", ubicaciones_disponibles, key="buscador_ubicaciones")
+    st.session_state.setdefault(
+        "buscador_niveles", [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL]
+    )
+    if tope > 0 and "buscador_rango" not in st.session_state:
+        st.session_state["buscador_rango"] = (0.0, tope)
 
     estados_globales = st.session_state.get("estados_aplicados") or None
     if estados_globales:
@@ -2959,25 +3146,48 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     if busqueda:
         st.caption(f"Búsqueda libre activa: «{busqueda}»")
 
-    if tope > 0:
-        st.slider(
-            "Rango de presupuesto sin IVA (€)",
-            min_value=0.0,
-            max_value=tope,
-            value=(0.0, tope),
-            step=max(tope / 200, 1.0),
-            format="%.0f",
-            key="buscador_rango",
-        )
-        st.checkbox(
-            "Incluir licitaciones sin presupuesto publicado",
-            value=True,
-            key="buscador_sin_importe",
-        )
-    else:
-        st.caption("El feed descargado no incluye importes; el filtro de presupuesto está desactivado.")
+    with st.form("form_buscador_general", clear_on_submit=False):
+        col_exp, col_admin = st.columns([2, 2])
+        with col_exp:
+            st.text_input(
+                "ID Expediente",
+                placeholder="Búsqueda directa por código de licitación",
+                key="buscador_exp",
+                help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
+            )
+        with col_admin:
+            st.multiselect(
+                "Ámbito del órgano",
+                [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
+                key="buscador_niveles",
+            )
 
-    if st.button("🔍 Buscar", key="buscador_btn_buscar", type="primary"):
+        st.multiselect(
+            "Ubicación / Provincia", ubicaciones_disponibles, key="buscador_ubicaciones"
+        )
+
+        if tope > 0:
+            st.slider(
+                "Rango de presupuesto sin IVA (€)",
+                min_value=0.0,
+                max_value=tope,
+                step=max(tope / 200, 1.0),
+                format="%.0f",
+                key="buscador_rango",
+            )
+            st.checkbox(
+                "Incluir licitaciones sin presupuesto publicado",
+                value=True,
+                key="buscador_sin_importe",
+            )
+        else:
+            st.caption(
+                "El feed descargado no incluye importes; el filtro de presupuesto está desactivado."
+            )
+
+        buscar = st.form_submit_button("🔍 Buscar", type="primary")
+
+    if buscar:
         rango = st.session_state.get("buscador_rango") or (None, None)
         st.session_state["buscador_filtros_aplicados"] = {
             "expediente": str(st.session_state.get("buscador_exp") or "").strip(),
@@ -2993,7 +3203,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 
     aplicados = st.session_state.get("buscador_filtros_aplicados")
     if not aplicados:
-        st.info("Configura filtros y pulsa **Buscar**.")
+        st.info("Configura filtros y pulsa **Buscar**. Hasta entonces no se carga nada.")
         return
 
     resultados = grefa_filter.search_dataframe(
@@ -3139,46 +3349,55 @@ def main() -> None:
             elif forzar_sync and sync.omitido:
                 st.toast(st.session_state["ultimo_sync"], icon="ℹ️")
 
-    oportunidades, vista = panel_control_superior(
-        datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)
-    )
-
     if sheets_store.is_configured() and not st.session_state.get("seguimiento_cache"):
         st.session_state["seguimiento_cache"] = _cargar_seguimiento_cache()
 
-    if puntuadas.empty:
+    # Menú sticky arriba: solo se renderiza la sección activa (evita cargas ocultas).
+    with st.container():
+        st.markdown('<span class="nav-principal-flag"></span>', unsafe_allow_html=True)
+        pagina = st.radio(
+            "Menú",
+            NAV_OPCIONES,
+            horizontal=True,
+            key="nav_principal",
+            label_visibility="collapsed",
+        )
+
+    if puntuadas.empty and pagina == NAV_OPCIONES[0]:
         st.warning("No hay datos cargados. Pulsa «Actualizar datos ahora» en la barra lateral.")
 
-    pestana_1, pestana_2, pestana_3, pestana_4, pestana_5, pestana_6 = st.tabs(
-        [
-            "🎯 Oportunidades GREFA",
-            "🔎 Buscador General PLACSP",
-            "🗂️ Histórico y NIF",
-            "⭐ Mis Licitaciones",
-            "📄 Análisis de pliegos",
-            "📋 Seguimiento",
-        ]
+    minimo = int(
+        st.session_state.get("opp_min_relevancia_aplicado", MEDIUM_RELEVANCE_THRESHOLD)
     )
-    with pestana_1:
+    categorias = list(st.session_state.get("opp_categorias_aplicadas") or [])
+    oportunidades = grefa_filter.filter_opportunities(puntuadas, minimo, categorias)
+    vista = str(st.session_state.get("opp_vista") or "Tarjetas")
+
+    if pagina == NAV_OPCIONES[0]:
+        oportunidades, vista = panel_control_superior(
+            datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)
+        )
         if puntuadas.empty:
             st.info("Carga licitaciones para ver oportunidades GREFA.")
         else:
             pestana_oportunidades(oportunidades, vista)
-    with pestana_2:
+    elif pagina == NAV_OPCIONES[1]:
         if puntuadas_todas.empty:
             st.info("Carga licitaciones para usar el buscador.")
         else:
             pestana_buscador(puntuadas_todas)
-    with pestana_3:
+    elif pagina == NAV_OPCIONES[2]:
         try:
             pestana_historico_nif(puntuadas_todas)
         except Exception as exc:
             st.error(f"Histórico no disponible ahora: {type(exc).__name__}")
-    with pestana_4:
+    elif pagina == NAV_OPCIONES[3]:
         pestana_mis_licitaciones()
-    with pestana_5:
+    elif pagina == NAV_OPCIONES[4]:
         pestana_analisis_pliegos(oportunidades, catalogo=puntuadas_todas)
-    with pestana_6:
+    elif pagina == NAV_OPCIONES[5]:
+        pestana_comprobador_documentos()
+    else:
         pestana_seguimiento()
 
     st.divider()
