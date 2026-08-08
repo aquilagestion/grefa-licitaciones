@@ -1381,8 +1381,12 @@ def _estados_disponibles(df: pd.DataFrame) -> list[str]:
     return sorted({str(e).strip() for e in df["estado"].unique() if e})
 
 
-def _render_fechas_inline(df: pd.DataFrame) -> None:
-    """Filtros en línea de búsqueda libre: estado, fechas."""
+def _render_fechas_inline(df: pd.DataFrame, *, en_formulario: bool = False) -> None:
+    """Filtros en línea de búsqueda libre: estado, fechas.
+
+    Con ``en_formulario=True`` los widgets no disparan rerun hasta «Buscar»;
+    las fechas quedan editables y solo se aplican si el checkbox está activo.
+    """
     if st.session_state.pop("_reset_filtro_fechas", False):
         st.session_state["filtro_usar_fechas"] = False
         st.session_state["filtro_fecha_campo"] = "fecha_actualizacion"
@@ -1397,12 +1401,18 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
     _inicializar_borrador_fechas(df)
     usar = bool(st.session_state.get("filtro_usar_fechas"))
     disponibles = _estados_disponibles(df)
+    # En formulario no hay rerun al marcar el checkbox: fechas siempre editables.
+    fechas_bloqueadas = False if en_formulario else (not usar)
 
     ce, cv = st.columns([0.34, 0.66], gap="small")
     with ce:
         _celda_etiqueta("Fechas")
     with cv:
-        st.checkbox("Activar filtro por fechas", key="filtro_usar_fechas")
+        st.checkbox(
+            "Activar filtro por fechas",
+            key="filtro_usar_fechas",
+            help="Solo se aplica al pulsar «Buscar».",
+        )
 
     c1, c2, c3, c4 = st.columns([1.1, 0.7, 0.7, 0.55], gap="small")
     with c1:
@@ -1411,7 +1421,7 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
             options=disponibles,
             key="filtro_estados",
             placeholder="Publicada, Adjudicada…",
-            help="Vacío = todos los estados. Se aplica al pulsar «Buscar».",
+            help="Vacío = todos los estados. No carga datos hasta pulsar «Buscar».",
             disabled=not disponibles,
         )
     with c2:
@@ -1421,7 +1431,7 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
             max_value=max_d,
             format="DD/MM/YYYY",
             key="filtro_fecha_desde",
-            disabled=not usar,
+            disabled=fechas_bloqueadas,
         )
     with c3:
         st.date_input(
@@ -1430,13 +1440,13 @@ def _render_fechas_inline(df: pd.DataFrame) -> None:
             max_value=max_d,
             format="DD/MM/YYYY",
             key="filtro_fecha_hasta",
-            disabled=not usar,
+            disabled=fechas_bloqueadas,
         )
     with c4:
         st.checkbox(
             "Sin fecha",
             key="filtro_incluir_sin_fecha",
-            disabled=not usar,
+            disabled=fechas_bloqueadas,
             help="Incluir licitaciones sin fecha de actualización",
         )
 
@@ -1584,11 +1594,15 @@ def panel_control_superior(
                 _aplicar_busqueda_estandar()
                 st.rerun()
 
-        # ── 2. Búsqueda libre (fechas · relevancia · vista) ──
+        # ── 2. Búsqueda libre (formulario: no rerun al tocar widgets) ──
         st.markdown('<span class="bloque-libre-flag"></span>', unsafe_allow_html=True)
         st.markdown(
             '<p class="bloque-seccion-titulo">Búsqueda libre</p>',
             unsafe_allow_html=True,
+        )
+        st.caption(
+            "Ajusta Estado, fechas, relevancia y categorías; los resultados "
+            "solo se actualizan al pulsar **Buscar**."
         )
 
         minimo = int(
@@ -1608,71 +1622,79 @@ def panel_control_superior(
                 st.session_state.get("opp_categorias_aplicadas") or ["Alta", "Media"]
             )
 
-        _render_fechas_inline(df)
+        with st.form("form_busqueda_libre", border=False, clear_on_submit=False):
+            _render_fechas_inline(df, en_formulario=True)
 
-        col_izq, col_der = st.columns([1.55, 1], gap="small")
-        with col_izq:
-            ce, cv = st.columns([0.34, 0.66], gap="small")
-            with ce:
-                _celda_etiqueta("Rel. mín. %")
-            with cv:
-                st.slider(
-                    "Relevancia mínima",
-                    min_value=0,
-                    max_value=100,
-                    step=5,
-                    key="opp_min_relevancia",
-                    label_visibility="collapsed",
-                )
-            ce, cv = st.columns([0.34, 0.66], gap="small")
-            with ce:
-                _celda_etiqueta("Vista")
-            with cv:
-                st.radio(
-                    "Vista",
-                    ["Tarjetas", "Tabla"],
-                    horizontal=True,
-                    key="opp_vista",
-                    label_visibility="collapsed",
-                )
-            ce, cv = st.columns([0.34, 0.66], gap="small")
-            with ce:
-                _celda_etiqueta("Categorías")
-            with cv:
-                st.multiselect(
-                    "Categorías",
-                    options=["Alta", "Media", "Baja"],
-                    key="opp_categorias_borrador",
-                    label_visibility="collapsed",
+            col_izq, col_der = st.columns([1.55, 1], gap="small")
+            with col_izq:
+                ce, cv = st.columns([0.34, 0.66], gap="small")
+                with ce:
+                    _celda_etiqueta("Rel. mín. %")
+                with cv:
+                    st.slider(
+                        "Relevancia mínima",
+                        min_value=0,
+                        max_value=100,
+                        step=5,
+                        key="opp_min_relevancia",
+                        label_visibility="collapsed",
+                    )
+                ce, cv = st.columns([0.34, 0.66], gap="small")
+                with ce:
+                    _celda_etiqueta("Vista")
+                with cv:
+                    st.radio(
+                        "Vista",
+                        ["Tarjetas", "Tabla"],
+                        horizontal=True,
+                        key="opp_vista",
+                        label_visibility="collapsed",
+                    )
+                ce, cv = st.columns([0.34, 0.66], gap="small")
+                with ce:
+                    _celda_etiqueta("Categorías")
+                with cv:
+                    st.multiselect(
+                        "Categorías",
+                        options=["Alta", "Media", "Baja"],
+                        key="opp_categorias_borrador",
+                        label_visibility="collapsed",
+                    )
+
+            with col_der:
+                st.markdown('<div class="opp-stats-spacer"></div>', unsafe_allow_html=True)
+                o1, o2, o3 = st.columns(3, gap="small")
+                with o1:
+                    _celda_par(
+                        "Oportunidades", str(resumen_opp["total"] if resumen_opp else 0)
+                    )
+                with o2:
+                    _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
+                with o3:
+                    _celda_par("Importe", importe_opp)
+
+            st.markdown(
+                f'<p class="resumen-filtros">{_resumen_busqueda_libre_borrador()}</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown('<span class="fila-buscar-flag"></span>', unsafe_allow_html=True)
+            _, c_lim_l, c_bus_l = st.columns([6.2, 0.55, 0.6], gap="small")
+            with c_lim_l:
+                limpiar_libre = st.form_submit_button("Limpiar", width="stretch")
+            with c_bus_l:
+                buscar_libre = st.form_submit_button(
+                    "🔍 Buscar", type="primary", width="stretch"
                 )
 
-        with col_der:
-            st.markdown('<div class="opp-stats-spacer"></div>', unsafe_allow_html=True)
-            o1, o2, o3 = st.columns(3, gap="small")
-            with o1:
-                _celda_par("Oportunidades", str(resumen_opp["total"] if resumen_opp else 0))
-            with o2:
-                _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
-            with o3:
-                _celda_par("Importe", importe_opp)
-
-        st.markdown(
-            f'<p class="resumen-filtros">{_resumen_busqueda_libre_borrador()}</p>',
-            unsafe_allow_html=True,
-        )
-        st.markdown('<span class="fila-buscar-flag"></span>', unsafe_allow_html=True)
-        _, c_lim_l, c_bus_l = st.columns([6.2, 0.55, 0.6], gap="small")
-        with c_lim_l:
-            if st.button("Limpiar", key="btn_limpiar_libre", width="stretch"):
-                _limpiar_busqueda_libre()
+        if limpiar_libre:
+            _limpiar_busqueda_libre()
+            st.rerun()
+        if buscar_libre:
+            error = _aplicar_busqueda_libre()
+            if error:
+                st.error(error)
+            else:
                 st.rerun()
-        with c_bus_l:
-            if st.button("🔍 Buscar", key="btn_buscar_libre", type="primary", width="stretch"):
-                error = _aplicar_busqueda_libre()
-                if error:
-                    st.error(error)
-                else:
-                    st.rerun()
 
     vista = str(st.session_state.get("opp_vista") or "Tarjetas")
     return oportunidades, vista
@@ -1763,8 +1785,12 @@ def sidebar_google_sheets() -> None:
             st.rerun()
 
     st.sidebar.caption("**Sync diaria** (Histórico + alertas Chat)")
-    ultima = sheets_historico.get_config("ultima_ejecucion_hora", "—")
-    st.sidebar.caption(f"Última sync: {ultima}")
+    # No leer Sheets en cada rerun: caché de sesión (la de Config dura ~10 min).
+    if "_ultima_sync_hora_ui" not in st.session_state:
+        st.session_state["_ultima_sync_hora_ui"] = sheets_historico.get_config(
+            "ultima_ejecucion_hora", "—"
+        )
+    st.sidebar.caption(f"Última sync: {st.session_state['_ultima_sync_hora_ui']}")
     if email_alert.is_configured():
         st.sidebar.caption("Alertas: email al espacio Chat ✓")
     elif google_chat.is_configured():
@@ -1778,6 +1804,9 @@ def sidebar_google_sheets() -> None:
         help="Guarda snapshot Alta/Media y avisa nuevas Alta (1×/día automático)",
     ):
         st.session_state["_forzar_sync_diaria"] = True
+        st.session_state.pop("_sync_omitida_hoy", None)
+        st.session_state.pop("_ultima_sync_hora_ui", None)
+        sheets_historico.clear_config_cache()
         st.rerun()
 
 
@@ -2597,11 +2626,11 @@ def pestana_seguimiento() -> None:
 _ANOS_HISTORICO_UI = list(range(2019, 2027))
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando histórico desde Google Drive…")
+@st.cache_data(ttl=21600, show_spinner="Cargando histórico desde Google Drive…")
 def _cargar_historico_drive_cached(
     spreadsheet_id: str, years_key: str = ""
 ) -> pd.DataFrame:
-    """Cache larga (1 h) por hoja + años. Solo se invalida con el botón Cargar."""
+    """Cache larga (6 h) por hoja + años. Solo se invalida con el botón Cargar."""
     _ = spreadsheet_id
     years = [int(y) for y in years_key.split(",") if y.strip().isdigit()] or None
     try:
@@ -2657,83 +2686,99 @@ def pestana_historico_nif(puntuadas: pd.DataFrame) -> None:
 
 
 def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
-    st.subheader("Histórico en Drive y búsqueda avanzada")
+    from modules import historico_local
+
+    st.subheader("Histórico y búsqueda avanzada")
     st.caption(
-        "Histórico por años en Google Sheets (`Historico_2021`…). "
-        "Filtra por ID expediente, NIF de órgano/adjudicatario o ámbito administrativo."
+        "La búsqueda usa un **fichero local** (Parquet): sin cuota de Google Sheets. "
+        "Filtra por ID expediente, NIF de órgano/adjudicatario o ámbito."
     )
 
-    drive_disponible = sheets_store.is_configured()
+    # ── Fuente principal: Parquet local (0 lecturas Sheets) ──
+    local_df: pd.DataFrame | None = None
+    if historico_local.is_available():
+        años_local = st.multiselect(
+            "Años (fichero local)",
+            options=_ANOS_HISTORICO_UI,
+            default=list(historico_local.metadata().get("años") or [2025, 2026]),
+            key="hist_anos_local",
+            help="Filtro sobre data/historico_grefa.parquet (sin llamar a Google).",
+        )
+        try:
+            local_df = historico_local.load(years=años_local or None)
+            con_adj = (
+                int((local_df["nif_adjudicatario"].astype(str).str.strip() != "").sum())
+                if not local_df.empty and "nif_adjudicatario" in local_df.columns
+                else 0
+            )
+            st.success(
+                f"{historico_local.resumen()} · cargadas **{len(local_df):,}** "
+                f"({con_adj:,} con NIF adjudicatario)."
+            )
+        except Exception as exc:
+            st.warning(f"No se pudo leer el fichero local: {exc}")
+            local_df = None
+    else:
+        st.warning(
+            "No hay fichero local (`data/historico_grefa.parquet`). "
+            "Genéralo en el servidor con:\n\n"
+            "`python -u scripts/build_historico_local.py --from-sheets --from-year 2021 --to-year 2026`\n\n"
+            "o desde ZIPs PLACSP (sin Sheets):\n\n"
+            "`python -u scripts/build_historico_local.py --from-year 2021 --to-year 2026 --skip-download`"
+        )
+
     drive_df: pd.DataFrame | None = None
-    filas_drive = 0
+    incluir_drive = False
+    incluir_vivo = False
+    incluir_parquet_legado = False
 
-    col_drive, col_vivo = st.columns(2)
-    with col_drive:
-        if drive_disponible:
-            años_sel = st.multiselect(
-                "Años (pestañas Drive)",
-                options=_ANOS_HISTORICO_UI,
-                default=[2025, 2026],
-                key="hist_anos",
-                help="Elige pocos años: cada pestaña cuenta como lecturas API de Google.",
-            )
-            st.caption("Pulsa **Cargar** una vez; luego puedes filtrar sin volver a leer Drive.")
-            cargar = st.button("📥 Cargar histórico de Drive", key="hist_cargar_drive", type="primary")
-            if cargar:
-                years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
-                st.session_state["hist_drive_years_key"] = years_key
-                try:
-                    sheets_historico.clear_worksheet_list_cache()
-                    _cargar_historico_drive_cached.clear()
-                except Exception:
-                    pass
-                st.session_state["hist_drive_loaded"] = True
-
-            incluir_drive = bool(st.session_state.get("hist_drive_loaded"))
-            if incluir_drive:
-                hoja_id = sheets_store.spreadsheet_id() or "default"
-                years_key = st.session_state.get("hist_drive_years_key") or ",".join(
-                    str(y) for y in sorted(años_sel)
+    with st.expander("Fuentes opcionales (consumen cuota si usas Drive)", expanded=False):
+        drive_disponible = sheets_store.is_configured()
+        col_drive, col_vivo = st.columns(2)
+        with col_drive:
+            if drive_disponible:
+                años_sel = st.multiselect(
+                    "Años (pestañas Drive)",
+                    options=_ANOS_HISTORICO_UI,
+                    default=[2026],
+                    key="hist_anos",
+                    help="Solo si falta el Parquet. Cada año = lecturas API.",
                 )
-                try:
-                    drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
-                    filas_drive = int(len(drive_df))
-                    con_adj = (
-                        int((drive_df["nif_adjudicatario"].astype(str).str.strip() != "").sum())
-                        if "nif_adjudicatario" in drive_df.columns
-                        else 0
+                cargar = st.button("📥 Cargar Drive", key="hist_cargar_drive")
+                if cargar:
+                    years_key = ",".join(str(y) for y in sorted(años_sel)) if años_sel else ""
+                    st.session_state["hist_drive_years_key"] = years_key
+                    try:
+                        sheets_historico.clear_worksheet_list_cache()
+                        _cargar_historico_drive_cached.clear()
+                    except Exception:
+                        pass
+                    st.session_state["hist_drive_loaded"] = True
+                incluir_drive = bool(st.session_state.get("hist_drive_loaded"))
+                if incluir_drive:
+                    hoja_id = sheets_store.spreadsheet_id() or "default"
+                    years_key = st.session_state.get("hist_drive_years_key") or ",".join(
+                        str(y) for y in sorted(años_sel)
                     )
-                    st.success(
-                        f"Drive en caché: **{filas_drive:,}** filas "
-                        f"({con_adj:,} con NIF adjudicatario). Años: {years_key or 'legado'}."
-                    )
-                except Exception as exc:
-                    msg = str(exc)
-                    if "429" in msg or "Quota" in msg:
-                        st.warning(
-                            "Cuota de Google Sheets agotada (demasiadas lecturas). "
-                            "Espera **60–90 segundos** y pulsa Cargar otra vez. "
-                            "Carga solo 1–2 años (p. ej. 2026)."
-                        )
-                    else:
-                        st.warning(f"No se pudo leer Drive: {type(exc).__name__}: {exc or '—'}")
-                    drive_df = None
-                    incluir_drive = False
+                    try:
+                        drive_df = _cargar_historico_drive_cached(hoja_id, years_key)
+                        st.caption(f"Drive: {len(drive_df):,} filas ({years_key}).")
+                    except Exception as exc:
+                        st.warning(f"Drive: {exc}")
+                        drive_df = None
+                        incluir_drive = False
             else:
-                st.info("Elige años y pulsa **Cargar histórico de Drive**.")
-        else:
-            incluir_drive = False
-            st.info("Google Sheets no configurado.")
-
-    with col_vivo:
-        incluir_vivo = st.checkbox("Incluir feed en vivo", value=True, key="hist_incluir_vivo")
-        if historico_placsp.is_available():
-            incluir_parquet = st.checkbox(
-                "Incluir Parquet local", value=False, key="hist_incluir_parquet"
+                st.caption("Sheets no configurado.")
+        with col_vivo:
+            incluir_vivo = st.checkbox(
+                "Incluir feed en vivo", value=False, key="hist_incluir_vivo"
             )
-        else:
-            incluir_parquet = False
-            st.caption("Sin Parquet en este servidor (normal en Cloud).")
+            if historico_placsp.is_available():
+                incluir_parquet_legado = st.checkbox(
+                    "Parquet PLACSP legado", value=False, key="hist_incluir_parquet"
+                )
+            else:
+                incluir_parquet_legado = False
 
     col_exp, col_nif = st.columns([2, 2])
     with col_exp:
@@ -2775,22 +2820,37 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             "niveles_admin": list(niveles_admin),
             "texto": (texto or "").strip(),
             "incluir_vivo": incluir_vivo,
-            "incluir_parquet": incluir_parquet,
+            "incluir_parquet": incluir_parquet_legado,
             "incluir_drive": incluir_drive,
+            "incluir_local": True,
             "years_key": st.session_state.get("hist_drive_years_key") or "",
-            "_probe_drive": True,
+            "_probe_drive": False,
         }
 
     aplicados = st.session_state.get("hist_filtros_aplicados")
     if not aplicados:
-        st.info("Elige filtros y pulsa **Buscar**. No se consulta hasta que pulses el botón.")
+        st.info("Elige filtros y pulsa **Buscar**. Se consulta el fichero local (sin Sheets).")
         return
 
-    base = _combinar_fuentes_historico(
+    partes: list[pd.DataFrame] = []
+    if aplicados.get("incluir_local", True) and local_df is not None and not local_df.empty:
+        partes.append(local_df)
+    base_extra = _combinar_fuentes_historico(
         puntuadas if aplicados.get("incluir_vivo") else empty_dataframe(),
         incluir_parquet=bool(aplicados.get("incluir_parquet")),
         drive_df=drive_df if aplicados.get("incluir_drive") else None,
     )
+    if base_extra is not None and not base_extra.empty:
+        partes.append(base_extra)
+    if not partes:
+        st.warning("No hay datos locales ni fuentes opcionales cargadas.")
+        return
+    base = partes[0] if len(partes) == 1 else pd.concat(partes, ignore_index=True, sort=False)
+    if "url" in base.columns:
+        base = base.drop_duplicates(subset=["expediente", "url"], keep="first")
+    else:
+        base = base.drop_duplicates(subset=["expediente"], keep="first")
+    base = base.reset_index(drop=True)
 
     resultados = grefa_filter.search_dataframe(
         base,
@@ -2835,8 +2895,8 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     st.markdown(f"**{len(resultados):,}** expedientes encontrados.")
     if resultados.empty:
         st.warning(
-            "Sin coincidencias. Carga Drive (p. ej. 2026), revisa el ID o espera si hay cuota 429. "
-            "El histórico solo incluye Alta/Media GREFA."
+            "Sin coincidencias en el fichero local. Revisa NIF/expediente o regenera el Parquet. "
+            "El histórico GREFA solo incluye Alta/Media."
         )
         return
 
@@ -3066,12 +3126,18 @@ def main() -> None:
 
     if sheets_store.is_configured() and not puntuadas.empty:
         forzar_sync = bool(st.session_state.pop("_forzar_sync_diaria", False))
-        sync = daily_sync.run_daily_sync(puntuadas, forzar=forzar_sync)
-        st.session_state["ultimo_sync"] = sync.resumen()
-        if sync.ejecutado or (forzar_sync and not sync.omitido):
-            st.toast(st.session_state["ultimo_sync"], icon="📗")
-        elif forzar_sync and sync.omitido:
-            st.toast(st.session_state["ultimo_sync"], icon="ℹ️")
+        # Evita leer Config/Sheets en cada rerun si ya sabemos que la sync de hoy pasó.
+        if forzar_sync or not st.session_state.get("_sync_omitida_hoy"):
+            sync = daily_sync.run_daily_sync(puntuadas, forzar=forzar_sync)
+            st.session_state["ultimo_sync"] = sync.resumen()
+            if sync.ejecutado or (sync.omitido and "ya ejecutada" in (sync.motivo or "")):
+                st.session_state["_sync_omitida_hoy"] = True
+            if sync.ejecutado:
+                st.session_state.pop("_ultima_sync_hora_ui", None)
+            if sync.ejecutado or (forzar_sync and not sync.omitido):
+                st.toast(st.session_state["ultimo_sync"], icon="📗")
+            elif forzar_sync and sync.omitido:
+                st.toast(st.session_state["ultimo_sync"], icon="ℹ️")
 
     oportunidades, vista = panel_control_superior(
         datos, puntuadas, resumen, len(cpvs_activos), len(conceptos_activos)

@@ -12,3 +12,7 @@ venv/
 !data/cpv_es.csv
 *.atom
 data/cache/
+# Histórico consultable (sí versionable si es razonable de tamaño)
+!data/historico_grefa.parquet
+!data/historico_grefa.meta.json
+!data/historico_grefa_*.parquet

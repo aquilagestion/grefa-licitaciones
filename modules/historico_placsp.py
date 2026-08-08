@@ -12,8 +12,19 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from lxml import etree
 
-from modules.ingestion import COLUMNS, build_dataframe, empty_dataframe, _parse_feed_bytes
+from modules.ingestion import (
+    COLUMNS,
+    build_dataframe,
+    empty_dataframe,
+    _adjudicatario,
+    _find,
+    _findall,
+    _nif_organo,
+    _parse_feed_bytes,
+    _text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +115,71 @@ def _parse_atom_file(ruta: Path) -> list[dict[str, Any]]:
         return []
 
 
+def scan_adjudicatarios_from_zip(
+    zip_path: Path,
+    *,
+    max_files: int | None = None,
+) -> dict[str, dict[str, str]]:
+    """Índice expediente → adjudicatario/NIF (y NIF órgano) leyendo el ZIP sin extraccion.
+
+    Solo procesa ficheros ATOM que contienen WinningParty. Si hay varias versiones
+    del mismo expediente, prioriza la que trae NIF de adjudicatario.
+    """
+    zip_path = Path(zip_path).expanduser().resolve()
+    if not zip_path.is_file():
+        raise FileNotFoundError(f"No existe el ZIP: {zip_path}")
+
+    resultado: dict[str, dict[str, str]] = {}
+    parser = etree.XMLParser(recover=True, huge_tree=True, resolve_entities=False)
+
+    with zipfile.ZipFile(zip_path) as archivo:
+        atomos = sorted(n for n in archivo.namelist() if n.lower().endswith(".atom"))
+        if max_files:
+            atomos = atomos[: int(max_files)]
+        for indice, nombre in enumerate(atomos, start=1):
+            raw = archivo.read(nombre)
+            if b"WinningParty" not in raw and b"winningparty" not in raw.lower():
+                continue
+            try:
+                root = etree.fromstring(raw, parser=parser)
+            except etree.XMLSyntaxError:
+                continue
+            if root is None:
+                continue
+            for entry in _findall(root, "entry"):
+                carpeta = _find(entry, "ContractFolderStatus")
+                if carpeta is None:
+                    continue
+                if not _findall(carpeta, "WinningParty"):
+                    continue
+                expediente = (_text(carpeta, "ContractFolderID") or "").strip()
+                if not expediente:
+                    continue
+                nif_adj, nombre_adj = _adjudicatario(carpeta)
+                if not nif_adj and not nombre_adj:
+                    continue
+                clave = expediente.casefold()
+                actual = resultado.get(clave)
+                candidato = {
+                    "expediente": expediente,
+                    "adjudicatario": nombre_adj,
+                    "nif_adjudicatario": nif_adj,
+                    "nif_organo": _nif_organo(carpeta),
+                }
+                if actual is None:
+                    resultado[clave] = candidato
+                elif nif_adj and not actual.get("nif_adjudicatario"):
+                    resultado[clave] = candidato
+            if indice % 50 == 0:
+                LOGGER.info(
+                    "Escaneados %s/%s ATOM (%s con adjudicatario)",
+                    indice,
+                    len(atomos),
+                    len(resultado),
+                )
+    return resultado
+
+
 def import_from_directory(directorio: Path, *, max_files: int | None = None) -> pd.DataFrame:
     """Parsea todos los .atom de un directorio (p. ej. ZIP descomprimido)."""
     ficheros = sorted(directorio.glob("*.atom"))
@@ -115,6 +191,100 @@ def import_from_directory(directorio: Path, *, max_files: int | None = None) -> 
         if indice % 20 == 0:
             LOGGER.info("Procesados %s ficheros ATOM (%s entradas)", indice, len(registros))
     return build_dataframe(registros)
+
+
+def import_from_zip_bytes(
+    zip_path: Path,
+    *,
+    max_files: int | None = None,
+) -> pd.DataFrame:
+    """Parsea el ZIP anual sin descomprimir a disco (más rápido y menos I/O)."""
+    zip_path = Path(zip_path).expanduser().resolve()
+    if not zip_path.is_file():
+        raise FileNotFoundError(f"No existe el ZIP: {zip_path}")
+    registros: list[dict[str, Any]] = []
+    with zipfile.ZipFile(zip_path) as archivo:
+        atomos = sorted(n for n in archivo.namelist() if n.lower().endswith(".atom"))
+        if max_files:
+            atomos = atomos[: int(max_files)]
+        for indice, nombre in enumerate(atomos, start=1):
+            try:
+                filas, _ = _parse_feed_bytes(archivo.read(nombre))
+                registros.extend(filas)
+            except Exception as exc:
+                LOGGER.debug("Atom omitido %s: %s", nombre, exc)
+            if indice % 25 == 0:
+                LOGGER.info(
+                    "ZIP %s: %s/%s ATOM (%s entradas)",
+                    zip_path.name,
+                    indice,
+                    len(atomos),
+                    len(registros),
+                )
+                print(
+                    f"    … {indice}/{len(atomos)} ATOM · {len(registros):,} entradas",
+                    flush=True,
+                )
+    return build_dataframe(registros)
+
+
+def import_score_zip_alta_media(
+    zip_path: Path,
+    *,
+    cpvs: list[str],
+    keywords: list[str],
+    conceptos: list[dict] | None = None,
+    max_files: int | None = None,
+    batch_atoms: int = 20,
+) -> pd.DataFrame:
+    """Parsea el ZIP por lotes, puntúa y conserva solo Alta/Media (poca RAM)."""
+    from modules import grefa_filter
+
+    zip_path = Path(zip_path).expanduser().resolve()
+    if not zip_path.is_file():
+        raise FileNotFoundError(f"No existe el ZIP: {zip_path}")
+
+    relevantes: list[pd.DataFrame] = []
+    total_parseadas = 0
+    conceptos_activos = [t for t in (conceptos or []) if t.get("activo")]
+
+    with zipfile.ZipFile(zip_path) as archivo:
+        atomos = sorted(n for n in archivo.namelist() if n.lower().endswith(".atom"))
+        if max_files:
+            atomos = atomos[: int(max_files)]
+        lote: list[dict[str, Any]] = []
+        for indice, nombre in enumerate(atomos, start=1):
+            try:
+                filas, _ = _parse_feed_bytes(archivo.read(nombre))
+                lote.extend(filas)
+            except Exception as exc:
+                LOGGER.debug("Atom omitido %s: %s", nombre, exc)
+
+            if indice % batch_atoms == 0 or indice == len(atomos):
+                if lote:
+                    df_lote = build_dataframe(lote)
+                    total_parseadas += len(df_lote)
+                    puntuadas = grefa_filter.score_licitaciones(
+                        df_lote, cpvs, keywords, conceptos=conceptos_activos
+                    )
+                    keep = puntuadas[puntuadas["categoria"].isin(["Alta", "Media"])]
+                    if not keep.empty:
+                        relevantes.append(keep.copy())
+                    lote = []
+                print(
+                    f"    … {indice}/{len(atomos)} ATOM · parseadas {total_parseadas:,} · "
+                    f"Alta/Media acumuladas {sum(len(x) for x in relevantes):,}",
+                    flush=True,
+                )
+
+    if not relevantes:
+        return empty_dataframe()
+    combinado = pd.concat(relevantes, ignore_index=True, sort=False)
+    if "url" in combinado.columns:
+        combinado = combinado.drop_duplicates(subset=["expediente", "url"], keep="last")
+    else:
+        combinado = combinado.drop_duplicates(subset=["expediente"], keep="last")
+    return combinado.reset_index(drop=True)
 
 
 def import_from_zip(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -14,6 +15,10 @@ from modules import sheets_store as store
 from modules.admin_ambito import classify_organo
 
 LOGGER = logging.getLogger(__name__)
+
+# Caché en proceso de la pestaña Config (evita 1 lectura Sheets por cada rerun de Streamlit).
+_CONFIG_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+_CONFIG_TTL_SEG = 600  # 10 minutos
 
 HISTORICO_SHEET = "Historico"  # legado / sync reciente
 CONFIG_SHEET = "Config"
@@ -113,7 +118,25 @@ def clear_worksheet_list_cache() -> None:
     _worksheets_cached._cache = {}  # type: ignore[attr-defined]
 
 
-def _leer_config_map(hoja_id: str | None = None) -> dict[str, str]:
+def _config_cache_key(hoja_id: str | None) -> str:
+    return str(hoja_id or store.spreadsheet_id() or "default")
+
+
+def clear_config_cache(hoja_id: str | None = None) -> None:
+    """Invalida la caché de Config (tras escribir o al forzar sync)."""
+    if hoja_id is None:
+        _CONFIG_CACHE.clear()
+        return
+    _CONFIG_CACHE.pop(_config_cache_key(hoja_id), None)
+
+
+def _leer_config_map(hoja_id: str | None = None, *, forzar: bool = False) -> dict[str, str]:
+    clave = _config_cache_key(hoja_id)
+    ahora = time.monotonic()
+    if not forzar:
+        cached = _CONFIG_CACHE.get(clave)
+        if cached and (ahora - cached[0]) < _CONFIG_TTL_SEG:
+            return dict(cached[1])
     try:
         pestana = _worksheet_config(hoja_id)
         filas = pestana.get_all_records()
@@ -121,13 +144,15 @@ def _leer_config_map(hoja_id: str | None = None) -> dict[str, str]:
         raise
     except Exception as exc:
         raise store.SheetsError(f"No se pudo leer la pestaña Config: {exc}") from exc
-    return {
+    mapa = {
         str(store._campo(fila, "Clave", "clave")).strip(): str(
             store._campo(fila, "Valor", "valor")
         ).strip()
         for fila in filas
         if str(store._campo(fila, "Clave", "clave")).strip()
     }
+    _CONFIG_CACHE[clave] = (ahora, mapa)
+    return dict(mapa)
 
 
 def _escribir_config(clave: str, valor: str, hoja_id: str | None = None) -> None:
@@ -135,12 +160,15 @@ def _escribir_config(clave: str, valor: str, hoja_id: str | None = None) -> None
     filas = pestana.get_all_values()
     if not filas:
         pestana.update([CONFIG_HEADERS, [clave, valor]], "A1")
+        clear_config_cache(hoja_id)
         return
     for indice, fila in enumerate(filas[1:], start=2):
         if fila and str(fila[0]).strip() == clave:
             pestana.update([[valor]], f"B{indice}")
+            clear_config_cache(hoja_id)
             return
     pestana.append_row([clave, valor], value_input_option="USER_ENTERED")
+    clear_config_cache(hoja_id)
 
 
 def get_config(clave: str, default: str = "", hoja_id: str | None = None) -> str:
@@ -436,6 +464,87 @@ def _bulk_write(pestana, valores: list[list[Any]], chunk: int = 4000) -> None:
     for inicio in range(0, len(valores), chunk):
         trozo = valores[inicio : inicio + chunk]
         pestana.update(trozo, f"A{inicio + 1}", value_input_option="USER_ENTERED")
+
+
+def enrich_adjudicatarios_year(
+    year: int,
+    lookup: dict[str, dict[str, str]],
+    *,
+    hoja_id: str | None = None,
+    fill_nif_organo: bool = True,
+) -> dict[str, int]:
+    """Rellena Adjudicatario / NIF adjudicatario en Historico_YYYY desde un lookup.
+
+    No toca el resto de columnas. Devuelve contadores de filas actualizadas.
+    """
+    if not store.is_configured() or not lookup:
+        return {"filas": 0, "con_nombre": 0, "con_nif": 0, "actualizadas": 0}
+
+    pestana = _worksheet_year(year, hoja_id)
+    valores = _leer_pestana_valores(pestana)
+    if not valores or len(valores) < 2:
+        return {"filas": 0, "con_nombre": 0, "con_nif": 0, "actualizadas": 0}
+
+    cabecera = [str(c or "").strip() for c in valores[0]]
+    # Asegurar columnas de adjudicatario (imports antiguos podían no tenerlas)
+    for nombre in ("Adjudicatario", "NIF adjudicatario", "NIF órgano"):
+        if nombre not in cabecera:
+            cabecera.append(nombre)
+    indices = {nombre.lower(): i for i, nombre in enumerate(cabecera)}
+    idx_exp = indices.get("id expediente", indices.get("expediente"))
+    if idx_exp is None:
+        return {"filas": 0, "con_nombre": 0, "con_nif": 0, "actualizadas": 0}
+
+    idx_adj = indices["adjudicatario"]
+    idx_nif = indices["nif adjudicatario"]
+    idx_org = indices.get("nif órgano", indices.get("nif organo"))
+
+    actualizadas = 0
+    con_nombre = 0
+    con_nif = 0
+    matriz = [cabecera]
+    ancho = len(cabecera)
+
+    for fila in valores[1:]:
+        fila = list(fila) + [""] * max(0, ancho - len(fila))
+        fila = fila[:ancho]
+        expediente = str(fila[idx_exp] or "").strip()
+        datos = lookup.get(expediente.casefold()) if expediente else None
+        if datos:
+            cambiado = False
+            nombre = str(datos.get("adjudicatario") or "").strip()
+            nif = str(datos.get("nif_adjudicatario") or "").strip()
+            if nombre and str(fila[idx_adj] or "").strip() != nombre:
+                fila[idx_adj] = nombre
+                cambiado = True
+            if nif and str(fila[idx_nif] or "").strip() != nif:
+                fila[idx_nif] = nif
+                cambiado = True
+            if (
+                fill_nif_organo
+                and idx_org is not None
+                and datos.get("nif_organo")
+                and not str(fila[idx_org] or "").strip()
+            ):
+                fila[idx_org] = str(datos["nif_organo"]).strip()
+                cambiado = True
+            if cambiado:
+                actualizadas += 1
+        if str(fila[idx_adj] or "").strip():
+            con_nombre += 1
+        if str(fila[idx_nif] or "").strip():
+            con_nif += 1
+        matriz.append(fila)
+
+    if actualizadas:
+        _bulk_write(pestana, matriz)
+
+    return {
+        "filas": max(len(matriz) - 1, 0),
+        "con_nombre": con_nombre,
+        "con_nif": con_nif,
+        "actualizadas": actualizadas,
+    }
 
 
 def replace_year_historico(

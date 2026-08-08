@@ -241,14 +241,31 @@ def _nif_organo(carpeta) -> str:
 
 
 def _adjudicatario(carpeta) -> tuple[str, str]:
+    """Extrae NIF y nombre del ganador (WinningParty / TenderResult).
+
+    En CODICE el nombre suele ir en PartyName/Name (no como hijo directo de Party)
+    y a veces WinningParty trae PartyIdentification/PartyName sin nodo Party.
+    Algunos NIF de personas físicas vienen enmascarados (***1234**) y se omiten.
+    """
     if carpeta is None:
         return "", ""
-    for ganador in _findall(carpeta, "WinningParty"):
+    candidatos = _findall(carpeta, "WinningParty")
+    if not candidatos:
+        # Algunas versiones anidan el ganador bajo TenderResult
+        resultado = _find(carpeta, "TenderResult")
+        if resultado is not None:
+            candidatos = _findall(resultado, "WinningParty")
+    for ganador in candidatos:
         party = _find(ganador, "Party", direct=True)
         if party is None:
             party = ganador
-        nombre = _text(party, "Name", direct=True) or _text(ganador, "Name", direct=True)
-        nif = _elegir_nif(_ids_party(party))
+        # PartyName/Name (estándar) o Name en cualquier profundidad
+        nombre = (
+            _text(party, "Name")
+            or _text(ganador, "Name")
+            or _text(party, "PartyName")
+        )
+        nif = _elegir_nif(_ids_party(party)) or _elegir_nif(_ids_party(ganador))
         if nombre or nif:
             return nif, _clean_html(nombre)
     return "", ""

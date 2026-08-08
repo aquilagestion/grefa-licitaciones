@@ -209,18 +209,28 @@ def get_spreadsheet(hoja_id: str | None = None):
     with _LOCK:
         if identificador in _SPREADSHEET_CACHE:
             return _SPREADSHEET_CACHE[identificador]
-        try:
-            import gspread
+        import time
 
-            cliente = gspread.authorize(_credentials())
-            hoja = cliente.open_by_key(identificador)
-        except Exception as exc:
-            raise SheetsError(
-                "No se pudo abrir la hoja de cálculo. Revisa el ID y que la hoja esté "
-                f"compartida como Editor con la cuenta de servicio. Detalle: {exc}"
-            ) from exc
-        _SPREADSHEET_CACHE[identificador] = hoja
-        return hoja
+        import gspread
+
+        ultimo: Exception | None = None
+        for intento in range(6):
+            try:
+                cliente = gspread.authorize(_credentials())
+                hoja = cliente.open_by_key(identificador)
+                _SPREADSHEET_CACHE[identificador] = hoja
+                return hoja
+            except Exception as exc:
+                ultimo = exc
+                texto = str(exc).lower()
+                if "429" in texto or "quota" in texto:
+                    time.sleep(min(20 * (intento + 1), 90))
+                    continue
+                break
+        raise SheetsError(
+            "No se pudo abrir la hoja de cálculo. Revisa el ID y que la hoja esté "
+            f"compartida como Editor con la cuenta de servicio. Detalle: {ultimo}"
+        ) from ultimo
 
 
 def reset_cache() -> None:
