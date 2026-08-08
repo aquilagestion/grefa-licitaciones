@@ -37,6 +37,7 @@ from config.keyword_catalog import (  # noqa: E402
 from modules import (  # noqa: E402
     auth,
     daily_sync,
+    asistente_admin,
     drive_docs,
     email_alert,
     grefa_filter,
@@ -336,6 +337,7 @@ NAV_OPCIONES = [
     "⭐ Mis Licitaciones",
     "📄 Análisis de pliegos",
     "✅ Comprobador de documentos",
+    "📝 Preparar documentación",
     "📋 Seguimiento",
 ]
 
@@ -2548,6 +2550,318 @@ def pestana_comprobador_documentos() -> None:
     )
 
 
+def _docs_desde_uploader(files, *, tipo: str = "PLIEGO") -> list[dict]:
+    salida = []
+    for f in files or []:
+        nombre = Path(getattr(f, "name", "") or "documento.pdf").name
+        salida.append(
+            {
+                "nombre": nombre,
+                "tipo": pliegos_placsp.etiquetar_upload(nombre)
+                if tipo == "PLIEGO"
+                else tipo,
+                "bytes": f.getvalue(),
+            }
+        )
+    return salida
+
+
+def pestana_preparar_documentacion() -> None:
+    """Asistente por bloques: pliego → formulario → borrador → verificación."""
+    st.subheader("Preparar documentación")
+    st.caption(
+        "Bloques **Administrativo**, **Económico** o **Técnico**. "
+        "Los anexos generados serán **siempre los modelos del PCAP/PPT**, "
+        "rellenando sus variables. Luego se verifica formato/fuentes/conformidad."
+    )
+
+    if not pdf_summary.is_configured():
+        st.warning(
+            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
+            "([Google AI Studio](https://aistudio.google.com/apikey))."
+        )
+        return
+
+    etiquetas = {eid: lab for eid, lab in asistente_admin.listar_bloques()}
+    bloque_lab = st.radio(
+        "Bloque",
+        list(etiquetas.values()),
+        horizontal=True,
+        key="prep_bloque_lab",
+    )
+    bloque = next(eid for eid, lab in etiquetas.items() if lab == bloque_lab)
+    cfg = asistente_admin.config_bloque(bloque)
+    pref = f"prep_{bloque}"
+
+    paso = st.radio(
+        "Paso",
+        [
+            "1. Pliego y exigencias",
+            f"2. Formulario {cfg['etiqueta'].lower()}",
+            "3. Borrador y verificación",
+        ],
+        horizontal=True,
+        key=f"{pref}_paso",
+    )
+
+    # ── Paso 1: pliego ──
+    if paso.startswith("1"):
+        st.markdown(f"**Sube el pliego** para el bloque {cfg['etiqueta'].lower()}.")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            expediente = st.text_input("ID expediente", key=f"{pref}_expediente")
+        with col_b:
+            titulo = st.text_input("Título / objeto (opcional)", key=f"{pref}_titulo")
+
+        pliego_files = st.file_uploader(
+            cfg["uploader_help"],
+            type=["pdf"],
+            accept_multiple_files=True,
+            key=f"{pref}_pliego_pdfs",
+        )
+
+        if st.button(
+            f"📑 Extraer exigencias ({cfg['etiqueta'].lower()})",
+            type="primary",
+            key=f"{pref}_btn_exigencias",
+            disabled=not pliego_files,
+        ):
+            docs = _docs_desde_uploader(pliego_files, tipo="PLIEGO")
+            with st.spinner(
+                f"Analizando pliego ({cfg['etiqueta'].lower()}: formatos, anexos…)…"
+            ):
+                try:
+                    exigencias = asistente_admin.extraer_exigencias(
+                        bloque,
+                        docs,
+                        expediente=(expediente or "").strip(),
+                        titulo=(titulo or "").strip(),
+                    )
+                    st.session_state[f"{pref}_exigencias"] = exigencias
+                    st.session_state[f"{pref}_pliego_docs"] = docs
+                    st.session_state[f"{pref}_pliego_meta"] = {
+                        "expediente": (expediente or "").strip(),
+                        "titulo": (titulo or "").strip(),
+                        "nombres": [d["nombre"] for d in docs],
+                    }
+                    if expediente:
+                        st.session_state[f"{pref}_f_expediente"] = expediente.strip()
+                    if titulo:
+                        st.session_state[f"{pref}_f_objeto"] = titulo.strip()
+                    for otro in asistente_admin.fuentes_copia_datos(bloque):
+                        otros_datos = st.session_state.get(f"prep_{otro}_datos") or {}
+                        for cid, val in asistente_admin.copiar_datos_compartidos(
+                            otros_datos, hacia_bloque=bloque
+                        ).items():
+                            st.session_state.setdefault(f"{pref}_f_{cid}", val)
+                    st.success("Exigencias extraídas. Continúa en el paso 2.")
+                except pdf_summary.PdfSummaryError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+
+        exigencias = st.session_state.get(f"{pref}_exigencias")
+        if exigencias:
+            meta = st.session_state.get(f"{pref}_pliego_meta") or {}
+            st.caption(
+                "Pliego en memoria: " + ", ".join(meta.get("nombres") or ["—"])
+            )
+            sugeridos = asistente_admin.sugerir_campos_desde_exigencias(exigencias)
+            if sugeridos:
+                with st.expander("Campos sugeridos por el pliego"):
+                    for s in sugeridos:
+                        st.markdown(f"- {s}")
+            with st.expander(
+                f"Exigencias {cfg['etiqueta'].lower()} (formato, fuentes, docs)",
+                expanded=True,
+            ):
+                st.markdown(exigencias)
+            st.download_button(
+                "⬇️ Descargar exigencias (.md)",
+                data=exigencias.encode("utf-8"),
+                file_name=f"exigencias_{bloque}.md",
+                mime="text/markdown",
+                key=f"{pref}_dl_exigencias",
+            )
+        else:
+            st.info(
+                f"Sube el pliego y pulsa **Extraer exigencias** ({cfg['etiqueta'].lower()})."
+            )
+        return
+
+    # ── Paso 2: formulario ──
+    if paso.startswith("2"):
+        if not st.session_state.get(f"{pref}_exigencias"):
+            st.warning("Antes extrae las exigencias del pliego en el paso 1.")
+            return
+
+        st.markdown(
+            f"Completa los datos {cfg['etiqueta'].lower()}. Lo vacío se marcará "
+            "`[COMPLETAR: …]` en el borrador."
+        )
+        fuentes = [
+            b
+            for b in asistente_admin.fuentes_copia_datos(bloque)
+            if st.session_state.get(f"prep_{b}_datos")
+        ]
+        if fuentes:
+            origen_lab = {
+                "admin": "Administrativo",
+                "eco": "Económico",
+                "tec": "Técnico",
+            }
+            cols = st.columns(len(fuentes))
+            for col, origen in zip(cols, fuentes):
+                with col:
+                    if st.button(
+                        f"↪️ Datos desde {origen_lab[origen]}",
+                        key=f"{pref}_btn_copiar_{origen}",
+                    ):
+                        for cid, val in asistente_admin.copiar_datos_compartidos(
+                            st.session_state[f"prep_{origen}_datos"],
+                            hacia_bloque=bloque,
+                        ).items():
+                            st.session_state[f"{pref}_f_{cid}"] = val
+                        st.rerun()
+
+        with st.expander("Recordatorio de exigencias", expanded=False):
+            st.markdown(st.session_state[f"{pref}_exigencias"])
+
+        datos: dict[str, str] = {}
+        for grupo, campos in asistente_admin.campos_por_grupo(bloque).items():
+            st.markdown(f"**{grupo}**")
+            for campo in campos:
+                clave = f"{pref}_f_{campo['id']}"
+                if campo["tipo"] == "area":
+                    datos[campo["id"]] = st.text_area(
+                        campo["label"], key=clave, height=90
+                    )
+                else:
+                    datos[campo["id"]] = st.text_input(campo["label"], key=clave)
+
+        if st.button(
+            "💾 Guardar datos del formulario",
+            type="primary",
+            key=f"{pref}_btn_guardar",
+        ):
+            limpios = {k: str(v or "").strip() for k, v in datos.items()}
+            st.session_state[f"{pref}_datos"] = limpios
+            st.success(
+                f"Datos guardados ({sum(1 for v in limpios.values() if v)} campos). "
+                "Pasa al paso 3."
+            )
+
+        if st.session_state.get(f"{pref}_datos"):
+            st.caption("Formulario guardado listo para generar el borrador.")
+        return
+
+    # ── Paso 3: borrador + verificación ──
+    exigencias = st.session_state.get(f"{pref}_exigencias") or ""
+    datos = st.session_state.get(f"{pref}_datos") or {}
+    if not exigencias:
+        st.warning("Falta el paso 1 (exigencias del pliego).")
+        return
+    if not datos or not any(datos.values()):
+        st.warning(f"Falta el paso 2 (formulario {cfg['etiqueta'].lower()}).")
+        return
+
+    st.markdown("**Datos del formulario**")
+    st.code(
+        asistente_admin.datos_formulario_a_texto(datos, bloque), language="markdown"
+    )
+
+    docs_pliego = list(st.session_state.get(f"{pref}_pliego_docs") or [])
+    if docs_pliego:
+        st.caption(
+            "Pliego en sesión: " + ", ".join(d.get("nombre", "?") for d in docs_pliego)
+        )
+    else:
+        st.warning("No hay pliego en sesión. Vuelve al paso 1 y extráelo de nuevo.")
+
+    col_g, col_v = st.columns(2)
+    with col_g:
+        gen = st.button(
+            f"✍️ Generar borrador {cfg['etiqueta'].lower()}",
+            type="primary",
+            key=f"{pref}_btn_gen",
+            disabled=not docs_pliego,
+        )
+    with col_v:
+        ver = st.button(
+            "🔎 Verificar contra el pliego",
+            key=f"{pref}_btn_ver",
+            disabled=not st.session_state.get(f"{pref}_borrador"),
+        )
+
+    if gen and docs_pliego:
+        with st.spinner(f"Redactando borrador {cfg['etiqueta'].lower()}…"):
+            try:
+                borrador = asistente_admin.generar_borrador(
+                    bloque, datos, exigencias, documentos_pliego=docs_pliego
+                )
+                st.session_state[f"{pref}_borrador"] = borrador
+                st.session_state.pop(f"{pref}_verificacion", None)
+                st.success("Borrador generado.")
+            except pdf_summary.PdfSummaryError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+
+    if ver:
+        borrador = st.session_state.get(f"{pref}_borrador") or ""
+        with st.spinner("Comprobando conformidad (docs, formatos, importes…)…"):
+            try:
+                informe = asistente_admin.verificar_ajuste(
+                    bloque,
+                    borrador,
+                    exigencias,
+                    datos=datos,
+                    documentos_pliego=docs_pliego or None,
+                )
+                st.session_state[f"{pref}_verificacion"] = informe
+            except pdf_summary.PdfSummaryError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+
+    if st.session_state.get(f"{pref}_borrador"):
+        st.markdown(f"### Borrador {cfg['etiqueta'].lower()}")
+        st.markdown(st.session_state[f"{pref}_borrador"])
+        st.download_button(
+            "⬇️ Descargar borrador (.md)",
+            data=st.session_state[f"{pref}_borrador"].encode("utf-8"),
+            file_name=(
+                f"borrador_{bloque}_"
+                f"{(datos.get('expediente') or 'GREFA').replace('/', '-')}.md"
+            ),
+            mime="text/markdown",
+            key=f"{pref}_dl_borrador",
+        )
+
+    if st.session_state.get(f"{pref}_verificacion"):
+        informe = st.session_state[f"{pref}_verificacion"]
+        baja = informe.lower()
+        if "no conforme" in baja:
+            st.error("Verificación: no conforme con el pliego (revisa el informe).")
+        elif "reservas" in baja:
+            st.warning("Verificación: conforme con reservas.")
+        else:
+            st.success("Verificación completada.")
+        st.markdown("### Conformidad con el pliego")
+        st.markdown(informe)
+        st.download_button(
+            "⬇️ Descargar verificación (.md)",
+            data=informe.encode("utf-8"),
+            file_name=f"verificacion_{bloque}.md",
+            mime="text/markdown",
+            key=f"{pref}_dl_verificacion",
+        )
+
+    st.caption(
+        "El borrador no es un visto bueno jurídico/financiero ni sustituye los "
+        "modelos oficiales del PCAP. Usa la verificación antes del fichero final."
+    )
+
 def pestana_mis_licitaciones() -> None:
     st.subheader("Mis Licitaciones")
     st.caption(
@@ -3397,6 +3711,8 @@ def main() -> None:
         pestana_analisis_pliegos(oportunidades, catalogo=puntuadas_todas)
     elif pagina == NAV_OPCIONES[5]:
         pestana_comprobador_documentos()
+    elif pagina == NAV_OPCIONES[6]:
+        pestana_preparar_documentacion()
     else:
         pestana_seguimiento()
 
