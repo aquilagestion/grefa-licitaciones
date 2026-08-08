@@ -39,6 +39,7 @@ from modules import (  # noqa: E402
     daily_sync,
     asistente_admin,
     asistente_store,
+    ayuda_faq,
     doc_export,
     drive_docs,
     email_alert,
@@ -342,6 +343,7 @@ NAV_OPCIONES = [
     "✅ Comprobador de documentos",
     "📝 Preparar documentación",
     "📋 Seguimiento",
+    "❓ Ayuda y FAQ",
 ]
 
 
@@ -2709,7 +2711,9 @@ def pestana_preparar_documentacion() -> None:
 4. **Comprobador** — (menú ✅) revisa PDFs finales si quieres un segundo control.  
 5. **Revisión humana** — estados + observaciones internas (no es VB jurídico).  
 6. **Paquete final** — une Admin + Económico + Técnico y exporta Word/PDF.  
-7. **Presentar** — marca estado *Presentada* cuando envíes en PLACSP.
+7. **Presentar** — marca estado *Presentada* cuando envíes en PLACSP.  
+
+Cada vez que guardas un borrador se guarda una **versión** (historial restaurable).
             """
         )
 
@@ -3151,14 +3155,16 @@ def pestana_preparar_documentacion() -> None:
                 st.error(f"Error: {exc}")
 
     fmt = st.session_state.get(f"{pref}_formato") or doc_export.DEFAULT_FORMATO
+    exp_act = str(datos.get("expediente") or ctx.get("expediente") or "sin-expediente")
+    url_act = str(ctx.get("url") or "")
     if st.button(
         "☁️ Guardar borrador en Sheets/Drive",
         key=f"{pref}_btn_persist_borrador",
     ):
         try:
             asistente_store.save_bloque(
-                expediente=str(datos.get("expediente") or "sin-expediente"),
-                enlace=str(ctx.get("url") or ""),
+                expediente=exp_act,
+                enlace=url_act,
                 titulo=str(datos.get("objeto") or ctx.get("titulo") or ""),
                 organo=str(datos.get("organo") or ctx.get("organo") or ""),
                 bloque=bloque,
@@ -3168,9 +3174,74 @@ def pestana_preparar_documentacion() -> None:
                 borrador=st.session_state.get(f"{pref}_borrador") or "",
                 verificacion=st.session_state.get(f"{pref}_verificacion") or "",
             )
-            st.success("Borrador persistido (local + Sheets/Drive si está configurado).")
+            st.success(
+                "Borrador persistido (local + Sheets/Drive) y versión añadida al historial."
+            )
         except Exception as exc:
             st.error(str(exc))
+
+    # Historial de versiones
+    with st.expander("🕘 Historial de versiones del borrador", expanded=False):
+        versiones = asistente_store.listar_versiones(
+            expediente=exp_act, enlace=url_act, bloque=bloque
+        )
+        if not versiones:
+            st.caption(
+                "Aún no hay versiones. Se crean al **guardar** el borrador "
+                "(también en Drive si está configurado)."
+            )
+        else:
+            st.caption(f"{len(versiones)} versión(es). Máx. {asistente_store.MAX_VERSIONES}.")
+            for ver in versiones:
+                c1, c2, c3 = st.columns([2.2, 1, 1])
+                with c1:
+                    st.markdown(
+                        f"**{ver.get('timestamp')}** · {ver.get('chars', 0):,} chars"
+                        + (f" · {ver.get('etiqueta')}" if ver.get("etiqueta") else "")
+                    )
+                    if ver.get("drive"):
+                        st.caption(f"[Drive ↗]({ver['drive']})")
+                with c2:
+                    if st.button(
+                        "Vista",
+                        key=f"{pref}_ver_{ver.get('id')}",
+                    ):
+                        texto_v = asistente_store.cargar_version(
+                            expediente=exp_act,
+                            enlace=url_act,
+                            bloque=bloque,
+                            version_id=str(ver.get("id") or ""),
+                        )
+                        st.session_state[f"{pref}_version_preview"] = texto_v
+                        st.session_state[f"{pref}_version_preview_id"] = ver.get("id")
+                with c3:
+                    if st.button(
+                        "Restaurar",
+                        key=f"{pref}_rest_{ver.get('id')}",
+                        type="primary",
+                    ):
+                        texto_v = asistente_store.cargar_version(
+                            expediente=exp_act,
+                            enlace=url_act,
+                            bloque=bloque,
+                            version_id=str(ver.get("id") or ""),
+                        )
+                        if not texto_v.strip():
+                            st.error("No se pudo cargar esa versión.")
+                        else:
+                            st.session_state[f"{pref}_borrador"] = texto_v
+                            st.success(
+                                f"Restaurada versión {ver.get('timestamp')}. "
+                                "Vuelve a guardar si quieres fijarla como actual."
+                            )
+                            st.rerun()
+            prev = st.session_state.get(f"{pref}_version_preview")
+            if prev:
+                with st.expander(
+                    f"Vista previa · {st.session_state.get(f'{pref}_version_preview_id')}",
+                    expanded=True,
+                ):
+                    st.markdown(prev)
 
     if st.session_state.get(f"{pref}_borrador"):
         st.markdown(f"### Borrador {cfg['etiqueta'].lower()}")
@@ -3448,13 +3519,32 @@ def _ui_paquete_final(ctx: dict) -> None:
                 formato=fmt,
                 paquete=paquete,
             )
-            st.success("Paquete generado y guardado.")
+            st.success("Paquete generado, guardado y versionado.")
         except Exception as exc:
             st.warning(f"Paquete en sesión; persistencia: {exc}")
 
     paquete = st.session_state.get("prep_paquete_md") or ""
     if not paquete:
         return
+
+    with st.expander("🕘 Historial de versiones del paquete", expanded=False):
+        for ver in asistente_store.listar_versiones(
+            expediente=exp or "sin-expediente", enlace=url, bloque="paquete"
+        )[:10]:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.caption(f"{ver.get('timestamp')} · {ver.get('chars', 0):,} chars")
+            with c2:
+                if st.button("Restaurar", key=f"paq_rest_{ver.get('id')}"):
+                    texto_v = asistente_store.cargar_version(
+                        expediente=exp or "sin-expediente",
+                        enlace=url,
+                        bloque="paquete",
+                        version_id=str(ver.get("id") or ""),
+                    )
+                    if texto_v.strip():
+                        st.session_state["prep_paquete_md"] = texto_v
+                        st.rerun()
 
     st.markdown(paquete)
     fmt = st.session_state.get("prep_paquete_formato") or doc_export.DEFAULT_FORMATO
@@ -3654,6 +3744,70 @@ def pestana_mis_licitaciones() -> None:
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
+
+
+def pestana_ayuda_faq() -> None:
+    """Centro de ayuda y preguntas frecuentes."""
+    st.subheader("Ayuda y consulta")
+    st.caption(
+        "Guía rápida del flujo GREFA y respuestas a dudas habituales. "
+        "Si no encuentras algo, prueba el buscador de esta página."
+    )
+
+    st.markdown(ayuda_faq.GUIA_RAPIDA)
+
+    st.markdown("### Accesos rápidos")
+    cols = st.columns(4)
+    accesos = [
+        ("🎯 Oportunidades", "🎯 Oportunidades GREFA"),
+        ("📝 Preparar docs", "📝 Preparar documentación"),
+        ("✅ Comprobador", "✅ Comprobador de documentos"),
+        ("⭐ Mis licitaciones", "⭐ Mis Licitaciones"),
+    ]
+    for col, (etiqueta, destino) in zip(cols, accesos):
+        with col:
+            if st.button(etiqueta, key=f"ayuda_goto_{destino}", width="stretch"):
+                st.session_state["nav_principal"] = destino
+                st.rerun()
+
+    st.markdown("### Preguntas frecuentes")
+    c_bus, c_cat = st.columns([2, 1])
+    with c_bus:
+        consulta = st.text_input(
+            "Buscar en la FAQ",
+            placeholder="Ej. Word, NIF, 429, anexos, plazo…",
+            key="ayuda_faq_q",
+        )
+    with c_cat:
+        opciones_cat = ["Todas", *ayuda_faq.categorias()]
+        categoria = st.selectbox("Categoría", opciones_cat, key="ayuda_faq_cat")
+
+    if consulta.strip():
+        items = ayuda_faq.buscar_faqs(consulta)
+    else:
+        items = ayuda_faq.faqs_por_categoria(categoria)
+
+    if not items:
+        st.info("No hay FAQs que coincidan. Prueba otra palabra o categoría.")
+        return
+
+    por_cat: dict[str, list[dict[str, str]]] = {}
+    for item in items:
+        por_cat.setdefault(item["categoria"], []).append(item)
+
+    for cat, faqs in por_cat.items():
+        st.markdown(f"#### {cat}")
+        for faq in faqs:
+            with st.expander(faq["pregunta"], expanded=bool(consulta.strip())):
+                st.markdown(faq["respuesta"])
+
+    st.divider()
+    st.markdown("### Contacto / soporte interno")
+    st.caption(
+        "Esta app es una herramienta interna de apoyo. "
+        "Para incidencias de Secrets, cuota Sheets o Gemini, revisa la configuración "
+        "del Space y la hoja compartida con la cuenta de servicio."
+    )
 
 
 def pestana_seguimiento() -> None:
@@ -4376,8 +4530,10 @@ def main() -> None:
         pestana_comprobador_documentos()
     elif pagina == NAV_OPCIONES[6]:
         pestana_preparar_documentacion()
-    else:
+    elif pagina == NAV_OPCIONES[7]:
         pestana_seguimiento()
+    else:
+        pestana_ayuda_faq()
 
     st.divider()
     st.caption(

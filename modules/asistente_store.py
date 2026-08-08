@@ -31,6 +31,8 @@ ASISTENTE_HEADERS = [
 
 BLOQUES = ("admin", "eco", "tec", "paquete", "revision")
 LOCAL_DIR = Path(__file__).resolve().parents[1] / "data" / "asistente"
+VERSIONS_DIR = LOCAL_DIR / "versions"
+MAX_VERSIONES = 25
 
 ESTADOS_REVISION = (
     "Borrador",
@@ -75,6 +77,133 @@ def _cargar_local(expediente: str, enlace: str, bloque: str) -> dict[str, Any] |
         return json.loads(ruta.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _versions_path(expediente: str, enlace: str, bloque: str) -> Path:
+    VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    clave = re.sub(r"[^\w]+", "_", _clave(expediente, enlace))[:60]
+    return VERSIONS_DIR / f"{clave}_{bloque}_versions.json"
+
+
+def _cargar_indice_versiones(expediente: str, enlace: str, bloque: str) -> list[dict[str, Any]]:
+    ruta = _versions_path(expediente, enlace, bloque)
+    if not ruta.is_file():
+        return []
+    try:
+        data = json.loads(ruta.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _guardar_indice_versiones(
+    expediente: str, enlace: str, bloque: str, versiones: list[dict[str, Any]]
+) -> None:
+    ruta = _versions_path(expediente, enlace, bloque)
+    ruta.write_text(json.dumps(versiones[:MAX_VERSIONES], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _contenido_version_path(version_id: str) -> Path:
+    VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    seguro = re.sub(r"[^\w.\-]+", "_", version_id)[:80]
+    return VERSIONS_DIR / f"{seguro}.md"
+
+
+def registrar_version_borrador(
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+    borrador: str,
+    etiqueta: str = "",
+    organo: str = "",
+    subir_drive: bool = True,
+) -> dict[str, Any] | None:
+    """Guarda una versión del borrador (local; Drive opcional)."""
+    texto = (borrador or "").strip()
+    if not texto or bloque not in BLOQUES:
+        return None
+    # Evita duplicar si es idéntico a la última versión
+    previas = _cargar_indice_versiones(expediente, enlace, bloque)
+    if previas and (previas[0].get("sha") == _sha_corto(texto)):
+        return previas[0]
+
+    momento = datetime.now()
+    version_id = (
+        f"{_sanitizar_exp(expediente)}_{bloque}_"
+        f"{momento.strftime('%Y%m%d_%H%M%S')}_{_sha_corto(texto)}"
+    )
+    ruta_md = _contenido_version_path(version_id)
+    ruta_md.write_text(texto, encoding="utf-8")
+
+    link_drive = ""
+    if subir_drive and store.is_configured():
+        link_drive = _subir_texto_drive(
+            texto,
+            f"{version_id}.md",
+            expediente=expediente,
+            organo=organo,
+        )
+
+    entrada = {
+        "id": version_id,
+        "bloque": bloque,
+        "expediente": expediente,
+        "enlace": enlace or "",
+        "timestamp": momento.strftime("%d/%m/%Y %H:%M:%S"),
+        "etiqueta": (etiqueta or "").strip()[:120],
+        "chars": len(texto),
+        "sha": _sha_corto(texto),
+        "ruta_local": str(ruta_md.name),
+        "drive": link_drive,
+    }
+    previas.insert(0, entrada)
+    # Limpia ficheros locales de versiones descartadas
+    for vieja in previas[MAX_VERSIONES:]:
+        try:
+            _contenido_version_path(str(vieja.get("id") or "")).unlink(missing_ok=True)
+        except Exception:
+            pass
+    _guardar_indice_versiones(expediente, enlace, bloque, previas[:MAX_VERSIONES])
+    return entrada
+
+
+def _sha_corto(texto: str) -> str:
+    import hashlib
+
+    return hashlib.sha1(texto.encode("utf-8")).hexdigest()[:12]
+
+
+def listar_versiones(
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+) -> list[dict[str, Any]]:
+    return _cargar_indice_versiones(expediente, enlace, bloque)
+
+
+def cargar_version(
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+    version_id: str,
+) -> str:
+    """Devuelve el markdown de una versión (local o Drive)."""
+    for entrada in _cargar_indice_versiones(expediente, enlace, bloque):
+        if str(entrada.get("id")) != str(version_id):
+            continue
+        ruta = _contenido_version_path(str(version_id))
+        if ruta.is_file():
+            return ruta.read_text(encoding="utf-8")
+        if entrada.get("drive"):
+            return _leer_texto_drive(str(entrada["drive"]))
+    # Intento directo por id
+    ruta = _contenido_version_path(version_id)
+    if ruta.is_file():
+        return ruta.read_text(encoding="utf-8")
+    return ""
 
 
 def _subir_texto_drive(
@@ -152,6 +281,24 @@ def save_bloque(
 
     # Local siempre (fallback sin Sheets)
     _guardar_local(exp, enlace, bloque, payload)
+
+    # Histórico de versiones (borrador o paquete)
+    texto_version = (paquete if bloque == "paquete" else borrador) or ""
+    if texto_version.strip() and bloque in {"admin", "eco", "tec", "paquete"}:
+        try:
+            ver = registrar_version_borrador(
+                expediente=exp,
+                enlace=enlace,
+                bloque=bloque,
+                borrador=texto_version,
+                etiqueta=titulo or bloque,
+                organo=organo,
+                subir_drive=store.is_configured(),
+            )
+            if ver:
+                payload["ultima_version_id"] = ver.get("id")
+        except Exception as exc:
+            LOGGER.warning("No se pudo registrar versión: %s", exc)
 
     links: dict[str, str] = {}
     if store.is_configured():
