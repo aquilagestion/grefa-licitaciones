@@ -457,10 +457,30 @@ def _append_rows(pestana, filas: list[list[str]], chunk_size: int = 500) -> None
         pestana.append_rows(filas[inicio : inicio + chunk_size], value_input_option="USER_ENTERED")
 
 
+def _ensure_grid(pestana, filas: int, columnas: int) -> None:
+    """Amplía la pestaña si el grid es más pequeño que lo que vamos a escribir."""
+    filas_ok = max(int(filas), 1)
+    cols_ok = max(int(columnas), 1)
+    try:
+        actual_filas = int(getattr(pestana, "row_count", 0) or 0)
+        actual_cols = int(getattr(pestana, "col_count", 0) or 0)
+        if actual_filas >= filas_ok and actual_cols >= cols_ok:
+            return
+        pestana.resize(
+            rows=max(actual_filas, filas_ok),
+            cols=max(actual_cols, cols_ok),
+        )
+    except Exception as exc:
+        LOGGER.warning("No se pudo ampliar grid de %s: %s", getattr(pestana, "title", "?"), exc)
+
+
 def _bulk_write(pestana, valores: list[list[Any]], chunk: int = 4000) -> None:
-    pestana.clear()
     if not valores:
+        pestana.clear()
         return
+    ancho = max(len(fila) for fila in valores)
+    _ensure_grid(pestana, len(valores), ancho)
+    pestana.clear()
     for inicio in range(0, len(valores), chunk):
         trozo = valores[inicio : inicio + chunk]
         pestana.update(trozo, f"A{inicio + 1}", value_input_option="USER_ENTERED")
