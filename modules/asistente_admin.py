@@ -193,11 +193,12 @@ CAMPOS_ECO: list[dict[str, Any]] = [
 REGLA_MODELOS = """
 REGLA OBLIGATORIA SOBRE ANEXOS:
 - Los anexos a generar serán SIEMPRE los **modelos propuestos en los pliegos**
-  (PCAP y/o PPT), identificados por su número/nombre de anexo.
+  (PCAP y/o PPT), identificados por su número/nombre de anexo (Anexo I, II…).
 - NO inventes anexos genéricos propios si el pliego ya aporta modelo.
-- Extrae y respeta las **variables / campos en blanco** de cada modelo
-  (casillas, tablas, declaraciones, firmas, fechas, NIF, lotes…).
-- Si un campo del modelo no tiene dato en el formulario, usa `[COMPLETAR: …]`.
+- Respeta la **estructura campo a campo** del modelo (casillas, tablas, epígrafes).
+- Usa los valores del formulario (incluidos campos `anx_*` de cada anexo).
+- Si un campo del modelo no tiene dato, usa `[COMPLETAR: campo]`.
+- Indica siempre el número de anexo del pliego en el encabezado de cada sección.
 """
 
 CAMPOS_TEC: list[dict[str, Any]] = [
@@ -644,13 +645,30 @@ def generar_borrador(
     exigencias: str,
     *,
     documentos_pliego: list[dict[str, Any]] | None = None,
+    modelos: dict[str, Any] | None = None,
 ) -> str:
     cfg = config_bloque(bloque)
+    # Incluye también campos dinámicos de anexos (anx_*)
+    lineas_datos = [datos_formulario_a_texto(datos, bloque)]
+    extras = [
+        f"- {k}: {v}"
+        for k, v in sorted(datos.items())
+        if k.startswith("anx_") and str(v or "").strip()
+    ]
+    if extras:
+        lineas_datos.append("VARIABLES DE ANEXOS/MODELOS:")
+        lineas_datos.extend(extras)
+    estructura = ""
+    if modelos and modelos.get("anexos"):
+        estructura = "ESTRUCTURA OBLIGATORIA DE ANEXOS DEL PLIEGO:\n" + json.dumps(
+            modelos.get("anexos"), ensure_ascii=False, indent=2
+        )[:12000]
     contexto = (
         "DATOS DEL FORMULARIO:\n"
-        f"{datos_formulario_a_texto(datos, bloque)}\n\n"
+        f"{chr(10).join(lineas_datos)}\n\n"
         "EXIGENCIAS EXTRAÍDAS DEL PLIEGO:\n"
-        f"{(exigencias or 'No disponibles').strip()[:20000]}"
+        f"{(exigencias or 'No disponibles').strip()[:16000]}\n\n"
+        f"{estructura}"
     )
     partes: list[Any] = [
         f"Genera el borrador {cfg['etiqueta'].lower()} con la información anterior."
@@ -796,3 +814,169 @@ def copiar_datos_compartidos(
 def fuentes_copia_datos(bloque: str) -> list[str]:
     """Otros bloques desde los que tiene sentido importar datos comunes."""
     return [b for b in ("admin", "eco", "tec") if b != bloque]
+
+
+PROMPT_MODELOS_JSON = """Eres experto en pliegos de contratación pública española.
+A partir del pliego (PCAP y/o PPT), identifica los **modelos/anexos numerados**
+que el licitador debe rellenar y sus campos variables.
+
+Responde SOLO con JSON válido (sin markdown) con esta forma:
+{
+  "anexos": [
+    {
+      "id": "Anexo I",
+      "titulo": "título exacto del pliego",
+      "origen": "PCAP|PPT",
+      "campos": [
+        {"id": "campo_slug", "label": "etiqueta legible", "tipo": "text|area|check"}
+      ]
+    }
+  ],
+  "fecha_limite_presentacion": "YYYY-MM-DD o vacío si no consta",
+  "formato": {
+    "fuente": "Arial u otra si consta",
+    "tamano": 11,
+    "margen_cm": 2.5,
+    "interlineado": 1.15
+  }
+}
+
+Reglas:
+- Solo anexos/modelos que el pliego proponga (no inventes).
+- id de campo en snake_case, único dentro del anexo.
+- Máximo 40 campos en total.
+- Si no hay anexos numerados, "anexos": [].
+"""
+
+
+def _parse_json_respuesta(texto: str) -> dict[str, Any]:
+    crudo = (texto or "").strip()
+    if crudo.startswith("```"):
+        crudo = re.sub(r"^```(?:json)?\s*", "", crudo)
+        crudo = re.sub(r"\s*```$", "", crudo)
+    try:
+        data = json.loads(crudo)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        m = re.search(r"\{.*\}", crudo, flags=re.DOTALL)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(0))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+
+def extraer_modelos_estructurados(
+    documentos_pliego: list[dict[str, Any]],
+    *,
+    bloque: str = "admin",
+    expediente: str = "",
+    titulo: str = "",
+) -> dict[str, Any]:
+    """Detecta anexos numerados y campos a rellenar (JSON estructurado)."""
+    utiles = _docs_pliego(documentos_pliego)
+    cfg = config_bloque(bloque)
+    contexto = (
+        f"Expediente: {expediente or '—'}\n"
+        f"Título: {titulo or '—'}\n"
+        f"Bloque: {cfg['etiqueta']}\n"
+        f"Enfoque: {cfg['enfoque']}"
+    )
+    try:
+        texto = pdf_summary._generar_con_gemini(
+            pdf_summary._partes_gemini_pdfs(utiles, max_docs=4),
+            contexto=contexto,
+            prompt_base=PROMPT_MODELOS_JSON,
+        )
+    except pdf_summary.PdfSummaryError:
+        extracto = pdf_summary._texto_desde_pdfs(utiles)
+        if len(extracto.strip()) < 200:
+            raise
+        texto = pdf_summary._generar_con_gemini(
+            [f"Extracto pliego:\n---\n{extracto}\n---"],
+            contexto=contexto,
+            prompt_base=PROMPT_MODELOS_JSON,
+        )
+    data = _parse_json_respuesta(texto)
+    anexos = data.get("anexos") if isinstance(data.get("anexos"), list) else []
+    normalizados = []
+    vistos: set[str] = set()
+    for anx in anexos[:20]:
+        if not isinstance(anx, dict):
+            continue
+        aid = str(anx.get("id") or "").strip() or "Anexo"
+        titulo_a = str(anx.get("titulo") or "").strip()
+        origen = str(anx.get("origen") or "").strip() or "PCAP"
+        campos_out = []
+        for campo in anx.get("campos") or []:
+            if not isinstance(campo, dict):
+                continue
+            cid = re.sub(r"[^\w]+", "_", str(campo.get("id") or "").strip().lower()).strip("_")
+            if not cid or cid in vistos:
+                continue
+            vistos.add(cid)
+            tipo = str(campo.get("tipo") or "text").strip().lower()
+            if tipo not in {"text", "area", "check"}:
+                tipo = "text"
+            campos_out.append(
+                {
+                    "id": cid[:60],
+                    "label": str(campo.get("label") or cid)[:160],
+                    "tipo": tipo,
+                    "anexo_id": aid,
+                }
+            )
+        normalizados.append(
+            {
+                "id": aid[:80],
+                "titulo": titulo_a[:200],
+                "origen": origen[:20],
+                "campos": campos_out[:25],
+            }
+        )
+    formato = data.get("formato") if isinstance(data.get("formato"), dict) else {}
+    return {
+        "anexos": normalizados,
+        "fecha_limite_presentacion": str(data.get("fecha_limite_presentacion") or "").strip(),
+        "formato": formato,
+    }
+
+
+def campos_desde_modelos(modelos: dict[str, Any]) -> list[dict[str, Any]]:
+    """Aplana campos de anexos para el formulario dinámico."""
+    salida: list[dict[str, Any]] = []
+    for anx in modelos.get("anexos") or []:
+        grupo = f"{anx.get('id')} — {anx.get('titulo') or anx.get('origen')}"
+        for campo in anx.get("campos") or []:
+            salida.append(
+                {
+                    "id": f"anx_{campo['id']}",
+                    "label": f"[{anx.get('id')}] {campo['label']}",
+                    "tipo": campo.get("tipo") or "text",
+                    "grupo": grupo[:80],
+                }
+            )
+    return salida
+
+
+def parse_fecha_limite(texto: str) -> str:
+    """Devuelve YYYY-MM-DD si encuentra una fecha de presentación en texto."""
+    if not texto:
+        return ""
+    # ISO
+    m = re.search(r"(20\d{2})-(\d{2})-(\d{2})", texto)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.search(
+        r"(?:presentaci[oó]n|plazo|fecha\s*l[ií]mite)[^\d]{0,40}"
+        r"(\d{1,2})[/\-.](\d{1,2})[/\-.](20\d{2})",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    return ""

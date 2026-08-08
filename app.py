@@ -38,9 +38,12 @@ from modules import (  # noqa: E402
     auth,
     daily_sync,
     asistente_admin,
+    asistente_store,
+    doc_export,
     drive_docs,
     email_alert,
     grefa_filter,
+    grefa_perfil,
     google_chat,
     historico_placsp,
     pdf_summary,
@@ -774,6 +777,17 @@ def _render_resultados_con_interes(
                 st.caption(meta)
             if fila.get("url"):
                 st.markdown(f"[PLACSP ↗]({fila.get('url')})")
+            if st.button(
+                "📝 Preparar docs",
+                key=f"prep_from_{clave_prefix}_{i}_{clave[:36]}",
+                help="Abrir asistente de documentación con este expediente",
+            ):
+                _abrir_preparar_docs(
+                    str(fila.get("expediente") or ""),
+                    titulo=str(fila.get("titulo") or ""),
+                    organo=str(fila.get("organo_contratacion") or ""),
+                    url=str(fila.get("url") or ""),
+                )
         if nuevo != marcado:
             try:
                 _marcar_interes(fila, interesa=nuevo)
@@ -1239,10 +1253,22 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         """,
         unsafe_allow_html=True,
     )
-    columna_enlace, columna_motivo = st.columns([1, 4])
+    columna_enlace, columna_prep, columna_motivo = st.columns([1, 1, 3])
     with columna_enlace:
         if fila.get("url"):
             st.link_button("Ver en PLACSP ↗", fila["url"], width="stretch")
+    with columna_prep:
+        if st.button(
+            "📝 Preparar docs",
+            key=f"prep_card_{_clave_expediente(str(fila.get('expediente') or ''), str(fila.get('url') or ''))[:40]}",
+            width="stretch",
+        ):
+            _abrir_preparar_docs(
+                str(fila.get("expediente") or ""),
+                titulo=str(fila.get("titulo") or ""),
+                organo=str(fila.get("organo_contratacion") or ""),
+                url=str(fila.get("url") or ""),
+            )
     with columna_motivo:
         with st.expander("¿Por qué esta puntuación?"):
             st.write(fila.get("justificacion", ""))
@@ -2566,14 +2592,129 @@ def _docs_desde_uploader(files, *, tipo: str = "PLIEGO") -> list[dict]:
     return salida
 
 
+def _abrir_preparar_docs(
+    expediente: str,
+    *,
+    titulo: str = "",
+    organo: str = "",
+    url: str = "",
+    bloque: str = "admin",
+) -> None:
+    """Salta a Preparar documentación con el expediente vinculado."""
+    lab = {"admin": "Administrativo", "eco": "Económico", "tec": "Técnico"}.get(
+        bloque, "Administrativo"
+    )
+    st.session_state["nav_principal"] = "📝 Preparar documentación"
+    st.session_state["prep_bloque_lab"] = lab
+    st.session_state["prep_vinculo"] = {
+        "expediente": (expediente or "").strip(),
+        "titulo": (titulo or "").strip(),
+        "organo": (organo or "").strip(),
+        "url": (url or "").strip(),
+        "bloque": bloque,
+    }
+    st.rerun()
+
+
+def _aplicar_vinculo_preparar() -> None:
+    vinculo = st.session_state.pop("prep_vinculo", None)
+    if not isinstance(vinculo, dict):
+        return
+    exp = str(vinculo.get("expediente") or "").strip()
+    tit = str(vinculo.get("titulo") or "").strip()
+    org = str(vinculo.get("organo") or "").strip()
+    url = str(vinculo.get("url") or "").strip()
+    st.session_state["prep_contexto"] = {
+        "expediente": exp,
+        "titulo": tit,
+        "organo": org,
+        "url": url,
+    }
+    for b in ("admin", "eco", "tec"):
+        if exp:
+            st.session_state[f"prep_{b}_expediente"] = exp
+            st.session_state[f"prep_{b}_f_expediente"] = exp
+        if tit:
+            st.session_state[f"prep_{b}_titulo"] = tit
+            st.session_state[f"prep_{b}_f_objeto"] = tit
+        if org:
+            st.session_state[f"prep_{b}_f_organo"] = org
+
+
+def _botones_export_borrador(
+    markdown: str,
+    *,
+    nombre_base: str,
+    formato: dict,
+    key_prefix: str,
+) -> None:
+    if not markdown.strip():
+        return
+    col_md, col_docx, col_pdf = st.columns(3)
+    with col_md:
+        st.download_button(
+            "⬇️ Markdown",
+            data=markdown.encode("utf-8"),
+            file_name=f"{nombre_base}.md",
+            mime="text/markdown",
+            key=f"{key_prefix}_dl_md",
+        )
+    with col_docx:
+        try:
+            docx_bytes = doc_export.markdown_a_docx(
+                markdown, titulo=nombre_base, formato=formato
+            )
+            st.download_button(
+                "⬇️ Word (.docx)",
+                data=docx_bytes,
+                file_name=f"{nombre_base}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"{key_prefix}_dl_docx",
+            )
+        except Exception as exc:
+            st.caption(f"Word: {exc}")
+    with col_pdf:
+        try:
+            pdf_bytes = doc_export.markdown_a_pdf(
+                markdown, titulo=nombre_base, formato=formato
+            )
+            st.download_button(
+                "⬇️ PDF",
+                data=pdf_bytes,
+                file_name=f"{nombre_base}.pdf",
+                mime="application/pdf",
+                key=f"{key_prefix}_dl_pdf",
+            )
+        except Exception as exc:
+            st.caption(f"PDF: {exc}")
+
+
 def pestana_preparar_documentacion() -> None:
-    """Asistente por bloques: pliego → formulario → borrador → verificación."""
+    """Asistente por bloques: pliego → formulario → borrador → paquete final."""
+    _aplicar_vinculo_preparar()
+
     st.subheader("Preparar documentación")
     st.caption(
         "Bloques **Administrativo**, **Económico** o **Técnico**. "
-        "Los anexos generados serán **siempre los modelos del PCAP/PPT**, "
-        "rellenando sus variables. Luego se verifica formato/fuentes/conformidad."
+        "Anexos = modelos del PCAP/PPT. Guarda por expediente, exporta Word/PDF "
+        "y une el paquete final."
     )
+
+    with st.expander("📘 Guía rápida del flujo", expanded=False):
+        st.markdown(
+            """
+1. **Pliego** — sube PCAP/PPT y extrae exigencias (+ detecta anexos numerados).  
+2. **Formulario** — aplica el **perfil GREFA**, rellena variables y campos de cada anexo.  
+3. **Borrador** — genera el texto según modelos del pliego y **verifica** conformidad.  
+4. **Comprobador** — (menú ✅) revisa PDFs finales si quieres un segundo control.  
+5. **Revisión humana** — estados + observaciones internas (no es VB jurídico).  
+6. **Paquete final** — une Admin + Económico + Técnico y exporta Word/PDF.  
+7. **Presentar** — marca estado *Presentada* cuando envíes en PLACSP.
+            """
+        )
+
+    _ui_alertas_plazo()
+    _ui_perfil_grefa()
 
     if not pdf_summary.is_configured():
         st.warning(
@@ -2582,13 +2723,27 @@ def pestana_preparar_documentacion() -> None:
         )
         return
 
+    ctx = st.session_state.get("prep_contexto") or {}
+    if ctx.get("expediente"):
+        st.info(
+            f"Expediente vinculado: **{ctx['expediente']}**"
+            + (f" — {ctx.get('titulo', '')[:80]}" if ctx.get("titulo") else "")
+        )
+
     etiquetas = {eid: lab for eid, lab in asistente_admin.listar_bloques()}
     bloque_lab = st.radio(
         "Bloque",
-        list(etiquetas.values()),
+        list(etiquetas.values()) + ["🔎 Revisión humana", "📦 Paquete final"],
         horizontal=True,
         key="prep_bloque_lab",
     )
+    if bloque_lab == "📦 Paquete final":
+        _ui_paquete_final(ctx)
+        return
+    if bloque_lab == "🔎 Revisión humana":
+        _ui_revision_humana(ctx)
+        return
+
     bloque = next(eid for eid, lab in etiquetas.items() if lab == bloque_lab)
     cfg = asistente_admin.config_bloque(bloque)
     pref = f"prep_{bloque}"
@@ -2638,11 +2793,24 @@ def pestana_preparar_documentacion() -> None:
                         titulo=(titulo or "").strip(),
                     )
                     st.session_state[f"{pref}_exigencias"] = exigencias
+                    st.session_state[f"{pref}_formato"] = (
+                        doc_export.parse_formato_desde_exigencias(exigencias)
+                    )
                     st.session_state[f"{pref}_pliego_docs"] = docs
                     st.session_state[f"{pref}_pliego_meta"] = {
                         "expediente": (expediente or "").strip(),
                         "titulo": (titulo or "").strip(),
                         "nombres": [d["nombre"] for d in docs],
+                    }
+                    st.session_state["prep_contexto"] = {
+                        "expediente": (expediente or "").strip(),
+                        "titulo": (titulo or "").strip(),
+                        "organo": str(
+                            st.session_state.get(f"{pref}_f_organo")
+                            or (ctx.get("organo") if ctx else "")
+                            or ""
+                        ),
+                        "url": str((ctx.get("url") if ctx else "") or ""),
                     }
                     if expediente:
                         st.session_state[f"{pref}_f_expediente"] = expediente.strip()
@@ -2654,11 +2822,55 @@ def pestana_preparar_documentacion() -> None:
                             otros_datos, hacia_bloque=bloque
                         ).items():
                             st.session_state.setdefault(f"{pref}_f_{cid}", val)
+                    fl = asistente_admin.parse_fecha_limite(exigencias)
+                    if fl:
+                        st.session_state.setdefault("prep_fecha_limite", fl)
                     st.success("Exigencias extraídas. Continúa en el paso 2.")
                 except pdf_summary.PdfSummaryError as exc:
                     st.error(str(exc))
                 except Exception as exc:
                     st.error(f"Error: {exc}")
+
+        docs_pliego = list(st.session_state.get(f"{pref}_pliego_docs") or [])
+        if docs_pliego and st.button(
+            "🧩 Detectar anexos numerados (campo a campo)",
+            key=f"{pref}_btn_modelos",
+        ):
+            with st.spinner("Identificando modelos/anexos del pliego…"):
+                try:
+                    modelos = asistente_admin.extraer_modelos_estructurados(
+                        docs_pliego,
+                        bloque=bloque,
+                        expediente=(
+                            st.session_state.get(f"{pref}_expediente")
+                            or (ctx.get("expediente") if ctx else "")
+                            or ""
+                        ),
+                        titulo=(
+                            st.session_state.get(f"{pref}_titulo")
+                            or (ctx.get("titulo") if ctx else "")
+                            or ""
+                        ),
+                    )
+                    st.session_state[f"{pref}_modelos"] = modelos
+                    if modelos.get("formato"):
+                        st.session_state[f"{pref}_formato"] = {
+                            **doc_export.DEFAULT_FORMATO,
+                            **{
+                                k: v
+                                for k, v in modelos["formato"].items()
+                                if v not in (None, "")
+                            },
+                        }
+                    if modelos.get("fecha_limite_presentacion"):
+                        st.session_state["prep_fecha_limite"] = modelos[
+                            "fecha_limite_presentacion"
+                        ]
+                    n_anx = len(modelos.get("anexos") or [])
+                    n_cam = len(asistente_admin.campos_desde_modelos(modelos))
+                    st.success(f"{n_anx} anexo(s) · {n_cam} campo(s) detectados.")
+                except Exception as exc:
+                    st.error(str(exc))
 
         exigencias = st.session_state.get(f"{pref}_exigencias")
         if exigencias:
@@ -2666,22 +2878,39 @@ def pestana_preparar_documentacion() -> None:
             st.caption(
                 "Pliego en memoria: " + ", ".join(meta.get("nombres") or ["—"])
             )
+            modelos = st.session_state.get(f"{pref}_modelos") or {}
+            if modelos.get("anexos"):
+                with st.expander("Anexos/modelos detectados", expanded=True):
+                    for anx in modelos["anexos"]:
+                        st.markdown(
+                            f"**{anx.get('id')}** ({anx.get('origen')}) — "
+                            f"{anx.get('titulo') or '—'}"
+                        )
+                        for c in anx.get("campos") or []:
+                            st.caption(f"· {c.get('label')} (`{c.get('id')}`)")
             sugeridos = asistente_admin.sugerir_campos_desde_exigencias(exigencias)
             if sugeridos:
                 with st.expander("Campos sugeridos por el pliego"):
                     for s in sugeridos:
                         st.markdown(f"- {s}")
+            fmt = st.session_state.get(f"{pref}_formato") or {}
+            if fmt:
+                st.caption(
+                    "Formato detectado: "
+                    f"fuente {fmt.get('fuente')} · {fmt.get('tamano')} pt · "
+                    f"márgenes {fmt.get('margen_cm')} cm · "
+                    f"interlineado {fmt.get('interlineado')}"
+                )
             with st.expander(
                 f"Exigencias {cfg['etiqueta'].lower()} (formato, fuentes, docs)",
                 expanded=True,
             ):
                 st.markdown(exigencias)
-            st.download_button(
-                "⬇️ Descargar exigencias (.md)",
-                data=exigencias.encode("utf-8"),
-                file_name=f"exigencias_{bloque}.md",
-                mime="text/markdown",
-                key=f"{pref}_dl_exigencias",
+            _botones_export_borrador(
+                exigencias,
+                nombre_base=f"exigencias_{bloque}",
+                formato=fmt or doc_export.DEFAULT_FORMATO,
+                key_prefix=f"{pref}_exig",
             )
         else:
             st.info(
@@ -2727,6 +2956,14 @@ def pestana_preparar_documentacion() -> None:
         with st.expander("Recordatorio de exigencias", expanded=False):
             st.markdown(st.session_state[f"{pref}_exigencias"])
 
+        if st.button("👤 Aplicar perfil GREFA a huecos vacíos", key=f"{pref}_btn_perfil"):
+            perfil = grefa_perfil.load_perfil()
+            for cid, val in perfil.items():
+                clave = f"{pref}_f_{cid}"
+                if val and not str(st.session_state.get(clave) or "").strip():
+                    st.session_state[clave] = val
+            st.rerun()
+
         datos: dict[str, str] = {}
         for grupo, campos in asistente_admin.campos_por_grupo(bloque).items():
             st.markdown(f"**{grupo}**")
@@ -2739,20 +2976,105 @@ def pestana_preparar_documentacion() -> None:
                 else:
                     datos[campo["id"]] = st.text_input(campo["label"], key=clave)
 
-        if st.button(
-            "💾 Guardar datos del formulario",
-            type="primary",
-            key=f"{pref}_btn_guardar",
-        ):
-            limpios = {k: str(v or "").strip() for k, v in datos.items()}
-            st.session_state[f"{pref}_datos"] = limpios
-            st.success(
-                f"Datos guardados ({sum(1 for v in limpios.values() if v)} campos). "
-                "Pasa al paso 3."
+        # Campos dinámicos de anexos numerados
+        modelos = st.session_state.get(f"{pref}_modelos") or {}
+        campos_anx = asistente_admin.campos_desde_modelos(modelos)
+        if campos_anx:
+            st.markdown("**Campos de anexos/modelos del pliego**")
+            st.caption(
+                "Rellena cada variable del modelo oficial. Se usarán al generar el borrador."
+            )
+            grupo_actual = None
+            for campo in campos_anx:
+                if campo["grupo"] != grupo_actual:
+                    grupo_actual = campo["grupo"]
+                    st.markdown(f"**{grupo_actual}**")
+                clave = f"{pref}_f_{campo['id']}"
+                if campo["tipo"] == "area":
+                    datos[campo["id"]] = st.text_area(
+                        campo["label"], key=clave, height=80
+                    )
+                elif campo["tipo"] == "check":
+                    marcado = st.checkbox(campo["label"], key=clave)
+                    datos[campo["id"]] = "sí" if marcado else "no"
+                else:
+                    datos[campo["id"]] = st.text_input(campo["label"], key=clave)
+        else:
+            st.caption(
+                "Tip: en el paso 1 pulsa **Detectar anexos numerados** para "
+                "formulario campo a campo según el pliego."
             )
 
+        col_g, col_c = st.columns(2)
+        with col_g:
+            guardar = st.button(
+                "💾 Guardar formulario (sesión + Sheets/Drive)",
+                type="primary",
+                key=f"{pref}_btn_guardar",
+            )
+        with col_c:
+            cargar = st.button(
+                "📂 Cargar formulario guardado",
+                key=f"{pref}_btn_cargar",
+            )
+
+        if cargar:
+            exp = str(datos.get("expediente") or ctx.get("expediente") or "").strip()
+            url = str(ctx.get("url") or "")
+            if not exp:
+                st.error("Indica el ID de expediente para cargar.")
+            else:
+                cargado = asistente_store.load_bloque(
+                    expediente=exp, enlace=url, bloque=bloque
+                )
+                if not cargado:
+                    st.warning("No hay datos guardados para este expediente/bloque.")
+                else:
+                    for cid, val in (cargado.get("datos") or {}).items():
+                        st.session_state[f"{pref}_f_{cid}"] = val
+                    if cargado.get("exigencias"):
+                        st.session_state[f"{pref}_exigencias"] = cargado["exigencias"]
+                    if cargado.get("borrador"):
+                        st.session_state[f"{pref}_borrador"] = cargado["borrador"]
+                    if cargado.get("verificacion"):
+                        st.session_state[f"{pref}_verificacion"] = cargado[
+                            "verificacion"
+                        ]
+                    if cargado.get("formato"):
+                        st.session_state[f"{pref}_formato"] = cargado["formato"]
+                    st.session_state[f"{pref}_datos"] = cargado.get("datos") or {}
+                    st.success(
+                        f"Cargado ({cargado.get('actualizado') or 'sin fecha'})."
+                    )
+                    st.rerun()
+
+        if guardar:
+            limpios = {k: str(v or "").strip() for k, v in datos.items()}
+            st.session_state[f"{pref}_datos"] = limpios
+            exp = str(limpios.get("expediente") or ctx.get("expediente") or "").strip()
+            try:
+                asistente_store.save_bloque(
+                    expediente=exp or "sin-expediente",
+                    enlace=str(ctx.get("url") or ""),
+                    titulo=str(limpios.get("objeto") or ctx.get("titulo") or ""),
+                    organo=str(limpios.get("organo") or ctx.get("organo") or ""),
+                    bloque=bloque,
+                    datos=limpios,
+                    formato=st.session_state.get(f"{pref}_formato") or {},
+                    exigencias=st.session_state.get(f"{pref}_exigencias") or "",
+                    borrador=st.session_state.get(f"{pref}_borrador") or "",
+                    verificacion=st.session_state.get(f"{pref}_verificacion") or "",
+                )
+                st.success(
+                    f"Formulario guardado ({sum(1 for v in limpios.values() if v)} campos). "
+                    "Pasa al paso 3."
+                )
+            except Exception as exc:
+                st.session_state[f"{pref}_datos"] = limpios
+                st.warning(f"Guardado en sesión; nube falló: {exc}")
+
         if st.session_state.get(f"{pref}_datos"):
-            st.caption("Formulario guardado listo para generar el borrador.")
+            st.caption("Formulario listo para generar el borrador.")
         return
 
     # ── Paso 3: borrador + verificación ──
@@ -2797,7 +3119,11 @@ def pestana_preparar_documentacion() -> None:
         with st.spinner(f"Redactando borrador {cfg['etiqueta'].lower()}…"):
             try:
                 borrador = asistente_admin.generar_borrador(
-                    bloque, datos, exigencias, documentos_pliego=docs_pliego
+                    bloque,
+                    datos,
+                    exigencias,
+                    documentos_pliego=docs_pliego,
+                    modelos=st.session_state.get(f"{pref}_modelos"),
                 )
                 st.session_state[f"{pref}_borrador"] = borrador
                 st.session_state.pop(f"{pref}_verificacion", None)
@@ -2824,18 +3150,39 @@ def pestana_preparar_documentacion() -> None:
             except Exception as exc:
                 st.error(f"Error: {exc}")
 
+    fmt = st.session_state.get(f"{pref}_formato") or doc_export.DEFAULT_FORMATO
+    if st.button(
+        "☁️ Guardar borrador en Sheets/Drive",
+        key=f"{pref}_btn_persist_borrador",
+    ):
+        try:
+            asistente_store.save_bloque(
+                expediente=str(datos.get("expediente") or "sin-expediente"),
+                enlace=str(ctx.get("url") or ""),
+                titulo=str(datos.get("objeto") or ctx.get("titulo") or ""),
+                organo=str(datos.get("organo") or ctx.get("organo") or ""),
+                bloque=bloque,
+                datos=datos,
+                formato=fmt,
+                exigencias=exigencias,
+                borrador=st.session_state.get(f"{pref}_borrador") or "",
+                verificacion=st.session_state.get(f"{pref}_verificacion") or "",
+            )
+            st.success("Borrador persistido (local + Sheets/Drive si está configurado).")
+        except Exception as exc:
+            st.error(str(exc))
+
     if st.session_state.get(f"{pref}_borrador"):
         st.markdown(f"### Borrador {cfg['etiqueta'].lower()}")
         st.markdown(st.session_state[f"{pref}_borrador"])
-        st.download_button(
-            "⬇️ Descargar borrador (.md)",
-            data=st.session_state[f"{pref}_borrador"].encode("utf-8"),
-            file_name=(
+        _botones_export_borrador(
+            st.session_state[f"{pref}_borrador"],
+            nombre_base=(
                 f"borrador_{bloque}_"
-                f"{(datos.get('expediente') or 'GREFA').replace('/', '-')}.md"
+                f"{(datos.get('expediente') or 'GREFA').replace('/', '-')}"
             ),
-            mime="text/markdown",
-            key=f"{pref}_dl_borrador",
+            formato=fmt,
+            key_prefix=f"{pref}_borr",
         )
 
     if st.session_state.get(f"{pref}_verificacion"):
@@ -2849,18 +3196,315 @@ def pestana_preparar_documentacion() -> None:
             st.success("Verificación completada.")
         st.markdown("### Conformidad con el pliego")
         st.markdown(informe)
-        st.download_button(
-            "⬇️ Descargar verificación (.md)",
-            data=informe.encode("utf-8"),
-            file_name=f"verificacion_{bloque}.md",
-            mime="text/markdown",
-            key=f"{pref}_dl_verificacion",
+        _botones_export_borrador(
+            informe,
+            nombre_base=f"verificacion_{bloque}",
+            formato=fmt,
+            key_prefix=f"{pref}_verif",
         )
 
     st.caption(
         "El borrador no es un visto bueno jurídico/financiero ni sustituye los "
         "modelos oficiales del PCAP. Usa la verificación antes del fichero final."
     )
+
+
+def _ui_alertas_plazo() -> None:
+    try:
+        alertas = asistente_store.listar_alertas_plazo(dias=14)
+    except Exception:
+        alertas = []
+    if not alertas:
+        return
+    with st.expander(f"⏰ Plazos de presentación ({len(alertas)})", expanded=True):
+        for a in alertas[:12]:
+            dias = a.get("dias", 0)
+            if dias < 0:
+                st.error(
+                    f"**{a.get('expediente')}** — plazo {a.get('fecha_limite')} "
+                    f"(vencido hace {abs(dias)} d) · {a.get('estado') or '—'}"
+                )
+            elif dias == 0:
+                st.warning(
+                    f"**{a.get('expediente')}** — plazo **hoy** "
+                    f"({a.get('fecha_limite')}) · {a.get('estado') or '—'}"
+                )
+            else:
+                st.info(
+                    f"**{a.get('expediente')}** — quedan **{dias} d** "
+                    f"({a.get('fecha_limite')}) · {a.get('estado') or '—'}"
+                )
+            if st.button(
+                "Abrir preparación",
+                key=f"alerta_prep_{a.get('expediente')}_{a.get('fecha_limite')}",
+            ):
+                _abrir_preparar_docs(
+                    str(a.get("expediente") or ""),
+                    titulo=str(a.get("titulo") or ""),
+                    url=str(a.get("enlace") or ""),
+                )
+
+
+def _ui_perfil_grefa() -> None:
+    with st.expander("👤 Perfil GREFA (datos reutilizables)", expanded=False):
+        perfil = grefa_perfil.load_perfil()
+        editados: dict[str, str] = {}
+        cols = st.columns(2)
+        for i, campo in enumerate(grefa_perfil.CAMPOS_PERFIL):
+            with cols[i % 2]:
+                editados[campo["id"]] = st.text_input(
+                    campo["label"],
+                    value=perfil.get(campo["id"], ""),
+                    key=f"perfil_grefa_{campo['id']}",
+                )
+        if st.button("💾 Guardar perfil GREFA", key="perfil_grefa_save"):
+            try:
+                ruta = grefa_perfil.save_perfil(editados)
+                st.success(f"Perfil guardado ({ruta.name}).")
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def _ui_revision_humana(ctx: dict) -> None:
+    st.markdown("### Revisión humana interna")
+    st.caption(
+        "Estados y observaciones del equipo. "
+        "**No sustituye un visto bueno jurídico** externo."
+    )
+    exp = st.text_input(
+        "ID expediente",
+        value=str(ctx.get("expediente") or ""),
+        key="rev_expediente",
+    )
+    titulo = st.text_input(
+        "Título",
+        value=str(ctx.get("titulo") or ""),
+        key="rev_titulo",
+    )
+    organo = st.text_input(
+        "Órgano",
+        value=str(ctx.get("organo") or ""),
+        key="rev_organo",
+    )
+    url = str(ctx.get("url") or "")
+
+    if st.button("📂 Cargar revisión", key="rev_cargar") and exp.strip():
+        cargado = asistente_store.load_revision(expediente=exp.strip(), enlace=url)
+        if not cargado:
+            st.warning("Sin revisión guardada.")
+        else:
+            datos = cargado.get("datos") or {}
+            st.session_state["rev_estado"] = datos.get("estado") or "Borrador"
+            st.session_state["rev_obs"] = datos.get("observaciones") or ""
+            st.session_state["rev_revisor"] = datos.get("revisor") or ""
+            st.session_state["rev_fecha_limite"] = (
+                datos.get("fecha_limite_presentacion") or ""
+            )
+            st.success(f"Cargada ({cargado.get('actualizado') or '—'}).")
+            st.rerun()
+
+    st.session_state.setdefault("rev_estado", "Borrador")
+    st.session_state.setdefault(
+        "rev_fecha_limite", st.session_state.get("prep_fecha_limite") or ""
+    )
+    estado = st.selectbox(
+        "Estado de preparación",
+        list(asistente_store.ESTADOS_REVISION),
+        key="rev_estado",
+    )
+    fecha_limite = st.text_input(
+        "Fecha límite presentación (YYYY-MM-DD)",
+        key="rev_fecha_limite",
+        help="Se usa para alertas de plazo en esta pantalla.",
+    )
+    revisor = st.text_input("Revisor / responsable", key="rev_revisor")
+    observaciones = st.text_area(
+        "Observaciones internas",
+        key="rev_obs",
+        height=140,
+        placeholder="Qué falta, qué corregir, acuerdos del equipo…",
+    )
+
+    # Resumen de borradores
+    borradores = {
+        "admin": bool(st.session_state.get("prep_admin_borrador")),
+        "eco": bool(st.session_state.get("prep_eco_borrador")),
+        "tec": bool(st.session_state.get("prep_tec_borrador")),
+        "paquete": bool(st.session_state.get("prep_paquete_md")),
+    }
+    st.caption(
+        "Borradores en sesión: "
+        + " · ".join(
+            f"{k} {'✅' if v else '⬜'}" for k, v in borradores.items()
+        )
+    )
+
+    if st.button("💾 Guardar revisión", type="primary", key="rev_guardar"):
+        if not exp.strip():
+            st.error("Indica el expediente.")
+        else:
+            try:
+                asistente_store.save_revision(
+                    expediente=exp.strip(),
+                    enlace=url,
+                    titulo=titulo,
+                    organo=organo,
+                    estado=estado,
+                    observaciones=observaciones,
+                    revisor=revisor,
+                    fecha_limite=(fecha_limite or "").strip(),
+                )
+                if (fecha_limite or "").strip():
+                    st.session_state["prep_fecha_limite"] = fecha_limite.strip()
+                st.success("Revisión guardada (local + Sheets/Drive si aplica).")
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def _ui_paquete_final(ctx: dict) -> None:
+    """Une admin + económico + técnico y exporta el paquete."""
+    st.markdown("### Paquete final (Admin + Económico + Técnico)")
+    st.caption(
+        "Reúne los tres borradores en un único documento listo para revisar "
+        "y exportar a Word/PDF con el formato detectado del pliego."
+    )
+
+    exp = str(
+        ctx.get("expediente")
+        or st.session_state.get("prep_admin_f_expediente")
+        or st.session_state.get("prep_eco_f_expediente")
+        or st.session_state.get("prep_tec_f_expediente")
+        or ""
+    ).strip()
+    titulo = str(
+        ctx.get("titulo")
+        or st.session_state.get("prep_admin_f_objeto")
+        or ""
+    ).strip()
+    organo = str(ctx.get("organo") or "").strip()
+    url = str(ctx.get("url") or "").strip()
+
+    col_e, col_t = st.columns(2)
+    with col_e:
+        exp = st.text_input("ID expediente", value=exp, key="prep_paq_expediente")
+    with col_t:
+        titulo = st.text_input("Título / objeto", value=titulo, key="prep_paq_titulo")
+
+    if st.button("📂 Cargar borradores guardados", key="prep_paq_cargar"):
+        if not exp:
+            st.error("Indica el expediente.")
+        else:
+            remotos = asistente_store.load_borradores_expediente(exp, url)
+            for b, texto in remotos.items():
+                st.session_state[f"prep_{b}_borrador"] = texto
+            st.success(
+                f"Cargados: {', '.join(remotos.keys()) or 'ninguno'}."
+            )
+
+    bloques_txt = {
+        "admin": st.session_state.get("prep_admin_borrador") or "",
+        "eco": st.session_state.get("prep_eco_borrador") or "",
+        "tec": st.session_state.get("prep_tec_borrador") or "",
+    }
+    estados = [
+        f"{lab}: {'✅' if bloques_txt[k].strip() else '⬜'}"
+        for k, lab in (
+            ("admin", "Administrativo"),
+            ("eco", "Económico"),
+            ("tec", "Técnico"),
+        )
+    ]
+    st.markdown(" · ".join(estados))
+
+    if not any(v.strip() for v in bloques_txt.values()):
+        st.warning(
+            "No hay borradores en sesión. Genera cada bloque o cárgalos del expediente."
+        )
+        return
+
+    if st.button("📦 Generar paquete unificado", type="primary", key="prep_paq_gen"):
+        paquete = doc_export.construir_paquete_markdown(
+            expediente=exp,
+            titulo=titulo,
+            bloques=bloques_txt,
+        )
+        st.session_state["prep_paquete_md"] = paquete
+        # Formato: prioriza el del primer bloque con formato
+        fmt = (
+            st.session_state.get("prep_admin_formato")
+            or st.session_state.get("prep_eco_formato")
+            or st.session_state.get("prep_tec_formato")
+            or doc_export.DEFAULT_FORMATO
+        )
+        st.session_state["prep_paquete_formato"] = fmt
+        try:
+            asistente_store.save_bloque(
+                expediente=exp or "sin-expediente",
+                enlace=url,
+                titulo=titulo,
+                organo=organo,
+                bloque="paquete",
+                datos={"expediente": exp, "objeto": titulo, "organo": organo},
+                formato=fmt,
+                paquete=paquete,
+            )
+            st.success("Paquete generado y guardado.")
+        except Exception as exc:
+            st.warning(f"Paquete en sesión; persistencia: {exc}")
+
+    paquete = st.session_state.get("prep_paquete_md") or ""
+    if not paquete:
+        return
+
+    st.markdown(paquete)
+    fmt = st.session_state.get("prep_paquete_formato") or doc_export.DEFAULT_FORMATO
+    st.caption(
+        f"Formato export: {fmt.get('fuente')} {fmt.get('tamano')} pt · "
+        f"márgenes {fmt.get('margen_cm')} cm"
+    )
+    _botones_export_borrador(
+        paquete,
+        nombre_base=f"paquete_GREFA_{(exp or 'exp').replace('/', '-')}",
+        formato=fmt,
+        key_prefix="prep_paq",
+    )
+
+    # Subir también DOCX/PDF a Drive si hay Sheets
+    if sheets_store.is_configured() and st.button(
+        "☁️ Subir Word+PDF del paquete a Drive",
+        key="prep_paq_drive",
+    ):
+        try:
+            docx_b = doc_export.markdown_a_docx(
+                paquete, titulo=f"Paquete {exp}", formato=fmt
+            )
+            pdf_b = doc_export.markdown_a_pdf(
+                paquete, titulo=f"Paquete {exp}", formato=fmt
+            )
+            base = (exp or "GREFA").replace("/", "-")
+            d1 = drive_docs.upload_bytes(
+                docx_b,
+                f"{base}_paquete.docx",
+                mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                expediente=exp,
+                organo=organo,
+            )
+            d2 = drive_docs.upload_bytes(
+                pdf_b,
+                f"{base}_paquete.pdf",
+                mime_type="application/pdf",
+                expediente=exp,
+                organo=organo,
+            )
+            st.success("Subido a Drive.")
+            if d1.get("folderLink"):
+                st.markdown(f"[Abrir carpeta Drive ↗]({d1['folderLink']})")
+            if d1.get("webViewLink"):
+                st.markdown(f"[Word ↗]({d1['webViewLink']})")
+            if d2.get("webViewLink"):
+                st.markdown(f"[PDF ↗]({d2['webViewLink']})")
+        except Exception as exc:
+            st.error(str(exc))
 
 def pestana_mis_licitaciones() -> None:
     st.subheader("Mis Licitaciones")
@@ -2955,6 +3599,25 @@ def pestana_mis_licitaciones() -> None:
                 except Exception as exc:
                     st.error(str(exc))
 
+            col_prep, col_del = st.columns(2)
+            with col_prep:
+                if st.button(
+                    "📝 Preparar documentación",
+                    key=f"mis_prep_{idx}_{clave[:36]}",
+                    type="primary",
+                ):
+                    _abrir_preparar_docs(
+                        str(fila.get("expediente") or ""),
+                        titulo=str(fila.get("titulo") or ""),
+                        organo=str(fila.get("organo") or ""),
+                        url=str(fila.get("url") or ""),
+                    )
+            with col_del:
+                quitar = st.button(
+                    "🗑️ Quitar",
+                    key=f"mis_del_{idx}_{clave[:36]}",
+                )
+
             if presento or fila.get("me_presento") == "sí":
                 with st.expander("Checklist de documentación", expanded=True):
                     _widget_checklist_docs(
@@ -2974,7 +3637,7 @@ def pestana_mis_licitaciones() -> None:
                             documentos=[],
                         )
 
-            if st.button("🗑️ Quitar de Mis Licitaciones", key=f"mis_del_{idx}_{clave[:36]}"):
+            if quitar:
                 try:
                     _marcar_interes(
                         {

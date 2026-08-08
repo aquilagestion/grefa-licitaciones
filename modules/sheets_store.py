@@ -40,6 +40,7 @@ OPPORTUNITIES_SHEET = "Oportunidades"
 PLIEGOS_SHEET = "Pliegos"
 CHECKLIST_SHEET = "ChecklistDocs"
 MIS_LICITACIONES_SHEET = "MisLicitaciones"
+ASISTENTE_SHEET = "AsistenteDocs"
 README_SHEET = "Instrucciones"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
@@ -91,6 +92,20 @@ MIS_LICITACIONES_HEADERS = [
     "Me presento",
     "Fecha interés",
     "Notas",
+]
+ASISTENTE_HEADERS = [
+    "ID Expediente",
+    "Enlace",
+    "Título",
+    "Órgano",
+    "Bloque",
+    "Datos JSON",
+    "Formato JSON",
+    "Exigencias Drive",
+    "Borrador Drive",
+    "Verificación Drive",
+    "Paquete Drive",
+    "Actualizado",
 ]
 
 #: Valor inicial de la columna editable de seguimiento.
@@ -1054,6 +1069,7 @@ def _ensure_named_sheets(hoja) -> dict[str, Any]:
         (PLIEGOS_SHEET, PLIEGO_HEADERS, 500),
         (CHECKLIST_SHEET, CHECKLIST_HEADERS, 2000),
         (MIS_LICITACIONES_SHEET, MIS_LICITACIONES_HEADERS, 1000),
+        (ASISTENTE_SHEET, ASISTENTE_HEADERS, 2000),
         (README_SHEET, ["Instrucciones"], 40),
     ):
         if titulo in existentes:

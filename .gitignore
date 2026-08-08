@@ -12,6 +12,8 @@ venv/
 !data/cpv_es.csv
 *.atom
 data/cache/
+data/asistente/
+data/perfil_grefa.json
 # Histórico consultable (sí versionable si es razonable de tamaño)
 !data/historico_grefa.parquet
 !data/historico_grefa.meta.json

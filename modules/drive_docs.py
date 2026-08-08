@@ -247,3 +247,38 @@ def upload_bytes(
             "como Editor con licitacionesplacsp@licitacionesplacsp-504412.iam.gserviceaccount.com. "
             f"Detalle: {exc}"
         ) from exc
+
+
+def download_bytes(file_id: str) -> bytes:
+    """Descarga el contenido binario de un fichero de Drive por ID."""
+    if not file_id:
+        raise DriveDocsError("Falta file_id de Drive.")
+    from googleapiclient.http import MediaIoBaseDownload
+
+    service = _drive_service()
+    buf = io.BytesIO()
+    try:
+        peticion = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        downloader = MediaIoBaseDownload(buf, peticion)
+        hecho = False
+        while not hecho:
+            _status, hecho = downloader.next_chunk()
+        return buf.getvalue()
+    except Exception as exc:
+        raise DriveDocsError(f"No se pudo descargar de Drive ({file_id}): {exc}") from exc
+
+
+def file_id_desde_enlace(enlace: str) -> str:
+    """Extrae el ID de un enlace Drive (file/d/ID o open?id=)."""
+    texto = str(enlace or "").strip()
+    if not texto:
+        return ""
+    m = re.search(r"/file/d/([^/]+)", texto)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([^&]+)", texto)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[\w-]{10,}", texto):
+        return texto
+    return ""
