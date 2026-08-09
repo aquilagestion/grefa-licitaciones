@@ -96,6 +96,18 @@ CAMPOS_ADMIN: list[dict[str, Any]] = [
 CAMPOS_ECO: list[dict[str, Any]] = [
     {"id": "razon_social", "label": "Razón social / entidad", "grupo": "Identificación", "tipo": "text"},
     {"id": "nif", "label": "NIF / CIF", "grupo": "Identificación", "tipo": "text"},
+    {
+        "id": "representante_nombre",
+        "label": "Declarante / representante (nombre y apellidos)",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
+    {
+        "id": "representante_nif",
+        "label": "DNI / NIF del declarante",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
     {"id": "expediente", "label": "ID expediente", "grupo": "Identificación", "tipo": "text"},
     {
         "id": "organo",
@@ -110,6 +122,18 @@ CAMPOS_ECO: list[dict[str, Any]] = [
         "tipo": "area",
     },
     {"id": "lote", "label": "Lote(s)", "grupo": "Identificación", "tipo": "text"},
+    {
+        "id": "medio_presentacion",
+        "label": "Medio de presentación (PLACSP, sobre, etc.)",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
+    {
+        "id": "solvencia_economica",
+        "label": "Solvencia económica (cómo se acredita según pliego)",
+        "grupo": "Identificación",
+        "tipo": "area",
+    },
     {
         "id": "presupuesto_base_licitacion",
         "label": "Presupuesto base de licitación (sin IVA) según pliego",
@@ -204,6 +228,18 @@ REGLA OBLIGATORIA SOBRE ANEXOS:
 CAMPOS_TEC: list[dict[str, Any]] = [
     {"id": "razon_social", "label": "Razón social / entidad", "grupo": "Identificación", "tipo": "text"},
     {"id": "nif", "label": "NIF / CIF", "grupo": "Identificación", "tipo": "text"},
+    {
+        "id": "representante_nombre",
+        "label": "Declarante / representante (nombre y apellidos)",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
+    {
+        "id": "representante_nif",
+        "label": "DNI / NIF del declarante",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
     {"id": "expediente", "label": "ID expediente", "grupo": "Identificación", "tipo": "text"},
     {
         "id": "organo",
@@ -218,6 +254,18 @@ CAMPOS_TEC: list[dict[str, Any]] = [
         "tipo": "area",
     },
     {"id": "lote", "label": "Lote(s)", "grupo": "Identificación", "tipo": "text"},
+    {
+        "id": "medio_presentacion",
+        "label": "Medio de presentación (PLACSP, sobre, etc.)",
+        "grupo": "Identificación",
+        "tipo": "text",
+    },
+    {
+        "id": "solvencia_tecnica",
+        "label": "Solvencia técnica (cómo se acredita según pliego)",
+        "grupo": "Identificación",
+        "tipo": "area",
+    },
     {
         "id": "anexos_modelo_ppt",
         "label": "Anexos/modelos del PPT a rellenar (números y títulos)",
@@ -936,26 +984,317 @@ def serializar_datos(datos: dict[str, str]) -> str:
     return json.dumps(datos, ensure_ascii=False, indent=2)
 
 
+# Campos que se rellenan una vez y se reutilizan en bloques/anexos.
+CAMPOS_COMUNES_IDS: tuple[str, ...] = (
+    "razon_social",
+    "nif",
+    "domicilio_social",
+    "domicilio_notificaciones",
+    "email",
+    "telefono",
+    "representante_nombre",
+    "representante_nif",
+    "representante_cargo",
+    "poderes_resumen",
+    "expediente",
+    "organo",
+    "objeto",
+    "lote",
+    "clasificacion",
+    "solvencia_economica",
+    "solvencia_tecnica",
+    "medio_presentacion",
+    "presupuesto_base_licitacion",
+    "presupuesto_base_iva",
+    "valor_estimado",
+    "moneda_unidad",
+)
+
+# Alias de etiquetas (minúsculas) → id común, para anexos dinámicos.
+_ALIAS_COMUNES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "razon_social",
+        (
+            "razon social",
+            "razón social",
+            "denominacion",
+            "denominación",
+            "licitador",
+            "entidad licitadora",
+            "nombre de la empresa",
+            "operador economico",
+            "operador económico",
+        ),
+    ),
+    (
+        "nif",
+        (
+            "nif",
+            "cif",
+            "n.i.f",
+            "c.i.f",
+            "identificacion fiscal",
+            "identificación fiscal",
+            "nif/cif",
+            "nif / cif",
+        ),
+    ),
+    (
+        "representante_nombre",
+        (
+            "declarante",
+            "nombre del declarante",
+            "representante",
+            "nombre y apellidos",
+            "apoderado",
+            "firmante",
+            "persona que firma",
+        ),
+    ),
+    (
+        "representante_nif",
+        (
+            "dni",
+            "nif del representante",
+            "nif representante",
+            "dni del representante",
+            "documento nacional de identidad",
+            "documento de identidad",
+        ),
+    ),
+    (
+        "representante_cargo",
+        ("cargo", "poder de representacion", "poder de representación", "en calidad de"),
+    ),
+    ("domicilio_social", ("domicilio social", "domicilio de la entidad", "sede social")),
+    (
+        "domicilio_notificaciones",
+        (
+            "domicilio a efectos de notificaciones",
+            "domicilio notificaciones",
+            "domicilio de notificaciones",
+        ),
+    ),
+    ("email", ("email", "correo", "e-mail", "correo electronico", "correo electrónico")),
+    ("telefono", ("telefono", "teléfono", "tfno", "móvil", "movil")),
+    (
+        "expediente",
+        (
+            "expediente",
+            "nº de expediente",
+            "nº expediente",
+            "numero de expediente",
+            "número de expediente",
+            "id expediente",
+            "código del expediente",
+        ),
+    ),
+    ("organo", ("organo de contratacion", "órgano de contratación", "entidad adjudicadora")),
+    (
+        "objeto",
+        (
+            "objeto del contrato",
+            "titulo del contrato",
+            "título del contrato",
+            "objeto del procedimiento",
+        ),
+    ),
+    ("lote", ("lote", "lotes")),
+    (
+        "solvencia_economica",
+        (
+            "solvencia economica",
+            "solvencia económica",
+            "acreditar la solvencia economica",
+            "acreditar la solvencia económica",
+            "medios de solvencia economica",
+        ),
+    ),
+    (
+        "solvencia_tecnica",
+        (
+            "solvencia tecnica",
+            "solvencia técnica",
+            "solvencia tecnico profesional",
+            "solvencia técnico-profesional",
+        ),
+    ),
+    (
+        "medio_presentacion",
+        (
+            "medio de presentacion",
+            "medio de presentación",
+            "forma de presentacion",
+            "forma de presentación",
+            "presentacion de ofertas",
+            "presentación de ofertas",
+            "presentacion electronica",
+            "presentación electrónica",
+        ),
+    ),
+    ("clasificacion", ("clasificacion", "clasificación empresarial", "clasificacion empresarial")),
+]
+
+
+def _normalizar_etiqueta(texto: str) -> str:
+    t = (texto or "").casefold()
+    t = re.sub(r"\[.*?\]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def id_comun_para_etiqueta(etiqueta: str) -> str | None:
+    """Devuelve el id común si la etiqueta de un anexo/campo encaja."""
+    baja = _normalizar_etiqueta(etiqueta)
+    if not baja:
+        return None
+    mejor: str | None = None
+    mejor_len = 0
+    for cid, alias in _ALIAS_COMUNES:
+        for a in alias:
+            # Evitar falsos positivos con alias muy cortos («lote», «cargo»…)
+            if len(a) <= 4:
+                if baja != a and not re.search(rf"\b{re.escape(a)}\b", baja):
+                    continue
+            elif a not in baja and baja != a:
+                continue
+            if len(a) > mejor_len:
+                mejor = cid
+                mejor_len = len(a)
+    return mejor
+
+
 def copiar_datos_compartidos(
     origen: dict[str, str],
     *,
     hacia_bloque: str,
 ) -> dict[str, str]:
-    """Copia campos comunes (NIF, expediente…) hacia otro bloque."""
+    """Copia campos comunes (NIF, expediente, solvencia…) hacia otro bloque."""
     cfg = config_bloque(hacia_bloque)
     ids = {c["id"] for c in cfg["campos"]}
-    comunes = (
-        "razon_social",
-        "nif",
+    salida: dict[str, str] = {}
+    for cid in CAMPOS_COMUNES_IDS:
+        if cid in ids and origen.get(cid):
+            salida[cid] = str(origen[cid]).strip()
+    return salida
+
+
+def propagar_datos_comunes(
+    datos: dict[str, str],
+    campos_destino: list[dict[str, Any]],
+    *,
+    solo_vacios: bool = True,
+) -> dict[str, str]:
+    """Rellena campos (incl. anexos anx_*) con valores comunes según la etiqueta.
+
+    Ejemplo: si ``razon_social`` está relleno, todos los anexos que piden
+    «Razón social» / «Licitador» reciben el mismo valor.
+    """
+    fuente = {k: str(v or "").strip() for k, v in (datos or {}).items() if str(v or "").strip()}
+    salida: dict[str, str] = {}
+    for campo in campos_destino or []:
+        cid = str(campo.get("id") or "")
+        if not cid:
+            continue
+        actual = str((datos or {}).get(cid) or "").strip()
+        if solo_vacios and actual:
+            continue
+        # 1) Mismo id común
+        if cid in CAMPOS_COMUNES_IDS and fuente.get(cid):
+            salida[cid] = fuente[cid]
+            continue
+        # 2) Anexo / etiqueta → id común
+        comun = id_comun_para_etiqueta(str(campo.get("label") or ""))
+        if comun and fuente.get(comun):
+            salida[cid] = fuente[comun]
+    return salida
+
+
+PROMPT_DATOS_PLIEGO = """Eres experto en contratación pública española (PCAP / PPT).
+Extrae del pliego los datos objetivos de la licitación para rellenar un formulario GREFA.
+
+Responde SOLO con JSON válido (sin markdown):
+{
+  "expediente": "",
+  "organo": "",
+  "objeto": "",
+  "lote": "",
+  "solvencia_economica": "",
+  "solvencia_tecnica": "",
+  "medio_presentacion": "",
+  "clasificacion": "",
+  "presupuesto_base_licitacion": "",
+  "presupuesto_base_iva": "",
+  "valor_estimado": "",
+  "moneda_unidad": "EUR",
+  "fecha_limite_presentacion": "YYYY-MM-DD o vacío"
+}
+
+Reglas:
+- Usa el texto literal del pliego cuando conste (sobre todo objeto y expediente).
+- solvencia_economica / solvencia_tecnica: resume CÓMO se acreditan según el PCAP
+  (ratios, volumen de negocios, experiencia…), no inventes cifras de GREFA.
+- medio_presentacion: p. ej. electrónica PLACSP, sobre electrónico, plataforma externa…
+- Si un dato no consta, deja un string vacío "".
+- No incluyas datos del licitador (NIF GREFA, representante…): eso lo aporta el usuario.
+"""
+
+
+def extraer_datos_formulario_pliego(
+    documentos_pliego: list[dict[str, Any]],
+    *,
+    bloque: str = "admin",
+    expediente: str = "",
+    titulo: str = "",
+) -> dict[str, str]:
+    """Obtiene expediente, objeto, solvencia, medio de presentación, etc. del pliego."""
+    utiles = _docs_pliego(documentos_pliego)
+    cfg = config_bloque(bloque)
+    contexto = (
+        f"Expediente conocido (pista): {expediente or '—'}\n"
+        f"Título conocido (pista): {titulo or '—'}\n"
+        f"Bloque: {cfg['etiqueta']}"
+    )
+    try:
+        texto = pdf_summary._generar_con_gemini(
+            pdf_summary._partes_gemini_pdfs(utiles, max_docs=4),
+            contexto=contexto,
+            prompt_base=PROMPT_DATOS_PLIEGO,
+        )
+    except pdf_summary.PdfSummaryError:
+        extracto = pdf_summary._texto_desde_pdfs(utiles)
+        if len(extracto.strip()) < 200:
+            raise
+        texto = pdf_summary._generar_con_gemini(
+            [f"Extracto pliego:\n---\n{extracto}\n---"],
+            contexto=contexto,
+            prompt_base=PROMPT_DATOS_PLIEGO,
+        )
+    data = _parse_json_respuesta(texto)
+    salida: dict[str, str] = {}
+    for clave in (
         "expediente",
         "organo",
         "objeto",
         "lote",
-    )
-    salida: dict[str, str] = {}
-    for cid in comunes:
-        if cid in ids and origen.get(cid):
-            salida[cid] = str(origen[cid]).strip()
+        "solvencia_economica",
+        "solvencia_tecnica",
+        "medio_presentacion",
+        "clasificacion",
+        "presupuesto_base_licitacion",
+        "presupuesto_base_iva",
+        "valor_estimado",
+        "moneda_unidad",
+        "fecha_limite_presentacion",
+    ):
+        valor = str(data.get(clave) or "").strip()
+        if valor:
+            salida[clave] = valor[:4000]
+    # Preferir expediente/título ya conocidos si el modelo no los trajo
+    if expediente and not salida.get("expediente"):
+        salida["expediente"] = expediente.strip()
+    if titulo and not salida.get("objeto"):
+        salida["objeto"] = titulo.strip()[:2000]
     return salida
 
 

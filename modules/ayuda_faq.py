@@ -210,7 +210,29 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "respuesta": (
             "En el paso 1, tras extraer exigencias, pulsa "
             "**Detectar anexos numerados**. En el formulario aparecerán los campos "
-            "de cada Anexo I, II… del pliego."
+            "de cada Anexo I, II… del pliego. Los datos comunes (razón social, DNI…) "
+            "se propagan solos a esos campos si ya los rellenaste."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
+        "pregunta": "¿Se rellenan solos el objeto, expediente, solvencia…?",
+        "respuesta": (
+            "Sí. Al **Extraer exigencias** (o con **Rellenar desde pliego** en el paso 2) "
+            "la IA lee el PCAP/PPT y completa objeto del contrato, nº de expediente, "
+            "forma de acreditar la solvencia económica/técnica, medio de presentación, "
+            "órgano, presupuestos de referencia, etc. Solo rellena huecos vacíos."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
+        "pregunta": "¿Tengo que repetir razón social, DNI y declarante en cada anexo?",
+        "respuesta": (
+            "No. Rellénalos **una sola vez** (formulario o perfil GREFA). "
+            "Usa **Propagar comunes → anexos** (o al detectar anexos / aplicar perfil) "
+            "y se copian a todos los campos equivalentes de los anexos del pliego. "
+            "También se reutilizan entre bloques administrativo, económico y técnico "
+            "con **Datos desde…**."
         ),
     },
     {
@@ -218,7 +240,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Para qué sirve el perfil GREFA?",
         "respuesta": (
             "Guarda NIF, representante, poderes, etc. "
-            "Con **Aplicar perfil GREFA** rellena los huecos vacíos del formulario."
+            "Con **Aplicar perfil GREFA** rellena los huecos vacíos del formulario "
+            "y los propaga a los anexos equivalentes."
         ),
     },
     {

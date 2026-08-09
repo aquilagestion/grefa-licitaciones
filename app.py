@@ -3007,6 +3007,94 @@ def _docs_por_campo(pref: str) -> dict[str, dict]:
     return bruto
 
 
+def _aplicar_valores_formulario(
+    pref: str,
+    valores: dict[str, str],
+    *,
+    solo_vacios: bool = True,
+) -> int:
+    """Escribe valores en ``{pref}_f_{id}``. Devuelve cuántos campos tocó."""
+    n = 0
+    for cid, val in (valores or {}).items():
+        texto = str(val or "").strip()
+        if not texto:
+            continue
+        clave = f"{pref}_f_{cid}"
+        if solo_vacios and str(st.session_state.get(clave) or "").strip():
+            continue
+        st.session_state[clave] = texto
+        n += 1
+    return n
+
+
+def _campos_formulario_actual(pref: str, bloque: str) -> list[dict]:
+    campos = list(asistente_admin.config_bloque(bloque).get("campos") or [])
+    campos.extend(
+        asistente_admin.campos_desde_modelos(
+            st.session_state.get(f"{pref}_modelos") or {}
+        )
+    )
+    return campos
+
+
+def _recoger_datos_formulario_sesion(pref: str, bloque: str) -> dict[str, str]:
+    datos: dict[str, str] = {}
+    for campo in _campos_formulario_actual(pref, bloque):
+        cid = str(campo.get("id") or "")
+        if cid:
+            datos[cid] = str(st.session_state.get(f"{pref}_f_{cid}") or "").strip()
+    return datos
+
+
+def _sincronizar_datos_comunes(datos: dict[str, str]) -> dict[str, str]:
+    """Actualiza el almacén global de campos comunes (una sola vez → todos)."""
+    comunes = st.session_state.setdefault("prep_datos_comunes", {})
+    if not isinstance(comunes, dict):
+        comunes = {}
+        st.session_state["prep_datos_comunes"] = comunes
+    for cid in asistente_admin.CAMPOS_COMUNES_IDS:
+        v = str((datos or {}).get(cid) or "").strip()
+        if v:
+            comunes[cid] = v
+    return comunes
+
+
+def _propagar_comunes_en_formulario(pref: str, bloque: str) -> int:
+    """Rellena huecos (bloques + anexos) con datos comunes ya conocidos."""
+    datos = _recoger_datos_formulario_sesion(pref, bloque)
+    comunes = _sincronizar_datos_comunes(datos)
+    fuente = {**comunes, **{k: v for k, v in datos.items() if v}}
+    aplicados = asistente_admin.propagar_datos_comunes(
+        fuente, _campos_formulario_actual(pref, bloque), solo_vacios=True
+    )
+    return _aplicar_valores_formulario(pref, aplicados, solo_vacios=True)
+
+
+def _rellenar_formulario_desde_pliego(
+    *,
+    bloque: str,
+    pref: str,
+    docs: list[dict],
+    expediente: str = "",
+    titulo: str = "",
+) -> dict[str, str]:
+    """Extrae del pliego expediente, objeto, solvencia, medio de presentación…"""
+    extraidos = asistente_admin.extraer_datos_formulario_pliego(
+        docs,
+        bloque=bloque,
+        expediente=expediente,
+        titulo=titulo,
+    )
+    st.session_state[f"{pref}_datos_pliego"] = dict(extraidos)
+    fl = str(extraidos.pop("fecha_limite_presentacion", "") or "").strip()
+    if fl:
+        st.session_state.setdefault("prep_fecha_limite", fl)
+    _aplicar_valores_formulario(pref, extraidos, solo_vacios=True)
+    _sincronizar_datos_comunes(extraidos)
+    _propagar_comunes_en_formulario(pref, bloque)
+    return extraidos
+
+
 def _sincronizar_docs_apoyo_desde_campos(pref: str) -> list[dict]:
     """Lista plana de docs por campo (compatible con persistencia / borrador)."""
     docs = []
@@ -3514,18 +3602,59 @@ def pestana_preparar_documentacion() -> None:
                             otros_datos, hacia_bloque=bloque
                         ).items():
                             st.session_state.setdefault(f"{pref}_f_{cid}", val)
+                    # Datos del pliego → formulario (objeto, expediente, solvencia…)
+                    try:
+                        from_pliego = _rellenar_formulario_desde_pliego(
+                            bloque=bloque,
+                            pref=pref,
+                            docs=docs,
+                            expediente=(expediente or "").strip(),
+                            titulo=(titulo or "").strip(),
+                        )
+                        n_pliego = len(from_pliego)
+                    except Exception as exc_pliego:
+                        from_pliego = {}
+                        n_pliego = 0
+                        st.caption(
+                            f"Exigencias OK; no se pudieron auto-rellenar datos del pliego: {exc_pliego}"
+                        )
                     fl = asistente_admin.parse_fecha_limite(exigencias)
                     if fl:
                         st.session_state.setdefault("prep_fecha_limite", fl)
-                    st.success("Exigencias extraídas. Continúa en el paso 2.")
+                    msg_ok = "Exigencias extraídas. Continúa en el paso 2."
+                    if n_pliego:
+                        msg_ok += (
+                            f" Se rellenaron {n_pliego} dato(s) del pliego "
+                            "(expediente, objeto, solvencia, medio de presentación…)."
+                        )
+                    st.success(msg_ok)
                     try:
                         _persistir_sesion_preparar(
                             bloque=bloque,
                             pref=pref,
                             ctx=st.session_state.get("prep_contexto") or ctx,
                             datos={
-                                "expediente": (expediente or "").strip(),
-                                "objeto": (titulo or "").strip(),
+                                "expediente": str(
+                                    st.session_state.get(f"{pref}_f_expediente")
+                                    or expediente
+                                    or ""
+                                ).strip(),
+                                "objeto": str(
+                                    st.session_state.get(f"{pref}_f_objeto")
+                                    or titulo
+                                    or ""
+                                ).strip(),
+                                **{
+                                    k: v
+                                    for k, v in (from_pliego or {}).items()
+                                    if k
+                                    in (
+                                        "organo",
+                                        "medio_presentacion",
+                                        "solvencia_economica",
+                                        "solvencia_tecnica",
+                                    )
+                                },
                             },
                             etiqueta_ok="Exigencias guardadas en borrador recuperable.",
                         )
@@ -3573,7 +3702,14 @@ def pestana_preparar_documentacion() -> None:
                         ]
                     n_anx = len(modelos.get("anexos") or [])
                     n_cam = len(asistente_admin.campos_desde_modelos(modelos))
-                    st.success(f"{n_anx} anexo(s) · {n_cam} campo(s) detectados.")
+                    n_prop = _propagar_comunes_en_formulario(pref, bloque)
+                    msg = f"{n_anx} anexo(s) · {n_cam} campo(s) detectados."
+                    if n_prop:
+                        msg += (
+                            f" Se propagaron {n_prop} dato(s) comunes "
+                            "(razón social, DNI, expediente…) a los anexos."
+                        )
+                    st.success(msg)
                 except Exception as exc:
                     st.error(str(exc))
 
@@ -3639,6 +3775,19 @@ def pestana_preparar_documentacion() -> None:
             "En cada archivo puedes **Comprobar conformidad**. "
             "Lo vacío se marcará `[COMPLETAR: …]` en el borrador."
         )
+        st.info(
+            "**Datos del pliego** (objeto, expediente, solvencia, medio de presentación…) "
+            "se rellenan al extraer exigencias. "
+            "**Datos comunes** (razón social, DNI/declarante, NIF…) se escriben una vez "
+            "y se propagan a todos los anexos equivalentes."
+        )
+
+        # Prefill huecos desde almacén global + propagación a anexos
+        for cid, val in (st.session_state.get("prep_datos_comunes") or {}).items():
+            if val:
+                st.session_state.setdefault(f"{pref}_f_{cid}", val)
+        _propagar_comunes_en_formulario(pref, bloque)
+
         fuentes = [
             b
             for b in asistente_admin.fuentes_copia_datos(bloque)
@@ -3662,18 +3811,75 @@ def pestana_preparar_documentacion() -> None:
                             hacia_bloque=bloque,
                         ).items():
                             st.session_state[f"{pref}_f_{cid}"] = val
+                        _sincronizar_datos_comunes(
+                            st.session_state[f"prep_{origen}_datos"]
+                        )
+                        _propagar_comunes_en_formulario(pref, bloque)
                         st.rerun()
 
         with st.expander("Recordatorio de exigencias", expanded=False):
             st.markdown(st.session_state[f"{pref}_exigencias"])
 
-        if st.button("👤 Aplicar perfil GREFA a huecos vacíos", key=f"{pref}_btn_perfil"):
-            perfil = grefa_perfil.load_perfil()
-            for cid, val in perfil.items():
-                clave = f"{pref}_f_{cid}"
-                if val and not str(st.session_state.get(clave) or "").strip():
-                    st.session_state[clave] = val
-            st.rerun()
+        col_pl, col_pr, col_pf = st.columns(3)
+        with col_pl:
+            if st.button(
+                "📑 Rellenar desde pliego",
+                key=f"{pref}_btn_rellenar_pliego",
+                help="Objeto, expediente, solvencia, medio de presentación… desde PCAP/PPT",
+                disabled=not st.session_state.get(f"{pref}_pliego_docs"),
+            ):
+                meta = st.session_state.get(f"{pref}_pliego_meta") or {}
+                try:
+                    with st.spinner("Leyendo datos del pliego…"):
+                        filled = _rellenar_formulario_desde_pliego(
+                            bloque=bloque,
+                            pref=pref,
+                            docs=list(st.session_state.get(f"{pref}_pliego_docs") or []),
+                            expediente=str(
+                                meta.get("expediente")
+                                or st.session_state.get(f"{pref}_f_expediente")
+                                or ""
+                            ),
+                            titulo=str(
+                                meta.get("titulo")
+                                or st.session_state.get(f"{pref}_f_objeto")
+                                or ""
+                            ),
+                        )
+                    st.success(
+                        f"Rellenados {len(filled)} campo(s) desde el pliego "
+                        "(solo huecos vacíos)."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+        with col_pr:
+            if st.button(
+                "🔗 Propagar comunes → anexos",
+                key=f"{pref}_btn_propagar",
+                help="Copia razón social, DNI, expediente… a campos equivalentes de anexos",
+            ):
+                n = _propagar_comunes_en_formulario(pref, bloque)
+                st.success(
+                    f"Propagados {n} campo(s)."
+                    if n
+                    else "Nada nuevo que propagar (ya estaban rellenos o faltan datos)."
+                )
+                if n:
+                    st.rerun()
+        with col_pf:
+            if st.button(
+                "👤 Aplicar perfil GREFA",
+                key=f"{pref}_btn_perfil",
+            ):
+                perfil = grefa_perfil.load_perfil()
+                for cid, val in perfil.items():
+                    clave = f"{pref}_f_{cid}"
+                    if val and not str(st.session_state.get(clave) or "").strip():
+                        st.session_state[clave] = val
+                _sincronizar_datos_comunes(perfil)
+                _propagar_comunes_en_formulario(pref, bloque)
+                st.rerun()
 
         datos: dict[str, str] = {}
         for grupo, campos in asistente_admin.campos_por_grupo(bloque).items():
@@ -3692,8 +3898,9 @@ def pestana_preparar_documentacion() -> None:
         if campos_anx:
             st.markdown("**Campos de anexos/modelos del pliego**")
             st.caption(
-                "Cada anexo/variable puede rellenarse a mano o con un archivo propio "
-                "(y su comprobación de conformidad)."
+                "Los campos comunes (declarante, DNI, razón social, expediente…) "
+                "se rellenan solos si ya constan arriba. "
+                "Si no, rellénalos una vez y pulsa **Propagar comunes → anexos**."
             )
             grupo_actual = None
             for campo in campos_anx:
@@ -3756,6 +3963,17 @@ def pestana_preparar_documentacion() -> None:
 
         if guardar:
             limpios = {k: str(v or "").strip() for k, v in datos.items()}
+            _sincronizar_datos_comunes(limpios)
+            n_prop = _propagar_comunes_en_formulario(pref, bloque)
+            if n_prop:
+                # Incorporar lo propagado al payload guardado
+                for campo in _campos_formulario_actual(pref, bloque):
+                    cid = str(campo.get("id") or "")
+                    if not cid:
+                        continue
+                    v = str(st.session_state.get(f"{pref}_f_{cid}") or "").strip()
+                    if v and not limpios.get(cid):
+                        limpios[cid] = v
             hay_texto = any(v for k, v in limpios.items() if not str(k).startswith("_"))
             if not hay_texto and not docs_apoyo:
                 st.error(
@@ -3783,6 +4001,11 @@ def pestana_preparar_documentacion() -> None:
                         etiqueta_ok=(
                             "Formulario guardado en borrador recuperable "
                             "(sesión actualizada)."
+                            + (
+                                f" Propagados {n_prop} campo(s) comunes a anexos."
+                                if n_prop
+                                else ""
+                            )
                         ),
                     )
                 except Exception as exc:
