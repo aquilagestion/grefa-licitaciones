@@ -5,18 +5,19 @@ from __future__ import annotations
 GUIA_RAPIDA = """
 ### Flujo recomendado
 
+**Licitaciones (PLACSP)**  
 1. **Oportunidades / Buscador** — filtra y revisa expedientes.  
-2. **⭐ A Mis Licitaciones** — guarda las que te interesen (también desde el buscador).  
-3. **Análisis de pliegos** — resume PCAP/PPT (PDF, Word o Excel); **Guardar** solo si quieres conservarlo.  
-4. **Preparar documentación** — Admin → Económico → Técnico:  
-   - Paso 1: pliego y exigencias (se autoguarda sesión).  
-   - Paso 2: texto **y/o** hasta 4 docs + **Comprobar documento** por campo.  
-   - Paso 3: borrador y verificación.  
-   - Usa **Guardar sesión** / **Recuperar último borrador** en cualquier momento.  
-5. **Comprobador** — lotes de hasta 4 docs; al final **Analizar al completo**.  
-6. **Revisión humana** — estados y observaciones internas (no es VB jurídico).  
-7. **Paquete final** — une los tres bloques y exporta Word/PDF.  
-8. **Presentar** en PLACSP y marca *Presentada*.
+2. **⭐ A Mis Licitaciones** — guarda las que te interesen.  
+3. **Preparar documentación** — en **cada campo** del formulario puedes escribir **o** subir un archivo (📎 Anexo V, DNI, escrituras…) y **Comprobar conformidad**.  
+4. **Guardar sesión** — borrador recuperable en cualquier momento.  
+5. **Comprobador** — lotes de docs + **Analizar al completo**.  
+6. **Presentar** en PLACSP y marca *Presentada*.
+
+**Ayudas y premios (BDNS)**  
+1. Entra al modo **Ayudas y premios** desde el hub.  
+2. Actualiza datos BDNS y revisa **Oportunidades GREFA**.  
+3. Guarda con **⭐ A Mis Convocatorias** y envía a Sheets.  
+4. Gestiona el estado en **Seguimiento**.
 """
 
 SECCIONES_FAQ: list[dict[str, str]] = [
@@ -24,9 +25,20 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "categoria": "Primeros pasos",
         "pregunta": "¿Por dónde empiezo?",
         "respuesta": (
-            "Actualiza el feed en la barra lateral, ve a **Oportunidades GREFA**, "
-            "ajusta CPV/términos y pulsa Buscar. Usa **⭐ A Mis Licitaciones** "
-            "o **📝 Preparar docs** en cada resultado."
+            "Al entrar elige **Licitaciones** o **Ayudas y premios**. "
+            "En licitaciones: actualiza el feed, ve a **Oportunidades GREFA**, "
+            "ajusta CPV/términos y usa **⭐ A Mis Licitaciones**. "
+            "En ayudas: actualiza BDNS y guarda en **Mis Convocatorias**."
+        ),
+    },
+    {
+        "categoria": "Primeros pasos",
+        "pregunta": "¿Qué diferencia hay entre Licitaciones y Ayudas/premios?",
+        "respuesta": (
+            "**Licitaciones** vienen de la PLACSP (contratos públicos). "
+            "**Ayudas y premios** vienen de la BDNS (infosubvenciones.es): "
+            "subvenciones, premios y otras ayudas públicas. "
+            "Los premios privados de fundaciones que no publican en BDNS no aparecen."
         ),
     },
     {
@@ -34,8 +46,26 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Necesito Google Sheets / Gemini?",
         "respuesta": (
             "Para buscar en el feed y el Parquet histórico local, no. "
-            "Para sync, Mis Licitaciones, checklist, Drive, resúmenes IA, "
+            "Para sync, Mis Licitaciones/Convocatorias, checklist, Drive, resúmenes IA, "
             "preparación y comprobador sí hacen falta Secrets de Sheets y `[gemini] api_key`."
+        ),
+    },
+    {
+        "categoria": "Ayudas y premios",
+        "pregunta": "¿De dónde salen las convocatorias de ayudas?",
+        "respuesta": (
+            "De la API pública de la **BDNS** (Base de Datos Nacional de Subvenciones). "
+            "Se buscan términos GREFA (biodiversidad, fauna, etc.) y se enriquecen "
+            "con el detalle oficial (presupuesto, fechas, documentos)."
+        ),
+    },
+    {
+        "categoria": "Ayudas y premios",
+        "pregunta": "¿Cómo se puntúa una ayuda o premio?",
+        "respuesta": (
+            "Con el mismo catálogo de términos GREFA que las licitaciones, pero **sin CPV** "
+            "(las subvenciones no usan códigos CPV). Las palabras clave pesan hasta el 100 % "
+            "del Índice de Relevancia."
         ),
     },
     {
@@ -117,20 +147,20 @@ SECCIONES_FAQ: list[dict[str, str]] = [
     },
     {
         "categoria": "Preparar documentación",
-        "pregunta": "¿Puedo subir documentos en el formulario en lugar de escribir?",
+        "pregunta": "¿Puedo subir un archivo en un campo (Anexo V, DNI, escrituras…)?",
         "respuesta": (
-            "Sí. En el paso 2 puedes rellenar campos de texto **y/o** subir hasta "
-            "**4 archivos** (PDF, Word .docx o Excel .xlsx). "
-            "Asigna cada archivo a un **campo** del formulario."
+            "Sí. En **cada campo** del formulario (incluidos anexos) hay un desplegable "
+            "**📎 Archivo para este campo**. Puedes escribir texto **o** subir un "
+            "PDF / Word / Excel (p. ej. DNI, escrituras, Anexo V relleno)."
         ),
     },
     {
         "categoria": "Preparar documentación",
-        "pregunta": "¿Cómo compruebo que un documento subido vale para su campo?",
+        "pregunta": "¿Cómo compruebo que el archivo de un campo es válido?",
         "respuesta": (
-            "Tras subir el archivo, elige el **campo** al que corresponde y pulsa "
-            "**🔎 Comprobar documento**. La IA indica si es ✅ válido, ⚠️ con reservas "
-            "o ❌ no corresponde, frente a ese campo y al pliego (PCAP/PPT)."
+            "Dentro del desplegable 📎 del propio campo, pulsa "
+            "**🔎 Comprobar conformidad**. La IA indica si es ✅ válido, ⚠️ con reservas "
+            "o ❌ no corresponde a **ese** campo frente al pliego."
         ),
     },
     {

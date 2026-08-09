@@ -639,7 +639,9 @@ def extraer_exigencias(
         )
 
 
-MAX_DOCS_APOYO = 4
+#: Máx. documentos con binario enviados a Gemini al generar borrador
+#: (el resto entra como extracto de texto en el contexto).
+MAX_DOCS_APOYO = 8
 
 PROMPT_DOC_CAMPO = """Eres un revisor de documentación de oferta para licitaciones públicas
 españolas (PLACSP), trabajando para GREFA.

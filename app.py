@@ -71,7 +71,7 @@ from modules.ingestion import (  # noqa: E402
 )
 
 st.set_page_config(
-    page_title="GREFA · Licitaciones PLACSP",
+    page_title="GREFA · Oportunidades",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -396,6 +396,7 @@ def init_state() -> None:
         "hist_filtros_aplicados": None,
         "nav_principal": NAV_OPCIONES[0],
         "pliego_consulta_aplicada": "",
+        "modo_app": None,
     }
     for clave, valor in valores_iniciales.items():
         st.session_state.setdefault(clave, valor)
@@ -2963,6 +2964,166 @@ def _botones_export_borrador(
             st.caption(f"PDF: {exc}")
 
 
+def _docs_por_campo(pref: str) -> dict[str, dict]:
+    """Mapa campo_id → documento aportado (con bytes si están)."""
+    bruto = st.session_state.setdefault(f"{pref}_docs_por_campo", {})
+    if not isinstance(bruto, dict):
+        bruto = {}
+        st.session_state[f"{pref}_docs_por_campo"] = bruto
+    return bruto
+
+
+def _sincronizar_docs_apoyo_desde_campos(pref: str) -> list[dict]:
+    """Lista plana de docs por campo (compatible con persistencia / borrador)."""
+    docs = []
+    for cid, doc in _docs_por_campo(pref).items():
+        if not isinstance(doc, dict) or not doc.get("bytes"):
+            # permitir meta sin bytes si hay local_path/drive
+            if not isinstance(doc, dict):
+                continue
+            if not (doc.get("local_path") or doc.get("drive") or doc.get("bytes")):
+                continue
+        item = dict(doc)
+        item["campo_id"] = str(cid)
+        item.setdefault("campo_label", str(doc.get("campo_label") or cid))
+        item.setdefault("tipo", "APOYO")
+        docs.append(item)
+    st.session_state[f"{pref}_docs_apoyo"] = docs
+    return docs
+
+
+def _render_campo_con_archivo(
+    *,
+    bloque: str,
+    pref: str,
+    campo: dict,
+    tipos_doc: list[str],
+) -> str:
+    """Campo de texto/área/check + subir archivo + comprobar conformidad."""
+    cid = str(campo["id"])
+    label = str(campo["label"])
+    clave = f"{pref}_f_{cid}"
+    tipo = str(campo.get("tipo") or "text")
+
+    if tipo == "area":
+        valor = st.text_area(label, key=clave, height=80)
+    elif tipo == "check":
+        marcado = st.checkbox(label, key=clave)
+        valor = "sí" if marcado else "no"
+    else:
+        valor = st.text_input(label, key=clave)
+
+    por_campo = _docs_por_campo(pref)
+    doc_actual = por_campo.get(cid) if isinstance(por_campo.get(cid), dict) else None
+
+    with st.expander(
+        f"📎 Archivo para este campo"
+        + (
+            f" · {doc_actual.get('nombre')}"
+            if doc_actual and doc_actual.get("nombre")
+            else " (opcional: DNI, escrituras, anexo…)"
+        ),
+        expanded=bool(doc_actual and doc_actual.get("nombre")),
+    ):
+        st.caption(
+            "En lugar de (o además de) escribir arriba, sube un PDF / Word / Excel "
+            "que corresponda a este campo y comprueba su conformidad."
+        )
+        up = st.file_uploader(
+            "Subir archivo",
+            type=tipos_doc,
+            accept_multiple_files=False,
+            key=f"{pref}_up_campo_{cid}",
+            label_visibility="collapsed",
+        )
+        if up is not None:
+            nombre = Path(getattr(up, "name", "") or "documento.pdf").name
+            prev = doc_actual or {}
+            por_campo[cid] = {
+                "nombre": nombre,
+                "tipo": "APOYO",
+                "bytes": up.getvalue(),
+                "campo_id": cid,
+                "campo_label": label,
+                "comprobacion": (
+                    str(prev.get("comprobacion") or "")
+                    if str(prev.get("nombre") or "") == nombre
+                    else ""
+                ),
+            }
+            st.session_state[f"{pref}_docs_por_campo"] = por_campo
+            doc_actual = por_campo[cid]
+
+        if doc_actual and (doc_actual.get("nombre") or doc_actual.get("bytes")):
+            if not str(valor or "").strip() and tipo != "check":
+                valor = f"[Archivo adjunto: {doc_actual.get('nombre')}]"
+
+            st.success(f"Archivo: **{doc_actual.get('nombre', 'documento')}**")
+            c_comp, c_del = st.columns(2)
+            with c_comp:
+                if st.button(
+                    "🔎 Comprobar conformidad",
+                    key=f"{pref}_comp_campo_{cid}",
+                    width="stretch",
+                    help="¿El archivo corresponde y es válido para este campo?",
+                ):
+                    with st.spinner(f"Comprobando archivo ↔ «{label}»…"):
+                        try:
+                            # Rehidratar si hace falta
+                            docs = [doc_actual]
+                            if not doc_actual.get("bytes"):
+                                docs = asistente_store.hidratar_docs_apoyo([doc_actual])
+                            informe = asistente_admin.comprobar_documento_para_campo(
+                                bloque,
+                                docs[0] if docs else doc_actual,
+                                campo_id=cid,
+                                campo_label=label,
+                                exigencias=st.session_state.get(f"{pref}_exigencias")
+                                or "",
+                                documentos_pliego=st.session_state.get(
+                                    f"{pref}_pliego_docs"
+                                )
+                                or None,
+                                modelos=st.session_state.get(f"{pref}_modelos"),
+                            )
+                            por_campo[cid] = {
+                                **doc_actual,
+                                **(docs[0] if docs else {}),
+                                "comprobacion": informe,
+                                "campo_id": cid,
+                                "campo_label": label,
+                            }
+                            st.session_state[f"{pref}_docs_por_campo"] = por_campo
+                            st.rerun()
+                        except pdf_summary.PdfSummaryError as exc:
+                            st.error(str(exc))
+                        except Exception as exc:
+                            st.error(f"Error: {exc}")
+            with c_del:
+                if st.button(
+                    "🗑️ Quitar archivo",
+                    key=f"{pref}_del_campo_{cid}",
+                    width="stretch",
+                ):
+                    por_campo.pop(cid, None)
+                    st.session_state[f"{pref}_docs_por_campo"] = por_campo
+                    st.rerun()
+
+            informe = str((por_campo.get(cid) or {}).get("comprobacion") or "")
+            if informe:
+                baja = informe.lower()
+                if "❌" in informe or "no válido" in baja or "no corresponde" in baja:
+                    st.error("No válido / no corresponde a este campo")
+                elif "⚠️" in informe or "reservas" in baja:
+                    st.warning("Válido con reservas para este campo")
+                else:
+                    st.success("Válido para este campo")
+                with st.expander("Informe de comprobación", expanded=False):
+                    st.markdown(informe)
+
+    return "" if valor is None else str(valor)
+
+
 def _aplicar_borrador_sesion(pref: str, cargado: dict) -> None:
     """Restaura en session_state un borrador/sesión cargada."""
     if not isinstance(cargado, dict):
@@ -2984,7 +3145,16 @@ def _aplicar_borrador_sesion(pref: str, cargado: dict) -> None:
         st.session_state[f"{pref}_modelos"] = cargado["modelos"]
     docs = cargado.get("docs_apoyo")
     if docs is not None:
-        st.session_state[f"{pref}_docs_apoyo"] = list(docs or [])
+        lista = list(docs or [])
+        st.session_state[f"{pref}_docs_apoyo"] = lista
+        por_campo: dict[str, dict] = {}
+        for d in lista:
+            if not isinstance(d, dict):
+                continue
+            cid = str(d.get("campo_id") or "").strip()
+            if cid:
+                por_campo[cid] = dict(d)
+        st.session_state[f"{pref}_docs_por_campo"] = por_campo
     st.session_state[f"{pref}_datos"] = {
         k: v for k, v in datos.items() if not str(k).startswith("_")
     } if isinstance(datos, dict) else {}
@@ -3011,7 +3181,7 @@ def _persistir_sesion_preparar(
             cid = k[len(f"{pref}_f_") :]
             if cid and not cid.startswith("_"):
                 datos_act.setdefault(cid, "" if v is None else str(v))
-    docs_apoyo = list(st.session_state.get(f"{pref}_docs_apoyo") or [])
+    docs_apoyo = _sincronizar_docs_apoyo_desde_campos(pref)
     if docs_apoyo:
         datos_act["_docs_apoyo_nombres"] = ", ".join(
             d.get("nombre", "?") for d in docs_apoyo
@@ -3187,7 +3357,7 @@ def pestana_preparar_documentacion() -> None:
         st.markdown(
             """
 1. **Pliego** — sube PCAP/PPT y extrae exigencias (+ detecta anexos numerados).  
-2. **Formulario** — aplica el **perfil GREFA**, rellena variables **y/o** sube hasta 4 documentos (PDF/Word/Excel).  
+2. **Formulario** — en cada campo: texto **o** 📎 archivo (Anexo V, DNI, escrituras…) + **Comprobar conformidad**.  
 3. **Borrador** — genera el texto según modelos del pliego y **verifica** conformidad.  
 4. **Comprobador** — (menú ✅) revisa PDFs finales si quieres un segundo control.  
 5. **Revisión humana** — estados + observaciones internas (no es VB jurídico).  
@@ -3425,9 +3595,14 @@ def pestana_preparar_documentacion() -> None:
             st.warning("Antes extrae las exigencias del pliego en el paso 1.")
             return
 
+        tipos_doc = list(
+            getattr(pdf_summary, "EXTENSIONES_DOC", ("pdf", "docx", "xlsx"))
+        )
         st.markdown(
-            f"Completa los datos {cfg['etiqueta'].lower()} **escribiendo en los campos** "
-            "y/o **subiendo documentos** (hasta 4: PDF, Word o Excel). "
+            f"Completa los datos {cfg['etiqueta'].lower()} **escribiendo** en cada campo "
+            "o **subiendo un archivo** (PDF / Word / Excel) en el desplegable "
+            "📎 de ese mismo campo (p. ej. Anexo V, DNI, escrituras…). "
+            "En cada archivo puedes **Comprobar conformidad**. "
             "Lo vacío se marcará `[COMPLETAR: …]` en el borrador."
         )
         fuentes = [
@@ -3470,13 +3645,12 @@ def pestana_preparar_documentacion() -> None:
         for grupo, campos in asistente_admin.campos_por_grupo(bloque).items():
             st.markdown(f"**{grupo}**")
             for campo in campos:
-                clave = f"{pref}_f_{campo['id']}"
-                if campo["tipo"] == "area":
-                    datos[campo["id"]] = st.text_area(
-                        campo["label"], key=clave, height=90
-                    )
-                else:
-                    datos[campo["id"]] = st.text_input(campo["label"], key=clave)
+                datos[campo["id"]] = _render_campo_con_archivo(
+                    bloque=bloque,
+                    pref=pref,
+                    campo=campo,
+                    tipos_doc=tipos_doc,
+                )
 
         # Campos dinámicos de anexos numerados
         modelos = st.session_state.get(f"{pref}_modelos") or {}
@@ -3484,173 +3658,35 @@ def pestana_preparar_documentacion() -> None:
         if campos_anx:
             st.markdown("**Campos de anexos/modelos del pliego**")
             st.caption(
-                "Rellena cada variable del modelo oficial. Se usarán al generar el borrador."
+                "Cada anexo/variable puede rellenarse a mano o con un archivo propio "
+                "(y su comprobación de conformidad)."
             )
             grupo_actual = None
             for campo in campos_anx:
                 if campo["grupo"] != grupo_actual:
                     grupo_actual = campo["grupo"]
                     st.markdown(f"**{grupo_actual}**")
-                clave = f"{pref}_f_{campo['id']}"
-                if campo["tipo"] == "area":
-                    datos[campo["id"]] = st.text_area(
-                        campo["label"], key=clave, height=80
-                    )
-                elif campo["tipo"] == "check":
-                    marcado = st.checkbox(campo["label"], key=clave)
-                    datos[campo["id"]] = "sí" if marcado else "no"
-                else:
-                    datos[campo["id"]] = st.text_input(campo["label"], key=clave)
+                datos[campo["id"]] = _render_campo_con_archivo(
+                    bloque=bloque,
+                    pref=pref,
+                    campo=campo,
+                    tipos_doc=tipos_doc,
+                )
         else:
             st.caption(
                 "Tip: en el paso 1 pulsa **Detectar anexos numerados** para "
-                "formulario campo a campo según el pliego."
+                "formulario campo a campo según el pliego (Anexo I, II, V…)."
             )
 
-        max_apoyo = int(getattr(asistente_admin, "MAX_DOCS_APOYO", 4) or 4)
-        tipos_doc = list(
-            getattr(pdf_summary, "EXTENSIONES_DOC", ("pdf", "docx", "xlsx"))
-        )
-        st.markdown("**Documentos aportados (texto o archivos)**")
-        st.caption(
-            f"Puedes rellenar los campos de arriba **y/o** subir hasta {max_apoyo} "
-            "archivos (PDF, Word .docx, Excel .xlsx). "
-            "Asigna cada uno al **campo** del formulario y pulsa "
-            "**Comprobar documento** para ver si corresponde y es válido."
-        )
-        docs_apoyo_up = st.file_uploader(
-            f"Subir documentos de apoyo (máx. {max_apoyo})",
-            type=tipos_doc,
-            accept_multiple_files=True,
-            key=f"{pref}_docs_apoyo_up",
-        )
-        previos_por_nombre = {
-            str(d.get("nombre") or ""): d
-            for d in (st.session_state.get(f"{pref}_docs_apoyo") or [])
-            if isinstance(d, dict)
-        }
-        if docs_apoyo_up:
-            seleccion = list(docs_apoyo_up)[:max_apoyo]
-            if len(docs_apoyo_up) > max_apoyo:
-                st.warning(
-                    f"Solo se usarán los {max_apoyo} primeros "
-                    f"(has seleccionado {len(docs_apoyo_up)})."
-                )
-            nuevos = []
-            for f in seleccion:
-                nombre = Path(getattr(f, "name", "") or "documento.pdf").name
-                prev = previos_por_nombre.get(nombre) or {}
-                nuevos.append(
-                    {
-                        "nombre": nombre,
-                        "tipo": "APOYO",
-                        "bytes": f.getvalue(),
-                        "campo_id": str(prev.get("campo_id") or ""),
-                        "campo_label": str(prev.get("campo_label") or ""),
-                        "comprobacion": str(prev.get("comprobacion") or ""),
-                    }
-                )
-            st.session_state[f"{pref}_docs_apoyo"] = nuevos
-        docs_apoyo = list(st.session_state.get(f"{pref}_docs_apoyo") or [])
-
-        campos_opc = asistente_admin.listar_campos_formulario(
-            bloque, st.session_state.get(f"{pref}_modelos") or {}
-        )
-        opciones_campo = ["— Elegir campo —"] + [
-            f"{c['grupo']}: {c['label']}" if c.get("grupo") else c["label"]
-            for c in campos_opc
-        ]
-        mapa_etiqueta_campo = {
-            (
-                f"{c['grupo']}: {c['label']}" if c.get("grupo") else c["label"]
-            ): c
-            for c in campos_opc
-        }
-
+        docs_apoyo = _sincronizar_docs_apoyo_desde_campos(pref)
         if docs_apoyo:
-            st.markdown("#### Asignación y comprobación por campo")
-            for i, doc in enumerate(docs_apoyo):
-                st.markdown(f"**{i + 1}. {doc.get('nombre', 'documento')}**")
-                etiqueta_prev = ""
-                cid_prev = str(doc.get("campo_id") or "")
-                for etiq, meta in mapa_etiqueta_campo.items():
-                    if meta["id"] == cid_prev:
-                        etiqueta_prev = etiq
-                        break
-                idx_default = (
-                    opciones_campo.index(etiqueta_prev)
-                    if etiqueta_prev in opciones_campo
-                    else 0
+            st.info(
+                f"**{len(docs_apoyo)} archivo(s)** vinculados a campos: "
+                + ", ".join(
+                    f"{d.get('campo_label') or d.get('campo_id')}: {d.get('nombre')}"
+                    for d in docs_apoyo
                 )
-                c_sel, c_btn = st.columns([2, 1])
-                with c_sel:
-                    elegida = st.selectbox(
-                        "Campo del formulario al que corresponde",
-                        opciones_campo,
-                        index=idx_default,
-                        key=f"{pref}_doc_campo_{i}_{doc.get('nombre', i)}",
-                    )
-                meta = mapa_etiqueta_campo.get(elegida) if elegida != opciones_campo[0] else None
-                if meta:
-                    docs_apoyo[i]["campo_id"] = meta["id"]
-                    docs_apoyo[i]["campo_label"] = meta["label"]
-                else:
-                    docs_apoyo[i]["campo_id"] = ""
-                    docs_apoyo[i]["campo_label"] = ""
-                with c_btn:
-                    comprobar = st.button(
-                        "🔎 Comprobar documento",
-                        key=f"{pref}_btn_comp_doc_{i}",
-                        width="stretch",
-                        disabled=not meta,
-                        help="Verifica si el documento se adapta y es válido para el campo elegido",
-                    )
-                if comprobar and meta:
-                    with st.spinner(
-                        f"Comprobando «{doc.get('nombre')}» ↔ «{meta['label']}»…"
-                    ):
-                        try:
-                            informe_doc = asistente_admin.comprobar_documento_para_campo(
-                                bloque,
-                                doc,
-                                campo_id=meta["id"],
-                                campo_label=meta["label"],
-                                exigencias=st.session_state.get(f"{pref}_exigencias")
-                                or "",
-                                documentos_pliego=st.session_state.get(
-                                    f"{pref}_pliego_docs"
-                                )
-                                or None,
-                                modelos=st.session_state.get(f"{pref}_modelos"),
-                            )
-                            docs_apoyo[i]["comprobacion"] = informe_doc
-                            st.session_state[f"{pref}_docs_apoyo"] = docs_apoyo
-                            st.rerun()
-                        except pdf_summary.PdfSummaryError as exc:
-                            st.error(str(exc))
-                        except Exception as exc:
-                            st.error(f"Error: {exc}")
-
-                informe_doc = str(doc.get("comprobacion") or "")
-                if informe_doc:
-                    baja = informe_doc.lower()
-                    if "❌" in informe_doc or "no válido" in baja or "no corresponde" in baja:
-                        st.error("Resultado: no válido / no corresponde al campo")
-                    elif "⚠️" in informe_doc or "reservas" in baja:
-                        st.warning("Resultado: válido con reservas")
-                    else:
-                        st.success("Resultado: válido para el campo")
-                    with st.expander("Ver informe de comprobación", expanded=False):
-                        st.markdown(informe_doc)
-
-            st.session_state[f"{pref}_docs_apoyo"] = docs_apoyo
-            if st.button(
-                "🗑️ Quitar documentos aportados",
-                key=f"{pref}_btn_quitar_apoyo",
-            ):
-                st.session_state[f"{pref}_docs_apoyo"] = []
-                st.session_state.pop(f"{pref}_docs_apoyo_up", None)
-                st.rerun()
+            )
 
         col_g, col_c = st.columns(2)
         with col_g:
@@ -3689,8 +3725,8 @@ def pestana_preparar_documentacion() -> None:
             hay_texto = any(v for k, v in limpios.items() if not str(k).startswith("_"))
             if not hay_texto and not docs_apoyo:
                 st.error(
-                    "Introduce texto en el formulario o sube al menos un documento "
-                    f"(hasta {max_apoyo}: PDF / Word / Excel)."
+                    "Introduce texto en algún campo o sube al menos un archivo "
+                    "en el 📎 de un campo (PDF / Word / Excel)."
                 )
             else:
                 if docs_apoyo:
@@ -3730,7 +3766,7 @@ def pestana_preparar_documentacion() -> None:
     # ── Paso 3: borrador + verificación ──
     exigencias = st.session_state.get(f"{pref}_exigencias") or ""
     datos = dict(st.session_state.get(f"{pref}_datos") or {})
-    docs_apoyo = list(st.session_state.get(f"{pref}_docs_apoyo") or [])
+    docs_apoyo = _sincronizar_docs_apoyo_desde_campos(pref)
     if not exigencias:
         st.warning("Falta el paso 1 (exigencias del pliego).")
         return
@@ -3742,7 +3778,7 @@ def pestana_preparar_documentacion() -> None:
     if not hay_datos and not docs_apoyo:
         st.warning(
             f"Falta el paso 2: rellena el formulario {cfg['etiqueta'].lower()} "
-            "y/o sube documentos de apoyo (PDF / Word / Excel)."
+            "y/o sube un archivo en el 📎 de algún campo."
         )
         return
 
@@ -3751,11 +3787,14 @@ def pestana_preparar_documentacion() -> None:
     if texto_form and texto_form != "(sin datos)":
         st.code(texto_form, language="markdown")
     else:
-        st.caption("Sin campos de texto; se usarán los documentos aportados.")
+        st.caption("Sin campos de texto; se usarán los archivos de cada campo.")
     if docs_apoyo:
         st.caption(
-            "Documentos aportados: "
-            + ", ".join(d.get("nombre", "?") for d in docs_apoyo)
+            "Archivos por campo: "
+            + ", ".join(
+                f"{d.get('campo_label') or d.get('campo_id')}: {d.get('nombre', '?')}"
+                for d in docs_apoyo
+            )
         )
     elif datos.get("_docs_apoyo_nombres"):
         st.caption(
@@ -5072,12 +5111,9 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # Aplicación
 # ---------------------------------------------------------------------------
-def main() -> None:
-    if not st.session_state.get("_modulos_criticos_reloaded"):
-        _recargar_modulos_criticos()
-        st.session_state["_modulos_criticos_reloaded"] = True
-
-    usuario = auth.requiere_acceso()
+def main_licitaciones(usuario=None) -> None:
+    if usuario is None:
+        usuario = auth.requiere_acceso()
 
     # Los criterios compartidos mandan sobre los valores por defecto.
     if not st.session_state["sheets_sincronizado"]:
@@ -5091,6 +5127,9 @@ def main() -> None:
 
     sidebar_fuente_datos()
     sidebar_google_sheets()
+    if st.sidebar.button("🏠 Cambiar de modo", width="stretch", key="cambiar_modo_lic"):
+        st.session_state["modo_app"] = None
+        st.rerun()
     auth.barra_usuario(usuario)
 
     datos = st.session_state["datos"]
@@ -5207,6 +5246,30 @@ def main() -> None:
         "Datos públicos de la Plataforma de Contratación del Sector Público (contrataciondelestado.es). "
         "El Índice de Relevancia GREFA es una estimación automática: revisa siempre el pliego original."
     )
+
+
+def main() -> None:
+    if not st.session_state.get("_modulos_criticos_reloaded"):
+        _recargar_modulos_criticos()
+        st.session_state["_modulos_criticos_reloaded"] = True
+
+    usuario = auth.requiere_acceso()
+    modo = st.session_state.get("modo_app")
+
+    if modo is None:
+        from modules import ui_ayudas
+
+        ui_ayudas.render_hub_selector()
+        auth.barra_usuario(usuario)
+        return
+
+    if modo == "ayudas":
+        from modules import ui_ayudas
+
+        ui_ayudas.main_ayudas(usuario)
+        return
+
+    main_licitaciones(usuario)
 
 
 if __name__ == "__main__":

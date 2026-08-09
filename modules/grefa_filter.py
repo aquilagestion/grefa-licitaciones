@@ -269,6 +269,119 @@ def score_licitaciones(
     return resultado
 
 
+def score_row_convocatoria(
+    titulo: str,
+    descripcion: str,
+    keywords: Sequence[str],
+    conceptos: Sequence[dict] | None = None,
+    *,
+    instrumentos: Sequence[str] | None = None,
+    finalidad: str = "",
+) -> dict[str, object]:
+    """Índice de Relevancia GREFA para ayudas/premios BDNS (sin CPV).
+
+    Keywords/conceptos pesan hasta 100. Un pequeño bonus (+5, tope 100) si el
+    instrumento menciona premio/subvención y ya hay match temático.
+    """
+    texto_extra = " ".join(
+        [
+            str(finalidad or ""),
+            " ".join(str(i) for i in (instrumentos or [])),
+        ]
+    )
+    descripcion_ampliada = f"{descripcion or ''} {texto_extra}".strip()
+
+    if conceptos:
+        keywords_coincidentes, peso_keywords = matching_keyword_concepts(
+            titulo, descripcion_ampliada, conceptos
+        )
+    else:
+        keywords_coincidentes, peso_keywords = matching_keywords(
+            titulo, descripcion_ampliada, keywords
+        )
+    saturacion = max(KEYWORD_SATURATION, 1e-9)
+    # En ayudas no hay CPV: el bloque de keywords ocupa el 100 %.
+    peso_total_keywords = CPV_WEIGHT + KEYWORD_WEIGHT
+    puntos_keywords = peso_total_keywords * min(peso_keywords / saturacion, 1.0)
+
+    bonus = 0.0
+    instrumentos_txt = normalize_text(" ".join(str(i) for i in (instrumentos or [])))
+    if keywords_coincidentes and (
+        " premio " in instrumentos_txt
+        or " subvencion " in instrumentos_txt
+        or " entrega dineraria " in instrumentos_txt
+    ):
+        bonus = 5.0
+
+    relevancia = int(round(min(puntos_keywords + bonus, 100.0)))
+    categoria = classify(relevancia)
+    nivel = RELEVANCE_LEVELS[categoria]
+
+    motivos: list[str] = []
+    if keywords_coincidentes:
+        motivos.append(
+            f"{len(keywords_coincidentes)} palabra(s) clave: "
+            f"{', '.join(keywords_coincidentes)} (+{int(round(puntos_keywords))}%)"
+        )
+    else:
+        motivos.append("Sin palabras clave (+0%)")
+    if bonus:
+        motivos.append(f"Instrumento de ayuda/premio (+{int(bonus)}%)")
+
+    return {
+        "relevancia": relevancia,
+        "categoria": categoria,
+        "badge": nivel["badge"],
+        "color": nivel["color"],
+        "cpvs_match": [],
+        "keywords_match": keywords_coincidentes,
+        "justificacion": " · ".join(motivos),
+    }
+
+
+def score_convocatorias(
+    df: pd.DataFrame,
+    keywords: Iterable[str],
+    conceptos: Sequence[dict] | None = None,
+) -> pd.DataFrame:
+    """Puntúa convocatorias BDNS con el Índice de Relevancia GREFA (solo keywords)."""
+    lista_keywords = [termino.strip() for termino in keywords if str(termino).strip()]
+    conceptos_activos = [
+        c for c in (conceptos or []) if c.get("activo", True)
+    ] or None
+
+    resultado = df.copy()
+    if resultado.empty:
+        for columna in SCORING_COLUMNS:
+            resultado[columna] = pd.Series(dtype="object")
+        resultado["relevancia"] = pd.Series(dtype="int64")
+        return resultado
+
+    puntuaciones = [
+        score_row_convocatoria(
+            fila.get("titulo", ""),
+            fila.get("descripcion", ""),
+            lista_keywords,
+            conceptos=conceptos_activos,
+            instrumentos=fila.get("instrumentos") or [],
+            finalidad=str(fila.get("finalidad") or ""),
+        )
+        for fila in resultado.to_dict("records")
+    ]
+
+    marcadores = pd.DataFrame(puntuaciones, index=resultado.index)
+    for columna in SCORING_COLUMNS:
+        resultado[columna] = marcadores[columna]
+
+    resultado["relevancia"] = resultado["relevancia"].astype(int)
+    resultado = resultado.sort_values(
+        by=["relevancia", "fecha_actualizacion"],
+        ascending=[False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+    return resultado
+
+
 # ---------------------------------------------------------------------------
 # Filtros de apoyo para la interfaz
 # ---------------------------------------------------------------------------

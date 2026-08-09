@@ -1,16 +1,20 @@
-# GREFA · Monitor de Licitaciones Públicas (PLACSP)
+# GREFA · Monitor de Licitaciones Públicas (PLACSP) y Ayudas/Premios (BDNS)
 
-Aplicación web que descarga las licitaciones publicadas en la Plataforma de
-Contratación del Sector Público, las puntúa con el **Índice de Relevancia
-GREFA** (0-100 %) y permite al equipo gestionar los criterios de búsqueda desde
-una hoja de Google compartida.
+Aplicación web con **dos modos** al entrar:
 
-- **Pestaña «Oportunidades GREFA»**: licitaciones de relevancia media y alta, con
-  tarjetas, filtro por porcentaje mínimo y exportación.
-- **Pestaña «Buscador General PLACSP»**: todas las licitaciones descargadas, con
-  búsqueda libre y filtros por presupuesto, provincia y estado.
-- **Criterios compartidos**: los CPV y las palabras clave viven en Google Sheets,
-  así que lo que configura una persona lo ve todo el equipo.
+1. **Licitaciones** — descarga el feed ATOM de la Plataforma de Contratación del
+   Sector Público, puntúa con el **Índice de Relevancia GREFA** (0-100 %) y permite
+   gestionar criterios desde Google Sheets.
+2. **Ayudas y premios** — consulta la API de la **BDNS**
+   ([infosubvenciones.es](https://www.infosubvenciones.es)): subvenciones, premios
+   y ayudas públicas, con el mismo scoring por términos GREFA (sin CPV).
+
+Puedes cambiar de modo en cualquier momento con **Cambiar de modo** en la barra lateral.
+
+- **Pestaña «Oportunidades GREFA»**: relevancia media y alta, tarjetas, filtro y exportación.
+- **Buscador general**: todas las descargadas en sesión.
+- **Mis Licitaciones / Mis Convocatorias**: seguimiento del interés del equipo.
+- **Criterios compartidos**: CPV (solo licitaciones) y palabras clave en Google Sheets.
 
 ---
 
@@ -25,11 +29,13 @@ grefa-licitaciones/
 │   └── default_criteria.py    # CPV y palabras clave iniciales + pesos del scoring
 ├── modules/
 │   ├── ingestion.py           # Descarga y parseo del ATOM/CODICE de la PLACSP
+│   ├── ingestion_bdns.py      # API BDNS (ayudas, premios, subvenciones)
 │   ├── grefa_filter.py        # Índice de Relevancia GREFA, filtros y búsqueda
+│   ├── ui_ayudas.py           # Interfaz del modo Ayudas y premios
 │   ├── exporter.py            # Exportación a CSV y Excel
 │   ├── sheets_store.py        # Criterios y oportunidades en Google Sheets
 │   └── auth.py                # Login con Google restringido al equipo
-├── app.py                     # Interfaz Streamlit
+├── app.py                     # Interfaz Streamlit (hub + modos)
 ├── Dockerfile                 # Imagen para Cloud Run
 └── requirements.txt
 ```
@@ -62,6 +68,12 @@ cambiar la URL a mano.
 
 Si la red bloquea el dominio, descarga el `.atom` manualmente y súbelo desde
 «Cargar fichero ATOM local».
+
+### Fuente BDNS (modo Ayudas y premios)
+
+API REST: `https://www.infosubvenciones.es/bdnstrans/api`. La app busca por
+términos GREFA, enriquece con el detalle de cada convocatoria y puntúa sin CPV.
+En Sheets se usan las pestañas `OportunidadesAyudas` y `MisConvocatorias`.
 
 ---
 

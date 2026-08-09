@@ -42,6 +42,8 @@ CHECKLIST_SHEET = "ChecklistDocs"
 MIS_LICITACIONES_SHEET = "MisLicitaciones"
 ASISTENTE_SHEET = "AsistenteDocs"
 README_SHEET = "Instrucciones"
+OPPORTUNITIES_AYUDAS_SHEET = "OportunidadesAyudas"
+MIS_CONVOCATORIAS_SHEET = "MisConvocatorias"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
 CPV_HEADERS = ["Código CPV", "Descripción", "Activo"]
@@ -87,6 +89,36 @@ MIS_LICITACIONES_HEADERS = [
     "Órgano de Contratación",
     "Presupuesto sin IVA",
     "Estado PLACSP",
+    "Relevancia (%)",
+    "Me interesa",
+    "Me presento",
+    "Fecha interés",
+    "Notas",
+]
+OPPORTUNITY_AYUDAS_HEADERS = [
+    "Fecha detección",
+    "Relevancia (%)",
+    "Categoría",
+    "Código BDNS",
+    "Título / Objeto",
+    "Órgano convocante",
+    "Presupuesto total",
+    "Ámbito",
+    "Instrumento",
+    "Palabras clave",
+    "Fin de solicitud",
+    "Estado",
+    "Enlace",
+    "Seguimiento",
+    "Notas",
+]
+MIS_CONVOCATORIAS_HEADERS = [
+    "Código BDNS",
+    "Enlace",
+    "Título",
+    "Órgano convocante",
+    "Presupuesto total",
+    "Estado",
     "Relevancia (%)",
     "Me interesa",
     "Me presento",
@@ -941,6 +973,277 @@ def claves_mis_licitaciones(hoja_id: str | None = None) -> set[str]:
         }
     except Exception:
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Convocatorias BDNS (ayudas y premios)
+# ---------------------------------------------------------------------------
+def _fila_oportunidad_ayuda(fila: pd.Series, momento: str) -> list[str]:
+    def texto(valor: Any) -> str:
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+            return ""
+        if isinstance(valor, (list, tuple)):
+            return ", ".join(str(elemento) for elemento in valor)
+        return str(valor)
+
+    presupuesto = fila.get("presupuesto_sin_iva")
+    return [
+        momento,
+        texto(fila.get("relevancia")),
+        texto(fila.get("categoria")),
+        texto(fila.get("expediente")),
+        texto(fila.get("titulo")),
+        texto(fila.get("organo_contratacion")),
+        "" if presupuesto is None or pd.isna(presupuesto) else f"{float(presupuesto):.2f}",
+        texto(fila.get("ubicacion") or fila.get("nivel_admin")),
+        texto(fila.get("tipo_contrato") or fila.get("instrumentos")),
+        texto(fila.get("keywords_match")),
+        texto(fila.get("fecha_limite")),
+        texto(fila.get("estado")),
+        texto(fila.get("url")),
+        DEFAULT_TRACKING,
+        "",
+    ]
+
+
+def append_opportunities_ayudas(
+    df: pd.DataFrame, hoja_id: str | None = None
+) -> tuple[int, int]:
+    """Añade oportunidades de ayudas/premios sin duplicar código+enlace."""
+    if df.empty:
+        return 0, 0
+
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, OPPORTUNITIES_AYUDAS_SHEET, OPPORTUNITY_AYUDAS_HEADERS)
+        existentes = {
+            _clave(
+                _campo(registro, "Código BDNS", "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            for registro in pestana.get_all_records()
+        }
+        momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+        nuevas: list[list[str]] = []
+        omitidas = 0
+        for _, fila in df.iterrows():
+            if _clave(fila.get("expediente", ""), fila.get("url", "")) in existentes:
+                omitidas += 1
+                continue
+            nuevas.append(_fila_oportunidad_ayuda(fila, momento))
+        if nuevas:
+            pestana.append_rows(nuevas, value_input_option="USER_ENTERED")
+        return len(nuevas), omitidas
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error escribiendo OportunidadesAyudas: {exc}") from exc
+
+
+def load_opportunities_tracking_ayudas(
+    hoja_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Lee OportunidadesAyudas indexada por clave código|enlace."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, OPPORTUNITIES_AYUDAS_SHEET, OPPORTUNITY_AYUDAS_HEADERS)
+        registros = pestana.get_all_records()
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error leyendo OportunidadesAyudas: {exc}") from exc
+
+    resultado: dict[str, dict[str, Any]] = {}
+    for indice, registro in enumerate(registros, start=2):
+        expediente = str(
+            _campo(registro, "Código BDNS", "ID Expediente", "expediente")
+        ).strip()
+        enlace = str(_campo(registro, "Enlace", "enlace")).strip()
+        if not expediente and not enlace:
+            continue
+        clave = _clave(expediente, enlace)
+        resultado[clave] = {
+            "row": indice,
+            "expediente": expediente,
+            "titulo": str(_campo(registro, "Título / Objeto", "titulo")).strip(),
+            "seguimiento": str(
+                _campo(registro, "Seguimiento", default=DEFAULT_TRACKING) or DEFAULT_TRACKING
+            ).strip(),
+            "notas": str(_campo(registro, "Notas", "notas")).strip(),
+            "categoria": str(_campo(registro, "Categoría", "categoria")).strip(),
+            "relevancia": str(_campo(registro, "Relevancia (%)", "relevancia")).strip(),
+            "url": enlace,
+            "organo": str(_campo(registro, "Órgano convocante", "organo")).strip(),
+            "fecha_deteccion": str(
+                _campo(registro, "Fecha detección", "fecha_deteccion")
+            ).strip(),
+        }
+    return resultado
+
+
+def update_opportunity_tracking_ayudas(
+    expediente: str,
+    enlace: str,
+    *,
+    seguimiento: str,
+    notas: str,
+    hoja_id: str | None = None,
+) -> None:
+    if seguimiento not in SEGUIMIENTO_OPTIONS:
+        raise SheetsError(f"Estado de seguimiento no válido: {seguimiento}")
+
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, OPPORTUNITIES_AYUDAS_SHEET, OPPORTUNITY_AYUDAS_HEADERS)
+        clave_objetivo = _clave(expediente, enlace)
+        fila_encontrada: int | None = None
+        for indice, registro in enumerate(pestana.get_all_records(), start=2):
+            clave = _clave(
+                _campo(registro, "Código BDNS", "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave == clave_objetivo:
+                fila_encontrada = indice
+                break
+        if fila_encontrada is None:
+            raise SheetsError("Convocatoria no encontrada en OportunidadesAyudas.")
+        pestana.update_cell(fila_encontrada, 14, seguimiento)
+        pestana.update_cell(fila_encontrada, 15, notas)
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error actualizando seguimiento de ayudas: {exc}") from exc
+
+
+def load_mis_convocatorias(hoja_id: str | None = None) -> list[dict[str, str]]:
+    try:
+        hoja = get_spreadsheet(hoja_id)
+        pestana = _worksheet(hoja, MIS_CONVOCATORIAS_SHEET, MIS_CONVOCATORIAS_HEADERS)
+        filas: list[dict[str, str]] = []
+        for i, registro in enumerate(pestana.get_all_records(), start=2):
+            expediente = str(
+                _campo(registro, "Código BDNS", "ID Expediente", "expediente")
+            ).strip()
+            enlace = str(_campo(registro, "Enlace", "enlace", "url")).strip()
+            if not expediente and not enlace:
+                continue
+            interesa = str(_campo(registro, "Me interesa", "me_interesa")).strip().lower()
+            if interesa in {"no", "false", "0", "n"}:
+                continue
+            filas.append(
+                {
+                    "expediente": expediente,
+                    "url": enlace,
+                    "titulo": str(_campo(registro, "Título", "titulo")),
+                    "organo": str(
+                        _campo(registro, "Órgano convocante", "organo", "organo_contratacion")
+                    ),
+                    "presupuesto": str(
+                        _campo(registro, "Presupuesto total", "Presupuesto sin IVA", "presupuesto")
+                    ),
+                    "estado": str(_campo(registro, "Estado", "estado")),
+                    "relevancia": str(_campo(registro, "Relevancia (%)", "relevancia")),
+                    "me_interesa": "sí",
+                    "me_presento": (
+                        "sí"
+                        if str(_campo(registro, "Me presento", "me_presento")).strip().lower()
+                        in {"sí", "si", "yes", "true", "1"}
+                        else "no"
+                    ),
+                    "fecha_interes": str(_campo(registro, "Fecha interés", "fecha_interes")),
+                    "notas": str(_campo(registro, "Notas", "notas")),
+                    "_row": str(i),
+                }
+            )
+        return filas
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"No se pudo leer MisConvocatorias: {_mensaje_api_sheets(exc)}"
+        ) from exc
+
+
+def upsert_mi_convocatoria(
+    expediente: str,
+    enlace: str,
+    *,
+    titulo: str = "",
+    organo: str = "",
+    presupuesto: str = "",
+    estado: str = "",
+    relevancia: str = "",
+    me_interesa: bool = True,
+    me_presento: bool | None = None,
+    notas: str | None = None,
+    hoja_id: str | None = None,
+) -> None:
+    hoja = get_spreadsheet(hoja_id)
+    pestana = _worksheet(hoja, MIS_CONVOCATORIAS_SHEET, MIS_CONVOCATORIAS_HEADERS)
+    clave_objetivo = _clave(expediente, enlace)
+    momento = datetime.now().strftime("%d/%m/%Y %H:%M")
+    try:
+        registros = pestana.get_all_records()
+        for indice, registro in enumerate(registros, start=2):
+            if _clave(
+                _campo(registro, "Código BDNS", "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace", "url"),
+            ) != clave_objetivo:
+                continue
+            presento_actual = str(_campo(registro, "Me presento", "me_presento")).strip()
+            notas_actual = str(_campo(registro, "Notas", "notas"))
+            fecha_actual = str(_campo(registro, "Fecha interés", "fecha_interes")) or momento
+            presento = (
+                ("sí" if me_presento else "no")
+                if me_presento is not None
+                else (
+                    "sí"
+                    if presento_actual.lower() in {"sí", "si", "yes", "true", "1"}
+                    else "no"
+                )
+            )
+            fila = [
+                expediente,
+                enlace,
+                titulo or str(_campo(registro, "Título", "titulo")),
+                organo or str(_campo(registro, "Órgano convocante", "organo")),
+                presupuesto
+                or str(_campo(registro, "Presupuesto total", "presupuesto")),
+                estado or str(_campo(registro, "Estado", "estado")),
+                relevancia or str(_campo(registro, "Relevancia (%)", "relevancia")),
+                "sí" if me_interesa else "no",
+                presento,
+                fecha_actual if me_interesa else "",
+                notas if notas is not None else notas_actual,
+            ]
+            pestana.update(
+                f"A{indice}:K{indice}",
+                [fila],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        if not me_interesa:
+            return
+        fila = [
+            expediente,
+            enlace,
+            titulo,
+            organo,
+            presupuesto,
+            estado,
+            relevancia,
+            "sí",
+            "sí" if me_presento else "no",
+            momento,
+            notas or "",
+        ]
+        pestana.append_row(fila, value_input_option="USER_ENTERED")
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"Error guardando MisConvocatorias: {_mensaje_api_sheets(exc)}"
+        ) from exc
 
 
 def upsert_checklist_item(
