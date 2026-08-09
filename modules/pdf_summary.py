@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +13,17 @@ from modules.sheets_store import _secret
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-flash-latest"
+# Preferir Flash «clásico»: gemini-3.x free tier suele ser solo ~20 req/día.
+DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_FALLBACK_MODELS = (
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+)
 MAX_PDF_BYTES = 15 * 1024 * 1024  # ~15 MB
 MAX_TEXTO_EXTRAIDO = 120_000
+MAX_REINTENTOS_429 = 1
+MAX_ESPERA_429_S = 45.0
 
 #: Extensiones aceptadas en uploaders y validación.
 EXTENSIONES_DOC = ("pdf", "docx", "xlsx")
@@ -146,11 +156,83 @@ def api_key() -> str | None:
 
 
 def model_name() -> str:
-    return str(_secret("gemini", "model") or os.environ.get("GREFA_GEMINI_MODEL") or DEFAULT_MODEL)
+    return str(
+        _secret("gemini", "model")
+        or os.environ.get("GREFA_GEMINI_MODEL")
+        or DEFAULT_MODEL
+    ).strip()
+
+
+def model_fallbacks() -> list[str]:
+    """Modelos alternativos si el principal agota cuota (429)."""
+    crudo = _secret("gemini", "fallback_models") or os.environ.get(
+        "GREFA_GEMINI_FALLBACK_MODELS"
+    )
+    if isinstance(crudo, (list, tuple)):
+        extras = [str(x).strip() for x in crudo if str(x).strip()]
+    elif crudo:
+        extras = [x.strip() for x in str(crudo).replace(";", ",").split(",") if x.strip()]
+    else:
+        extras = list(DEFAULT_FALLBACK_MODELS)
+    principal = model_name()
+    vistos = {principal}
+    salida: list[str] = []
+    for m in extras:
+        if m not in vistos:
+            vistos.add(m)
+            salida.append(m)
+    return salida
 
 
 def is_configured() -> bool:
     return bool(api_key())
+
+
+def _es_error_cuota(exc: BaseException) -> bool:
+    texto = str(exc).lower()
+    return (
+        "429" in texto
+        or "resource_exhausted" in texto
+        or "quota" in texto
+        or "rate limit" in texto
+        or "rate-limit" in texto
+    )
+
+
+def _segundos_reintento(exc: BaseException) -> float | None:
+    texto = str(exc)
+    m = re.search(r"retry in\s+(\d+(?:\.\d+)?)\s*s", texto, flags=re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", texto, flags=re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _es_cuota_diaria(exc: BaseException) -> bool:
+    texto = str(exc).lower().replace("_", "")
+    return "perday" in texto or "requestsperday" in texto
+
+
+def _mensaje_cuota_gemini(exc: BaseException, *, modelo: str) -> str:
+    espera = _segundos_reintento(exc)
+    tip_espera = (
+        f" Espera ~{int(espera) + 1}s e inténtalo de nuevo."
+        if espera and espera <= 120 and not _es_cuota_diaria(exc)
+        else " Si es cuota diaria del tier gratuito, hay que esperar al reset "
+        "(o cambiar de modelo / activar facturación en Google AI)."
+    )
+    return (
+        f"Cuota de Gemini agotada (modelo {modelo}, tier gratuito). "
+        f"{tip_espera} "
+        "Solución recomendada: en Secrets pon "
+        'model = "gemini-2.5-flash" y '
+        'fallback_models = "gemini-flash-latest,gemini-2.5-flash-lite" '
+        "(gemini-3.x free suele limitar a ~20 peticiones/día). "
+        "Uso: https://ai.dev/rate-limit · "
+        f"Detalle: {exc}"
+    )
 
 
 def _extension(nombre: str) -> str:
@@ -272,23 +354,66 @@ def _generar_con_gemini(
         raise PdfSummaryError("Falta el paquete google-generativeai.") from exc
 
     genai.configure(api_key=clave)
-    modelo = genai.GenerativeModel(model_name())
 
     base = prompt_base or PROMPT_PLIEGO
     prompt = base
     if contexto:
         prompt = f"{base}\n\nContexto del expediente:\n{contexto}"
 
-    try:
-        respuesta = modelo.generate_content([*contenido, prompt])
-        texto = (respuesta.text or "").strip()
-        if not texto:
-            raise PdfSummaryError("Gemini no devolvió texto. Prueba con otro PDF o modelo.")
-        return texto
-    except PdfSummaryError:
-        raise
-    except Exception as exc:
-        raise PdfSummaryError(f"Error al llamar a Gemini: {exc}") from exc
+    candidatos = [model_name(), *model_fallbacks()]
+    ultimo_exc: BaseException | None = None
+    ultimo_modelo = candidatos[0]
+
+    for idx, nombre_modelo in enumerate(candidatos):
+        ultimo_modelo = nombre_modelo
+        modelo = genai.GenerativeModel(nombre_modelo)
+        intentos = MAX_REINTENTOS_429 + 1
+        for intento in range(intentos):
+            try:
+                respuesta = modelo.generate_content([*contenido, prompt])
+                texto = (respuesta.text or "").strip()
+                if not texto:
+                    raise PdfSummaryError(
+                        "Gemini no devolvió texto. Prueba con otro PDF o modelo."
+                    )
+                if idx > 0:
+                    LOGGER.info(
+                        "Gemini OK con modelo fallback %s (principal sin cuota).",
+                        nombre_modelo,
+                    )
+                return texto
+            except PdfSummaryError:
+                raise
+            except Exception as exc:
+                ultimo_exc = exc
+                if not _es_error_cuota(exc):
+                    raise PdfSummaryError(f"Error al llamar a Gemini: {exc}") from exc
+                espera = _segundos_reintento(exc)
+                # Reintento corto solo si parece límite por minuto, no cuota diaria.
+                if (
+                    intento < MAX_REINTENTOS_429
+                    and espera is not None
+                    and espera <= MAX_ESPERA_429_S
+                    and not _es_cuota_diaria(exc)
+                ):
+                    LOGGER.warning(
+                        "Gemini 429 en %s; reintento en %.1fs…",
+                        nombre_modelo,
+                        espera,
+                    )
+                    time.sleep(min(espera + 1.0, MAX_ESPERA_429_S))
+                    continue
+                LOGGER.warning(
+                    "Cuota Gemini en modelo %s; probando siguiente… (%s)",
+                    nombre_modelo,
+                    exc,
+                )
+                break
+
+    assert ultimo_exc is not None
+    raise PdfSummaryError(
+        _mensaje_cuota_gemini(ultimo_exc, modelo=ultimo_modelo)
+    ) from ultimo_exc
 
 
 def _validar_pdfs(documentos: list[dict[str, Any]], *, etiqueta: str) -> list[dict[str, Any]]:

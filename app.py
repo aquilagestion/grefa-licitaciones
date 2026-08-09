@@ -1071,6 +1071,8 @@ def _widget_resumen_pliego(
     """Multi-PDF (PCAP/PPT) + descarga desde ficha PLACSP + resumen IA."""
     if not pdf_summary.is_configured():
         st.caption("Configura `[gemini] api_key` en Secrets para activar el resumen IA.")
+    else:
+        st.caption(f"Gemini: `{pdf_summary.model_name()}`")
         return
 
     clave = _clave_expediente(expediente, url)

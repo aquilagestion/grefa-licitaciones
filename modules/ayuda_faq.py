@@ -319,6 +319,19 @@ SECCIONES_FAQ: list[dict[str, str]] = [
     },
     {
         "categoria": "Problemas frecuentes",
+        "pregunta": "Gemini dice 429 / cuota exceeded / free tier",
+        "respuesta": (
+            "Has agotado la cuota gratuita del modelo. "
+            "`gemini-3.x-flash` en free tier suele limitar a **~20 peticiones/día**. "
+            "En Secrets pon `model = \"gemini-2.5-flash\"` y "
+            "`fallback_models = \"gemini-flash-latest,gemini-2.5-flash-lite\"`. "
+            "La app reintenta y prueba fallbacks solos. "
+            "Revisa uso en https://ai.dev/rate-limit ; si necesitas más, activa "
+            "facturación en Google AI Studio."
+        ),
+    },
+    {
+        "categoria": "Problemas frecuentes",
         "pregunta": "El menú o una sección no carga datos",
         "respuesta": (
             "Recarga la app. Comprueba Secrets (Sheets/Gemini). "
