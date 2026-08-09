@@ -128,8 +128,21 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "categoria": "Comprobador",
         "pregunta": "¿Qué comprueba el Comprobador de documentos?",
         "respuesta": (
-            "Contrasta tus PDF de oferta con el pliego (si lo adjuntas) y señala "
-            "errores, faltas y riesgos. Es una ayuda, no una validación oficial."
+            "Si **los PDF que subes se adaptan** a las **cláusulas administrativas "
+            "(PCAP/PCP)** y a las **prescripciones técnicas (PPT)**. "
+            "Aunque no sea el paquete completo, lo que falta del lote va en una "
+            "sección informativa y **no** fuerza un «no conforme». "
+            "Es una ayuda, no una validación oficial."
+        ),
+    },
+    {
+        "categoria": "Comprobador",
+        "pregunta": "Si subo 4 documentos de 16, ¿saldrá siempre incompleto?",
+        "respuesta": (
+            "No debería: el veredicto es ✅/⚠️/❌ **conforme** con lo subido "
+            "frente a administrativas y técnicas. "
+            "La cobertura del resto del paquete se lista aparte. "
+            "Adjunta idealmente PCAP + PPT (y ficha PLACSP si quieres; hasta 3)."
         ),
     },
     {

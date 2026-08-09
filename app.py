@@ -2437,12 +2437,14 @@ def pestana_analisis_pliegos(
 
 
 def pestana_comprobador_documentos() -> None:
-    """Revisa documentación de oferta elaborada por GREFA antes de presentarla."""
+    """Revisa si los documentos subidos se adaptan al pliego (revisión parcial)."""
     st.subheader("Comprobador de documentos")
     st.caption(
-        "Sube el documento (o documentos) que vas a presentar. Opcionalmente adjunta "
-        "el PCAP/PPT u otros requisitos. La IA indica si parece **apto**, qué **falta** "
-        "y qué **errores** puede tener. No sustituye la revisión jurídica final."
+        "Comprueba si **los PDF que subes se adaptan a las cláusulas administrativas "
+        "(PCAP/PCP) y a las prescripciones técnicas (PPT)**, aunque no sea el paquete "
+        "completo (p. ej. 4 de 16). El veredicto es de **conformidad**, no de completitud. "
+        "Adjunta idealmente PCAP + PPT (+ ficha PLACSP si quieres), hasta 3. "
+        "No sustituye la revisión jurídica final."
     )
 
     if not pdf_summary.is_configured():
@@ -2466,7 +2468,11 @@ def pestana_comprobador_documentos() -> None:
             placeholder="Objeto del contrato o nombre interno",
         )
 
-    st.markdown("**1. Documentación a presentar (obligatorio)**")
+    st.markdown("**1. Documentos a revisar (obligatorio)**")
+    st.caption(
+        f"Puedes subir varios; se analizan hasta {pdf_summary.MAX_OFERTA_COMPROBADOR}. "
+        "El resto del paquete no hace fallar el veredicto."
+    )
     oferta_files = st.file_uploader(
         "PDF de oferta, memoria, DECLAREs, anexos…",
         type=["pdf"],
@@ -2474,9 +2480,14 @@ def pestana_comprobador_documentos() -> None:
         key="comp_oferta_pdfs",
     )
 
-    st.markdown("**2. Pliego / requisitos de referencia (recomendado)**")
+    st.markdown("**2. Administrativas y técnicas de referencia (recomendado)**")
+    st.caption(
+        f"Prioritario: cláusulas/condiciones administrativas (PCAP) + "
+        f"prescripciones técnicas (PPT). Opcional: ficha PLACSP. "
+        f"Hasta {pdf_summary.MAX_PLIEGO_COMPROBADOR} PDF."
+    )
     pliego_files = st.file_uploader(
-        "PCAP, PPT u otros PDF del expediente",
+        "PCAP / condiciones administrativas, PPT y, si quieres, ficha PLACSP",
         type=["pdf"],
         accept_multiple_files=True,
         key="comp_pliego_pdfs",
@@ -2493,14 +2504,14 @@ def pestana_comprobador_documentos() -> None:
     )
 
     analizar = st.button(
-        "🔎 Comprobar documentación",
+        "🔎 Comprobar conformidad",
         type="primary",
         key="comp_btn_analizar",
         disabled=not oferta_files,
     )
 
     if not oferta_files:
-        st.info("Sube al menos un PDF de la documentación a presentar.")
+        st.info("Sube al menos un PDF de oferta a revisar.")
         informe_prev = st.session_state.get("comp_informe")
         if informe_prev:
             with st.expander("Último informe", expanded=True):
@@ -2532,8 +2543,18 @@ def pestana_comprobador_documentos() -> None:
         }
         for f in (pliego_files or [])
     ]
+    if len(docs_oferta) > pdf_summary.MAX_OFERTA_COMPROBADOR:
+        st.info(
+            f"Has seleccionado {len(docs_oferta)} PDF de oferta; "
+            f"se analizarán los {pdf_summary.MAX_OFERTA_COMPROBADOR} primeros."
+        )
+    if len(docs_pliego) > pdf_summary.MAX_PLIEGO_COMPROBADOR:
+        st.info(
+            f"Has seleccionado {len(docs_pliego)} PDF de pliego; "
+            f"se usarán los {pdf_summary.MAX_PLIEGO_COMPROBADOR} primeros como referencia."
+        )
 
-    with st.spinner("Revisando documentación con Gemini…"):
+    with st.spinner("Revisando conformidad con Gemini…"):
         try:
             informe = pdf_summary.comprobar_documentos(
                 docs_oferta,
@@ -2558,13 +2579,19 @@ def pestana_comprobador_documentos() -> None:
     veredicto = ""
     for linea in informe.splitlines():
         baja = linea.strip().lower()
-        if "apto para presentar" in baja or "presentable con reservas" in baja or "no apto" in baja:
+        if (
+            "conforme" in baja
+            or "apto para presentar" in baja
+            or "presentable con reservas" in baja
+            or "no apto" in baja
+        ):
             veredicto = linea.strip()
             break
-    if "❌" in veredicto or "no apto" in veredicto.lower():
-        st.error(veredicto or "Veredicto: no apto / incompleto")
-    elif "⚠️" in veredicto or "reservas" in veredicto.lower():
-        st.warning(veredicto or "Veredicto: presentable con reservas")
+    baja_v = veredicto.lower()
+    if "❌" in veredicto or "no conforme" in baja_v or "no apto" in baja_v:
+        st.error(veredicto or "Veredicto: no conforme")
+    elif "⚠️" in veredicto or "reservas" in baja_v:
+        st.warning(veredicto or "Veredicto: conforme con reservas")
     else:
         st.success(veredicto or "Análisis completado")
 

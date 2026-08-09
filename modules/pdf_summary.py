@@ -45,49 +45,87 @@ documentación, atención GREFA, recomendación). Si falta información, indica 
 {texto}
 """
 
-PROMPT_COMPROBADOR = """Eres un revisor de ofertas para licitaciones públicas españolas
-(PLACSP), trabajando para GREFA (Grupo para la Recuperación de la Fauna Autóctona).
+# Límites de envío a Gemini en el comprobador (parcial por diseño).
+MAX_OFERTA_COMPROBADOR = 4
+MAX_PLIEGO_COMPROBADOR = 3
+
+PROMPT_COMPROBADOR = """Eres un revisor de documentación de oferta para licitaciones públicas
+españolas (PLACSP), trabajando para GREFA.
 
 Te pasan:
-1) Documento(s) que GREFA quiere **presentar** (oferta, memoria, DECLAREs, anexos…).
-2) Opcionalmente, el/los **pliego(s)** o requisitos de referencia (PCAP/PPT u otros).
-3) Opcionalmente, una lista de requisitos / checklist.
+1) Uno o varios documentos de **oferta** que GREFA está preparando (puede ser un
+   subconjunto: p. ej. 3–4 de 16). NO asumas que es el paquete completo.
+2) Opcionalmente, documentos de referencia del expediente, en especial:
+   - **Cláusulas / condiciones administrativas** (PCAP, PCP, condiciones particulares…)
+   - **Prescripciones técnicas** (PPT / pliego de prescripciones técnicas)
+   - Anejos y, si existe, ficha resumen PLACSP («Pliegos.pdf» de la plataforma)
+3) Opcionalmente, checklist / requisitos adicionales del usuario.
 
-Tu tarea: comprobar si la documentación de oferta parece **válida para presentar**
-o qué le falta / qué errores tiene. No inventes datos que no estén en los ficheros.
-Si no hay pliego de referencia, evalúa coherencia formal interna y marca limitaciones.
+## Objetivo (muy importante)
+Comprobar si **los documentos subidos se adaptan / conforman** a lo exigido por:
+- las **prescripciones / cláusulas administrativas** (formas, sobres, DECLAREs,
+  solvencia, modelos administrativos, firmas, sobres electrónicos, etc.), y
+- las **prescripciones técnicas** (memoria, metodología, medios, criterios
+  técnicos, anexos técnicos, etc.),
+para **el tipo de documento** revisado (contenido, estructura, campos, criterios,
+referencias al expediente).
+
+NO castigues el veredicto porque falten otros documentos del paquete que el
+usuario **no ha subido**. Eso va solo a la sección de cobertura del paquete.
+
+Si solo hay ficha resumen PLACSP (objeto, CPV, importes, plazos, enlaces), úsala
+como contexto; si faltan PCAP y/o PPT completos, dilo en limitaciones y no
+inventes modelos.
+
+No inventes datos que no estén en los ficheros.
+Si no hay referencia administrativa ni técnica, evalúa solo formalidad interna
+y marca limitaciones.
 
 Responde en **español**, con markdown y estas secciones exactas:
 
 ## Veredicto
-Una sola línea al inicio con UNA de estas etiquetas:
-- `✅ APTO PARA PRESENTAR` — si no ves defectos bloqueantes evidentes
-- `⚠️ PRESENTABLE CON RESERVAS` — si hay huecos o riesgos pero no es claramente inválido
-- `❌ NO APTO / INCOMPLETO` — si faltan piezas críticas o hay errores graves
+Una sola línea al inicio con UNA de estas etiquetas (sobre **lo subido**, no
+sobre el paquete completo):
+- `✅ CONFORME` — lo revisado encaja con administrativas y/o técnicas aplicables
+  sin defectos bloqueantes evidentes
+- `⚠️ CONFORME CON RESERVAS` — útiles pero con huecos, dudas o riesgos en lo subido
+- `❌ NO CONFORME` — errores graves o clara desadaptación a PCAP/PPT **en
+  los documentos aportados**
 
-Luego 2–4 frases justificando el veredicto.
+Prohibido usar «NO APTO / INCOMPLETO» solo porque el paquete esté incompleto.
+Luego 2–4 frases justificando el veredicto (centradas en conformidad admin/técnica).
 
-## Errores y defectos detectados
+## Errores y defectos en lo subido
 Lista numerada. Cada ítem: gravedad (`Bloqueante` / `Importante` / `Menor`),
-qué está mal y dónde (documento / sección si se ve). Si no hay, escribe «Ninguno evidente».
+si proviene de **administrativas** o **técnicas**, qué está mal y en qué
+documento/sección. Si no hay, «Ninguno evidente».
 
-## Documentación o contenido que falta
-Lista de lo que debería aportarse o completarse (según pliego/checklist o buenas
-prácticas de licitación pública). Si no puedes deducirlo, dilo.
+## Adaptación a cláusulas administrativas
+Para cada documento de oferta que corresponda a exigencias administrativas:
+a qué cláusula/modelo del PCAP/PCP parece responder y si encaja (sí / parcial / no).
+Si no aplica a ninguno, indícalo.
+
+## Adaptación a prescripciones técnicas
+Igual respecto al PPT / prescripciones técnicas (memoria, criterios, medios, etc.).
+Si no aplica a ninguno, indícalo.
+
+## Cobertura del paquete (informativo; no decide el veredicto)
+Lista de documentación que PCAP/PPT/checklist exigen y que **no** está entre
+los PDF de oferta subidos. Orientación para completar el expediente, no un fallo
+de los ficheros revisados.
 
 ## Inconsistencias y riesgos
-Fechas, importes, NIF, firmas, sobres, referencias cruzadas, requisitos de
-solvencia no acreditados, formatos, etc.
+Fechas, importes, NIF, firmas, sobres, referencias cruzadas, formatos, etc.
+en lo aportado.
 
-## Checklist rápido antes de presentar
-5–10 casillas accionables (`[ ] …`) priorizadas.
+## Checklist sobre los documentos revisados
+5–10 casillas accionables (`[ ] …`) para mejorar **estos** ficheros.
 
 ## Limitaciones de este análisis
-Qué no has podido verificar (escaneos, firmas digitales, DEH, registro, etc.).
+Qué no has podido verificar (falta PCAP o PPT, escaneos, firmas, DEH, etc.).
 
-Sé concreto y accionable. No recomiendes presentar si hay defectos bloqueantes claros."""
-
-
+Sé concreto. El veredicto mide conformidad de lo subido frente a administrativas
+y técnicas, no la completitud del lote."""
 class PdfSummaryError(RuntimeError):
     """Error al procesar o resumir un PDF."""
 
@@ -259,7 +297,7 @@ def comprobar_documentos(
     titulo: str = "",
     requisitos_texto: str = "",
 ) -> str:
-    """Revisa si la documentación de oferta parece válida para presentar."""
+    """Comprueba si los PDF de oferta se adaptan al pliego (revisión parcial)."""
     oferta = _validar_pdfs(documentos_oferta, etiqueta="documentos de oferta")
     pliegos = []
     if documentos_pliego:
@@ -268,27 +306,47 @@ def comprobar_documentos(
         except PdfSummaryError:
             pliegos = []
 
+    omitidos_oferta = max(0, len(oferta) - MAX_OFERTA_COMPROBADOR)
+    omitidos_pliego = max(0, len(pliegos) - MAX_PLIEGO_COMPROBADOR)
+    oferta_envio = oferta[:MAX_OFERTA_COMPROBADOR]
+    pliegos_envio = pliegos[:MAX_PLIEGO_COMPROBADOR]
+
     contexto_parts = [
-        "Modo: COMPROBADOR DE DOCUMENTACIÓN A PRESENTAR.",
+        "Modo: COMPROBADOR DE CONFORMIDAD (revisión parcial).",
+        "El usuario puede haber subido solo parte del paquete. "
+        "El veredicto mide si LO SUBIDO se adapta a las cláusulas/prescripciones "
+        "ADMINISTRATIVAS (PCAP/PCP) y a las PRESCRIPCIONES TÉCNICAS (PPT); "
+        "NO marques NO CONFORME solo por documentos no aportados.",
         f"Expediente: {expediente or '—'}",
         f"Título / referencia: {titulo or '—'}",
-        "Documentos de OFERTA (a presentar): "
+        "Documentos de OFERTA subidos (revisar conformidad): "
         + ", ".join(
-            f"{d.get('tipo', 'OFERTA')}: {d.get('nombre', 'documento.pdf')}" for d in oferta
+            f"{d.get('tipo', 'OFERTA')}: {d.get('nombre', 'documento.pdf')}"
+            for d in oferta_envio
+        ),
+        f"Total PDF oferta seleccionados: {len(oferta)}"
+        + (
+            f" (se analizan los {len(oferta_envio)} primeros; {omitidos_oferta} omitidos)"
+            if omitidos_oferta
+            else ""
         ),
     ]
-    if pliegos:
+    if pliegos_envio:
         contexto_parts.append(
-            "Documentos de PLIEGO / requisitos (referencia): "
+            "Referencia del expediente (prioriza PCAP/administrativas y PPT/técnicas): "
             + ", ".join(
                 f"{d.get('tipo', 'PLIEGO')}: {d.get('nombre', 'documento.pdf')}"
-                for d in pliegos
+                for d in pliegos_envio
             )
         )
+        if omitidos_pliego:
+            contexto_parts.append(
+                f"Se omiten {omitidos_pliego} PDF de referencia por límite de análisis."
+            )
     else:
         contexto_parts.append(
-            "No se adjuntó pliego de referencia: evalúa solo formalidad interna "
-            "y señala limitaciones."
+            "No se adjuntaron cláusulas administrativas ni prescripciones técnicas: "
+            "evalúa solo formalidad interna y señala limitaciones."
         )
     if requisitos_texto and requisitos_texto.strip():
         contexto_parts.append(
@@ -297,16 +355,16 @@ def comprobar_documentos(
         )
     contexto = "\n".join(contexto_parts)
 
-    # Primero oferta (prioridad), luego pliego; tope ~6 PDFs en total.
     docs_envio = [
-        {**d, "tipo": d.get("tipo") or "OFERTA"} for d in oferta[:4]
+        {**d, "tipo": d.get("tipo") or "OFERTA"} for d in oferta_envio
     ] + [
-        {**d, "tipo": d.get("tipo") or "PLIEGO"} for d in pliegos[:2]
+        {**d, "tipo": d.get("tipo") or "PLIEGO"} for d in pliegos_envio
     ]
+    max_docs = MAX_OFERTA_COMPROBADOR + MAX_PLIEGO_COMPROBADOR
 
     try:
-        partes: list[Any] = ["=== DOCUMENTACIÓN A REVISAR ==="]
-        partes.extend(_partes_gemini_pdfs(docs_envio, max_docs=6))
+        partes: list[Any] = ["=== DOCUMENTACIÓN A REVISAR (CONFORMIDAD) ==="]
+        partes.extend(_partes_gemini_pdfs(docs_envio, max_docs=max_docs))
         return _generar_con_gemini(
             partes,
             contexto=contexto,
@@ -315,9 +373,9 @@ def comprobar_documentos(
     except PdfSummaryError as exc:
         LOGGER.info("Comprobador PDF directo falló (%s); se intenta texto.", exc)
 
-    bloques = ["=== OFERTA ===", _texto_desde_pdfs(oferta)]
-    if pliegos:
-        bloques.extend(["=== PLIEGO / REQUISITOS ===", _texto_desde_pdfs(pliegos)])
+    bloques = ["=== OFERTA ===", _texto_desde_pdfs(oferta_envio)]
+    if pliegos_envio:
+        bloques.extend(["=== PLIEGO / REQUISITOS ===", _texto_desde_pdfs(pliegos_envio)])
     combinado = "\n\n".join(b for b in bloques if b).strip()[:MAX_TEXTO_EXTRAIDO]
     if len(combinado) < 200:
         raise PdfSummaryError(
