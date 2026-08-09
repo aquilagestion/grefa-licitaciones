@@ -2438,6 +2438,9 @@ def pestana_analisis_pliegos(
 
 def pestana_comprobador_documentos() -> None:
     """Revisa si los documentos subidos se adaptan al pliego (revisión parcial)."""
+    max_oferta = int(getattr(pdf_summary, "MAX_OFERTA_COMPROBADOR", 4) or 4)
+    max_pliego = int(getattr(pdf_summary, "MAX_PLIEGO_COMPROBADOR", 3) or 3)
+
     st.subheader("Comprobador de documentos")
     st.caption(
         "Comprueba si **los PDF que subes se adaptan a las cláusulas administrativas "
@@ -2470,7 +2473,7 @@ def pestana_comprobador_documentos() -> None:
 
     st.markdown("**1. Documentos a revisar (obligatorio)**")
     st.caption(
-        f"Puedes subir varios; se analizan hasta {pdf_summary.MAX_OFERTA_COMPROBADOR}. "
+        f"Puedes subir varios; se analizan hasta {max_oferta}. "
         "El resto del paquete no hace fallar el veredicto."
     )
     oferta_files = st.file_uploader(
@@ -2482,9 +2485,9 @@ def pestana_comprobador_documentos() -> None:
 
     st.markdown("**2. Administrativas y técnicas de referencia (recomendado)**")
     st.caption(
-        f"Prioritario: cláusulas/condiciones administrativas (PCAP) + "
+        "Prioritario: cláusulas/condiciones administrativas (PCAP) + "
         f"prescripciones técnicas (PPT). Opcional: ficha PLACSP. "
-        f"Hasta {pdf_summary.MAX_PLIEGO_COMPROBADOR} PDF."
+        f"Hasta {max_pliego} PDF."
     )
     pliego_files = st.file_uploader(
         "PCAP / condiciones administrativas, PPT y, si quieres, ficha PLACSP",
@@ -2543,15 +2546,15 @@ def pestana_comprobador_documentos() -> None:
         }
         for f in (pliego_files or [])
     ]
-    if len(docs_oferta) > pdf_summary.MAX_OFERTA_COMPROBADOR:
+    if len(docs_oferta) > max_oferta:
         st.info(
             f"Has seleccionado {len(docs_oferta)} PDF de oferta; "
-            f"se analizarán los {pdf_summary.MAX_OFERTA_COMPROBADOR} primeros."
+            f"se analizarán los {max_oferta} primeros."
         )
-    if len(docs_pliego) > pdf_summary.MAX_PLIEGO_COMPROBADOR:
+    if len(docs_pliego) > max_pliego:
         st.info(
             f"Has seleccionado {len(docs_pliego)} PDF de pliego; "
-            f"se usarán los {pdf_summary.MAX_PLIEGO_COMPROBADOR} primeros como referencia."
+            f"se usarán los {max_pliego} primeros como referencia."
         )
 
     with st.spinner("Revisando conformidad con Gemini…"):
