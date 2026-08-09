@@ -106,19 +106,10 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Cómo comparto una licitación o una ayuda?",
         "respuesta": (
             "En la **tarjeta** o en la línea del listado: **📤 Compartir** "
-            "(WhatsApp, Email, Telegram, enlace oficial y texto para copiar). "
-            "En vista **tabla**, cada fila tiene **Compartir WhatsApp** y "
-            "**Compartir Email**. Funciona en licitaciones (PLACSP) y ayudas (BDNS)."
-        ),
-    },
-    {
-        "categoria": "Búsqueda e histórico",
-        "pregunta": "¿Cómo comparto una licitación o una ayuda?",
-        "respuesta": (
-            "En la **tarjeta** o en la **línea** del listado: botón **📤 Compartir** "
-            "(WhatsApp, Email, Telegram, enlace oficial y texto para copiar). "
-            "En vista **tabla**, cada fila tiene columnas **Compartir WhatsApp** y "
-            "**Compartir Email**. Vale para licitaciones (PLACSP) y ayudas (BDNS)."
+            "(WhatsApp, **Gmail**/Outlook, app de correo, Telegram, enlace y texto). "
+            "En el Space usa **Gmail** (el mailto del PC a veces no abre en el iframe). "
+            "En vista **tabla**, cada fila tiene WhatsApp y Gmail. "
+            "Vale para licitaciones (PLACSP) y ayudas (BDNS)."
         ),
     },
     {
