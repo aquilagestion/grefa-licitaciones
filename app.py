@@ -1070,10 +1070,12 @@ def _widget_resumen_pliego(
 ) -> None:
     """Multi-PDF (PCAP/PPT) + descarga desde ficha PLACSP + resumen IA."""
     if not pdf_summary.is_configured():
-        st.caption("Configura `[gemini] api_key` en Secrets para activar el resumen IA.")
+        st.caption(
+            "Configura IA en Secrets: `[gemini]`, `[groq]` y/o `[openrouter]` "
+            "(tier gratuito; orden Gemini → Groq → OpenRouter)."
+        )
     else:
-        st.caption(f"Gemini: `{pdf_summary.model_name()}`")
-        return
+        st.caption("IA: " + " · ".join(pdf_summary.proveedores_configurados()))
 
     clave = _clave_expediente(expediente, url)
     resumenes = st.session_state.setdefault("pdf_resumenes", {})
@@ -2425,10 +2427,12 @@ def pestana_analisis_pliegos(
     gemini_ok = pdf_summary.is_configured()
     if not gemini_ok:
         st.warning(
-            "Gemini no está configurado. Puedes localizar el expediente, pero para "
-            "analizar hace falta `[gemini] api_key` en Secrets "
-            "([Google AI Studio](https://aistudio.google.com/apikey))."
+            "Ninguna IA configurada. Puedes localizar el expediente, pero para "
+            "analizar hace falta al menos una api_key en Secrets: "
+            "`[gemini]`, `[groq]` o `[openrouter]` (tier gratuito)."
         )
+    else:
+        pdf_summary.mostrar_avisos_ia()
 
     expediente, url, titulo = "", "", ""
     documentos: list[dict] = []
@@ -2645,10 +2649,11 @@ def pestana_comprobador_documentos() -> None:
 
     if not pdf_summary.is_configured():
         st.warning(
-            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
-            "([Google AI Studio](https://aistudio.google.com/apikey))."
+            "Ninguna IA configurada. Añade en Secrets `[gemini]`, `[groq]` "
+            "y/o `[openrouter]` (tier gratuito)."
         )
         return
+    pdf_summary.mostrar_avisos_ia()
 
     st.session_state.setdefault("comp_lotes", [])
     st.session_state.setdefault("comp_lote_idx", 0)
@@ -3498,10 +3503,11 @@ def pestana_preparar_documentacion() -> None:
 
     if not pdf_summary.is_configured():
         st.warning(
-            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
-            "([Google AI Studio](https://aistudio.google.com/apikey))."
+            "Ninguna IA configurada. Añade en Secrets `[gemini]`, `[groq]` "
+            "y/o `[openrouter]` (tier gratuito; orden Gemini → Groq → OpenRouter)."
         )
         return
+    pdf_summary.mostrar_avisos_ia()
 
     ctx = st.session_state.get("prep_contexto") or {}
     if ctx.get("expediente"):
@@ -5403,10 +5409,22 @@ def main_licitaciones(usuario=None) -> None:
 
     sidebar_fuente_datos()
     sidebar_google_sheets()
+    with st.sidebar.expander("🤖 IA (Gemini → Groq → OpenRouter)", expanded=False):
+        if pdf_summary.is_configured():
+            for nombre_prov in pdf_summary.proveedores_configurados():
+                st.caption(f"✓ {nombre_prov}")
+            st.caption(
+                "Si Gemini agota cuota, aparece un aviso y se usa Groq u OpenRouter."
+            )
+        else:
+            st.caption(
+                "Añade api_key en `[gemini]`, `[groq]` o `[openrouter]` (Secrets)."
+            )
     if st.sidebar.button("🏠 Cambiar de modo", width="stretch", key="cambiar_modo_lic"):
         st.session_state["modo_app"] = None
         st.rerun()
     auth.barra_usuario(usuario)
+    pdf_summary.mostrar_avisos_ia()
 
     datos = st.session_state["datos"]
     if datos is None:

@@ -323,11 +323,20 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "respuesta": (
             "Has agotado la cuota gratuita del modelo. "
             "`gemini-3.x-flash` en free tier suele limitar a **~20 peticiones/día**. "
-            "En Secrets pon `model = \"gemini-2.5-flash\"` y "
-            "`fallback_models = \"gemini-flash-latest,gemini-2.5-flash-lite\"`. "
-            "La app reintenta y prueba fallbacks solos. "
-            "Revisa uso en https://ai.dev/rate-limit ; si necesitas más, activa "
-            "facturación en Google AI Studio."
+            "En Secrets pon `model = \"gemini-2.5-flash\"` y, además, "
+            "`[groq] api_key` y/o `[openrouter] api_key` (también gratis). "
+            "Orden: **Gemini → Groq → OpenRouter**. "
+            "Al cambiar de proveedor verás un **aviso emergente**. "
+            "Claves: https://console.groq.com/keys · https://openrouter.ai/keys"
+        ),
+    },
+    {
+        "categoria": "Problemas frecuentes",
+        "pregunta": "¿Puedo usar Groq u OpenRouter además de Gemini?",
+        "respuesta": (
+            "Sí. Configura `[groq]` y/o `[openrouter]` en Secrets. "
+            "Si Gemini falla por cuota, la app avisa y usa el siguiente. "
+            "Groq/OpenRouter reciben el texto extraído del pliego (no el PDF nativo)."
         ),
     },
     {

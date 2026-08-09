@@ -184,8 +184,85 @@ def model_fallbacks() -> list[str]:
     return salida
 
 
+def groq_api_key() -> str | None:
+    clave = _secret("groq", "api_key") or os.environ.get("GREFA_GROQ_API_KEY")
+    return str(clave).strip() if clave else None
+
+
+def groq_model() -> str:
+    return str(
+        _secret("groq", "model")
+        or os.environ.get("GREFA_GROQ_MODEL")
+        or "llama-3.3-70b-versatile"
+    ).strip()
+
+
+def openrouter_api_key() -> str | None:
+    clave = (
+        _secret("openrouter", "api_key")
+        or os.environ.get("GREFA_OPENROUTER_API_KEY")
+    )
+    return str(clave).strip() if clave else None
+
+
+def openrouter_model() -> str:
+    return str(
+        _secret("openrouter", "model")
+        or os.environ.get("GREFA_OPENROUTER_MODEL")
+        or "meta-llama/llama-3.3-70b-instruct:free"
+    ).strip()
+
+
 def is_configured() -> bool:
-    return bool(api_key())
+    """True si hay al menos un proveedor de IA gratuito configurado."""
+    return bool(api_key() or groq_api_key() or openrouter_api_key())
+
+
+def proveedores_configurados() -> list[str]:
+    nombres: list[str] = []
+    if api_key():
+        nombres.append(f"Gemini ({model_name()})")
+    if groq_api_key():
+        nombres.append(f"Groq ({groq_model()})")
+    if openrouter_api_key():
+        nombres.append(f"OpenRouter ({openrouter_model()})")
+    return nombres
+
+
+# Aviso emergente al cambiar de proveedor (toast + banner en la UI).
+_ULTIMO_AVISO_PROVEEDOR: str | None = None
+
+
+def consumir_aviso_proveedor() -> str | None:
+    global _ULTIMO_AVISO_PROVEEDOR
+    msg = _ULTIMO_AVISO_PROVEEDOR
+    _ULTIMO_AVISO_PROVEEDOR = None
+    return msg
+
+
+def _avisar_cambio_proveedor(mensaje: str) -> None:
+    """Toast emergente + aviso persistente en session_state."""
+    global _ULTIMO_AVISO_PROVEEDOR
+    _ULTIMO_AVISO_PROVEEDOR = mensaje
+    LOGGER.warning("%s", mensaje)
+    try:
+        import streamlit as st
+
+        st.session_state["ia_aviso_proveedor"] = mensaje
+        st.toast(mensaje, icon="⚠️")
+    except Exception:
+        pass
+
+
+def mostrar_avisos_ia() -> None:
+    """Muestra en pantalla el aviso de cambio de proveedor si lo hay."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return
+    msg = st.session_state.pop("ia_aviso_proveedor", None) or consumir_aviso_proveedor()
+    if msg:
+        st.warning(msg)
 
 
 def _es_error_cuota(exc: BaseException) -> bool:
@@ -215,23 +292,15 @@ def _es_cuota_diaria(exc: BaseException) -> bool:
     return "perday" in texto or "requestsperday" in texto
 
 
-def _mensaje_cuota_gemini(exc: BaseException, *, modelo: str) -> str:
-    espera = _segundos_reintento(exc)
-    tip_espera = (
-        f" Espera ~{int(espera) + 1}s e inténtalo de nuevo."
-        if espera and espera <= 120 and not _es_cuota_diaria(exc)
-        else " Si es cuota diaria del tier gratuito, hay que esperar al reset "
-        "(o cambiar de modelo / activar facturación en Google AI)."
-    )
+def _mensaje_sin_proveedores(exc: BaseException | None = None) -> str:
+    extras = ""
+    if exc:
+        extras = f" Último error: {exc}"
     return (
-        f"Cuota de Gemini agotada (modelo {modelo}, tier gratuito). "
-        f"{tip_espera} "
-        "Solución recomendada: en Secrets pon "
-        'model = "gemini-2.5-flash" y '
-        'fallback_models = "gemini-flash-latest,gemini-2.5-flash-lite" '
-        "(gemini-3.x free suele limitar a ~20 peticiones/día). "
-        "Uso: https://ai.dev/rate-limit · "
-        f"Detalle: {exc}"
+        "Ningún proveedor de IA disponible (cuota agotada o no configurado). "
+        "Configura en Secrets al menos uno: [gemini], [groq] o [openrouter] "
+        "(tier gratuito). Orden de uso: Gemini → Groq → OpenRouter."
+        + extras
     )
 
 
@@ -335,18 +404,102 @@ def _extraer_texto_documento(doc: dict[str, Any]) -> str:
     )
 
 
-def _generar_con_gemini(
+def _contenido_a_texto(contenido: list[Any]) -> str:
+    """Convierte partes multimodal (PDF Gemini) a texto para Groq/OpenRouter."""
+    bloques: list[str] = []
+    for item in contenido or []:
+        if isinstance(item, str):
+            if item.strip():
+                bloques.append(item.strip())
+            continue
+        if isinstance(item, dict) and item.get("data"):
+            mime = str(item.get("mime_type") or "")
+            datos = item.get("data") or b""
+            if "pdf" in mime and isinstance(datos, (bytes, bytearray)):
+                try:
+                    texto = _extraer_texto_pdf(bytes(datos))
+                    if texto.strip():
+                        bloques.append(texto.strip())
+                    else:
+                        bloques.append("[PDF sin texto extraíble]")
+                except Exception as exc:
+                    bloques.append(f"[PDF no legible: {exc}]")
+            else:
+                bloques.append(f"[Adjunto {mime or 'binario'} omitido]")
+    return "\n\n".join(bloques)[:MAX_TEXTO_EXTRAIDO]
+
+
+def _generar_openai_compatible(
+    *,
+    proveedor: str,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    headers_extra: dict[str, str] | None = None,
+) -> str:
+    """Chat completions (Groq / OpenRouter). Solo texto."""
+    import requests
+
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if headers_extra:
+        headers.update(headers_extra)
+    cuerpo = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Eres analista de contratación pública española para GREFA. "
+                    "Responde siempre en español, con markdown claro y accionable."
+                ),
+            },
+            {"role": "user", "content": prompt[:MAX_TEXTO_EXTRAIDO]},
+        ],
+        "temperature": 0.2,
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=cuerpo, timeout=180)
+    except requests.RequestException as exc:
+        raise PdfSummaryError(f"Error de red con {proveedor}: {exc}") from exc
+
+    if resp.status_code == 429 or (
+        resp.status_code == 402
+    ):  # OpenRouter sin créditos / rate limit
+        raise PdfSummaryError(
+            f"429 cuota {proveedor}: {resp.text[:500]}"
+        )
+    if resp.status_code >= 400:
+        raise PdfSummaryError(
+            f"Error {proveedor} HTTP {resp.status_code}: {resp.text[:800]}"
+        )
+    try:
+        data = resp.json()
+        texto = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+    except Exception as exc:
+        raise PdfSummaryError(f"Respuesta inválida de {proveedor}: {exc}") from exc
+    texto = (texto or "").strip()
+    if not texto:
+        raise PdfSummaryError(f"{proveedor} no devolvió texto.")
+    return texto
+
+
+def _intentar_gemini(
     contenido: list[Any],
     *,
-    contexto: str = "",
-    prompt_base: str | None = None,
+    prompt: str,
 ) -> str:
     clave = api_key()
     if not clave:
-        raise PdfSummaryError(
-            "Gemini no configurado. Añade [gemini] api_key en secrets.toml "
-            "o la variable GREFA_GEMINI_API_KEY."
-        )
+        raise PdfSummaryError("Gemini no configurado.")
 
     try:
         import google.generativeai as genai
@@ -354,12 +507,6 @@ def _generar_con_gemini(
         raise PdfSummaryError("Falta el paquete google-generativeai.") from exc
 
     genai.configure(api_key=clave)
-
-    base = prompt_base or PROMPT_PLIEGO
-    prompt = base
-    if contexto:
-        prompt = f"{base}\n\nContexto del expediente:\n{contexto}"
-
     candidatos = [model_name(), *model_fallbacks()]
     ultimo_exc: BaseException | None = None
     ultimo_modelo = candidatos[0]
@@ -367,8 +514,7 @@ def _generar_con_gemini(
     for idx, nombre_modelo in enumerate(candidatos):
         ultimo_modelo = nombre_modelo
         modelo = genai.GenerativeModel(nombre_modelo)
-        intentos = MAX_REINTENTOS_429 + 1
-        for intento in range(intentos):
+        for intento in range(MAX_REINTENTOS_429 + 1):
             try:
                 respuesta = modelo.generate_content([*contenido, prompt])
                 texto = (respuesta.text or "").strip()
@@ -377,9 +523,9 @@ def _generar_con_gemini(
                         "Gemini no devolvió texto. Prueba con otro PDF o modelo."
                     )
                 if idx > 0:
-                    LOGGER.info(
-                        "Gemini OK con modelo fallback %s (principal sin cuota).",
-                        nombre_modelo,
+                    _avisar_cambio_proveedor(
+                        f"Gemini principal sin cuota. "
+                        f"Se está usando el modelo Gemini «{nombre_modelo}»."
                     )
                 return texto
             except PdfSummaryError:
@@ -389,31 +535,118 @@ def _generar_con_gemini(
                 if not _es_error_cuota(exc):
                     raise PdfSummaryError(f"Error al llamar a Gemini: {exc}") from exc
                 espera = _segundos_reintento(exc)
-                # Reintento corto solo si parece límite por minuto, no cuota diaria.
                 if (
                     intento < MAX_REINTENTOS_429
                     and espera is not None
                     and espera <= MAX_ESPERA_429_S
                     and not _es_cuota_diaria(exc)
                 ):
-                    LOGGER.warning(
-                        "Gemini 429 en %s; reintento en %.1fs…",
-                        nombre_modelo,
-                        espera,
-                    )
                     time.sleep(min(espera + 1.0, MAX_ESPERA_429_S))
                     continue
-                LOGGER.warning(
-                    "Cuota Gemini en modelo %s; probando siguiente… (%s)",
-                    nombre_modelo,
-                    exc,
-                )
                 break
 
     assert ultimo_exc is not None
     raise PdfSummaryError(
-        _mensaje_cuota_gemini(ultimo_exc, modelo=ultimo_modelo)
+        f"Cuota Gemini agotada ({ultimo_modelo}): {ultimo_exc}"
     ) from ultimo_exc
+
+
+def _generar_con_gemini(
+    contenido: list[Any],
+    *,
+    contexto: str = "",
+    prompt_base: str | None = None,
+) -> str:
+    """Genera texto con cadena gratuita: Gemini → Groq → OpenRouter."""
+    if not is_configured():
+        raise PdfSummaryError(
+            "Ninguna IA configurada. Añade en Secrets [gemini] api_key y/o "
+            "[groq] api_key y/o [openrouter] api_key (tier gratuito)."
+        )
+
+    base = prompt_base or PROMPT_PLIEGO
+    prompt = base
+    if contexto:
+        prompt = f"{base}\n\nContexto del expediente:\n{contexto}"
+
+    errores: list[str] = []
+    gemini_intento = False
+
+    # 1) Gemini (PDF nativo + modelos fallback internos)
+    if api_key():
+        gemini_intento = True
+        try:
+            return _intentar_gemini(contenido, prompt=prompt)
+        except PdfSummaryError as exc:
+            errores.append(str(exc))
+            if not _es_error_cuota(exc) and "no configurado" not in str(exc).lower():
+                # Error no-cuota: aún así probar otros si hay; si no, relanzar
+                if not (groq_api_key() or openrouter_api_key()):
+                    raise
+            LOGGER.warning("Gemini no disponible; se prueba Groq/OpenRouter. %s", exc)
+
+    texto_docs = _contenido_a_texto(contenido)
+    prompt_texto = prompt
+    if texto_docs.strip():
+        prompt_texto = (
+            f"{prompt}\n\n---\nDocumentos (texto extraído):\n{texto_docs}\n---"
+        )
+
+    # 2) Groq
+    if groq_api_key():
+        if gemini_intento:
+            _avisar_cambio_proveedor(
+                "Cuota o fallo de Gemini. Se usará Groq (Llama, tier gratuito) "
+                "para esta petición."
+            )
+        else:
+            _avisar_cambio_proveedor(
+                "Gemini no está configurado. Se usará Groq (Llama, tier gratuito)."
+            )
+        try:
+            return _generar_openai_compatible(
+                proveedor="Groq",
+                base_url="https://api.groq.com/openai/v1",
+                api_key=groq_api_key() or "",
+                model=groq_model(),
+                prompt=prompt_texto,
+            )
+        except PdfSummaryError as exc:
+            errores.append(str(exc))
+            if not _es_error_cuota(exc) and not openrouter_api_key():
+                raise
+            LOGGER.warning("Groq no disponible; se prueba OpenRouter. %s", exc)
+
+    # 3) OpenRouter (modelos :free)
+    if openrouter_api_key():
+        if gemini_intento or groq_api_key():
+            _avisar_cambio_proveedor(
+                "Gemini/Groq sin cuota o no disponibles. "
+                "Se usará OpenRouter (modelo gratuito) para esta petición."
+            )
+        else:
+            _avisar_cambio_proveedor(
+                "Solo OpenRouter configurado. Se usará su modelo gratuito."
+            )
+        try:
+            return _generar_openai_compatible(
+                proveedor="OpenRouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_api_key() or "",
+                model=openrouter_model(),
+                prompt=prompt_texto,
+                headers_extra={
+                    "HTTP-Referer": "https://huggingface.co/spaces",
+                    "X-Title": "GREFA Licitaciones",
+                },
+            )
+        except PdfSummaryError as exc:
+            errores.append(str(exc))
+            raise PdfSummaryError(_mensaje_sin_proveedores(exc)) from exc
+
+    raise PdfSummaryError(
+        _mensaje_sin_proveedores(Exception(" | ".join(errores) if errores else None))
+    )
 
 
 def _validar_pdfs(documentos: list[dict[str, Any]], *, etiqueta: str) -> list[dict[str, Any]]:
