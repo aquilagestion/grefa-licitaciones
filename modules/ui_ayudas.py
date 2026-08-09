@@ -16,7 +16,7 @@ from config.default_criteria import (
     flatten_keywords,
 )
 from config.keyword_catalog import active_keywords_grouped, default_term_catalog
-from modules import ayuda_faq, grefa_filter, sheets_store
+from modules import ayuda_faq, grefa_filter, sheets_store, ui_compartir
 from modules.exporter import timestamped_filename, to_csv_bytes, to_excel_bytes
 from modules.ingestion_bdns import (
     IngestionError,
@@ -355,11 +355,15 @@ def _tarjeta(fila: pd.Series) -> None:
     )
     clave = _clave(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
     en_mis = clave in _claves_interes()
-    c1, c2, c3 = st.columns([1, 1, 2])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.5])
     with c1:
         if fila.get("url"):
             st.link_button("Ver en BDNS ↗", fila["url"], width="stretch")
     with c2:
+        ui_compartir.render_compartir(
+            fila, key=f"share_ayu_{clave[:40]}", fuente_label="BDNS"
+        )
+    with c3:
         etiqueta = "⭐ Ya en Mis Conv." if en_mis else "⭐ A Mis Convocatorias"
         if st.button(
             etiqueta,
@@ -376,7 +380,7 @@ def _tarjeta(fila: pd.Series) -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-    with c3:
+    with c4:
         with st.expander("¿Por qué esta puntuación?"):
             st.write(fila.get("justificacion", ""))
             if fila.get("descripcion"):
@@ -530,8 +534,26 @@ def _pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
             "estado",
             "url",
         ]
-        mostrar = oportunidades[[c for c in cols if c in oportunidades.columns]].copy()
-        st.dataframe(mostrar, width="stretch", hide_index=True, height=560)
+        base = oportunidades[[c for c in cols if c in oportunidades.columns]].copy()
+        mostrar = ui_compartir.enriquecer_dataframe_compartir(
+            base, fuente_label="BDNS"
+        )
+        st.dataframe(
+            mostrar,
+            width="stretch",
+            hide_index=True,
+            height=560,
+            column_config={
+                "url": st.column_config.LinkColumn(
+                    "Enlace BDNS", display_text="Abrir BDNS"
+                ),
+                **ui_compartir.COLUMN_CONFIG_COMPARTIR,
+            },
+        )
+        st.caption(
+            "En cada fila: **Compartir WhatsApp** / **Compartir Email** "
+            "y el enlace oficial BDNS."
+        )
 
 
 def _pestana_buscador(df: pd.DataFrame) -> None:
@@ -575,11 +597,21 @@ def _pestana_mis() -> None:
                     if x
                 )
             )
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 if fila.get("url"):
                     st.link_button("BDNS ↗", fila["url"], width="stretch")
             with c2:
+                ui_compartir.render_compartir(
+                    {
+                        "titulo": fila.get("titulo") or "",
+                        "expediente": fila.get("expediente") or "",
+                        "url": fila.get("url") or "",
+                    },
+                    key=f"mis_ayu_share_{idx}",
+                    fuente_label="BDNS",
+                )
+            with c3:
                 if st.button("Quitar ⭐", key=f"mis_ayu_del_{idx}", width="stretch"):
                     try:
                         _marcar_interes(fila, interesa=False)

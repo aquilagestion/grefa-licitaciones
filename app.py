@@ -53,6 +53,7 @@ from modules import (  # noqa: E402
     sheets_catalog,
     sheets_historico,
     sheets_store,
+    ui_compartir,
 )
 from modules.admin_ambito import NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVEL_NACIONAL, NIVELES_ADMIN  # noqa: E402
 from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
@@ -621,7 +622,25 @@ CONFIG_COLUMNAS = {
     COLUMN_LABELS["fecha_limite"]: st.column_config.DatetimeColumn(
         "Límite presentación", format="DD/MM/YYYY"
     ),
+    **ui_compartir.COLUMN_CONFIG_COMPARTIR,
 }
+
+
+def _dataframe_con_compartir(
+    df: pd.DataFrame,
+    columnas: list[str],
+    *,
+    fuente_label: str = "PLACSP",
+) -> pd.DataFrame:
+    """Tabla lista para mostrar, con columnas de compartir por fila."""
+    enriquecido = ui_compartir.enriquecer_dataframe_compartir(
+        df, fuente_label=fuente_label
+    )
+    cols = list(columnas)
+    for extra in ui_compartir.COLUMNAS_COMPARTIR:
+        if extra not in cols:
+            cols.append(extra)
+    return tabla_para_mostrar(enriquecido, cols)
 
 
 def botones_exportacion(df: pd.DataFrame, sufijo: str, permitir_sheets: bool = False) -> None:
@@ -774,7 +793,7 @@ def _render_resultados_con_interes(
             st.caption(meta)
         if fila.get("url"):
             st.markdown(f"[PLACSP ↗]({fila.get('url')})")
-        c_mis, c_prep = st.columns(2)
+        c_mis, c_prep, c_share = st.columns(3)
         with c_mis:
             etiqueta_mis = (
                 "⭐ Ya en Mis Licitaciones" if marcado else "⭐ A Mis Licitaciones"
@@ -810,6 +829,12 @@ def _render_resultados_con_interes(
                     organo=str(fila.get("organo_contratacion") or ""),
                     url=str(fila.get("url") or ""),
                 )
+        with c_share:
+            ui_compartir.render_compartir(
+                fila,
+                key=f"share_from_{clave_prefix}_{i}_{clave[:36]}",
+                fuente_label="PLACSP",
+            )
     if len(resultados) > max_filas:
         st.caption(f"Mostrando {max_filas} de {len(resultados):,} (exporta para ver todas).")
 
@@ -1368,11 +1393,15 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         str(fila.get("expediente") or ""), str(fila.get("url") or "")
     )
     en_mis = clave_card in _claves_interes()
-    columna_enlace, columna_mis, columna_prep, columna_motivo = st.columns([1, 1, 1, 2])
-    with columna_enlace:
+    col_enlace, col_share, col_mis, col_prep, col_motivo = st.columns([1, 1, 1, 1, 1.5])
+    with col_enlace:
         if fila.get("url"):
             st.link_button("Ver en PLACSP ↗", fila["url"], width="stretch")
-    with columna_mis:
+    with col_share:
+        ui_compartir.render_compartir(
+            fila, key=f"share_card_{clave_card[:40]}", fuente_label="PLACSP"
+        )
+    with col_mis:
         etiqueta_mis = (
             "⭐ Ya en Mis Lic." if en_mis else "⭐ A Mis Licitaciones"
         )
@@ -1393,7 +1422,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-    with columna_prep:
+    with col_prep:
         if st.button(
             "📝 Preparar docs",
             key=f"prep_card_{clave_card[:40]}",
@@ -1405,7 +1434,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
                 organo=str(fila.get("organo_contratacion") or ""),
                 url=str(fila.get("url") or ""),
             )
-    with columna_motivo:
+    with col_motivo:
         with st.expander("¿Por qué esta puntuación?"):
             st.write(fila.get("justificacion", ""))
             if fila.get("descripcion"):
@@ -2242,12 +2271,13 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
                 "Usa la vista de tabla o exporta el listado completo."
             )
     else:
-        vista_tabla = tabla_para_mostrar(
+        vista_tabla = _dataframe_con_compartir(
             oportunidades,
             [
                 "relevancia", "badge", "titulo", "organo_contratacion", "presupuesto_sin_iva",
                 "ubicacion", "cpvs_texto", "keywords_match", "fecha_actualizacion", "estado", "url",
             ],
+            fuente_label="PLACSP",
         )
         st.dataframe(
             vista_tabla,
@@ -2255,6 +2285,10 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
             hide_index=True,
             column_config=CONFIG_COLUMNAS,
             height=560,
+        )
+        st.caption(
+            "En cada fila: columnas **Compartir WhatsApp** / **Compartir Email** "
+            "y el enlace oficial PLACSP."
         )
 
 
@@ -4390,7 +4424,7 @@ def pestana_mis_licitaciones() -> None:
                 except Exception as exc:
                     st.error(str(exc))
 
-            col_prep, col_del = st.columns(2)
+            col_prep, col_share, col_del = st.columns(3)
             with col_prep:
                 if st.button(
                     "📝 Preparar documentación",
@@ -4403,6 +4437,16 @@ def pestana_mis_licitaciones() -> None:
                         organo=str(fila.get("organo") or ""),
                         url=str(fila.get("url") or ""),
                     )
+            with col_share:
+                ui_compartir.render_compartir(
+                    {
+                        "titulo": fila.get("titulo") or "",
+                        "expediente": fila.get("expediente") or "",
+                        "url": fila.get("url") or "",
+                    },
+                    key=f"mis_share_{idx}_{clave[:36]}",
+                    fuente_label="PLACSP",
+                )
             with col_del:
                 quitar = st.button(
                     "🗑️ Quitar",
@@ -4947,7 +4991,11 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
     if "relevancia" in resultados.columns and resultados["relevancia"].notna().any():
         columnas = ["relevancia", "categoria"] + columnas
 
-    vista_tabla = tabla_para_mostrar(resultados, [c for c in columnas if c in resultados.columns])
+    vista_tabla = _dataframe_con_compartir(
+        resultados,
+        [c for c in columnas if c in resultados.columns],
+        fuente_label="PLACSP",
+    )
     with st.expander("Tabla completa", expanded=False):
         st.dataframe(
             vista_tabla,
@@ -4956,6 +5004,7 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
             column_config=CONFIG_COLUMNAS,
             height=420,
         )
+        st.caption("Por fila: **Compartir WhatsApp** / **Compartir Email**.")
 
 
 def pestana_buscador(df: pd.DataFrame) -> None:
@@ -5090,13 +5139,14 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 
     _render_resultados_con_interes(resultados, clave_prefix="busc")
 
-    vista_tabla = tabla_para_mostrar(
+    vista_tabla = _dataframe_con_compartir(
         resultados,
         [
             "relevancia", "categoria", "expediente", "titulo", "organo_contratacion",
             "nivel_administracion", "presupuesto_sin_iva", "ubicacion", "tipo_contrato", "cpvs_texto",
             "fecha_actualizacion", "fecha_limite", "estado", "url",
         ],
+        fuente_label="PLACSP",
     )
     with st.expander("Tabla completa", expanded=False):
         st.dataframe(
@@ -5106,6 +5156,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
             column_config=CONFIG_COLUMNAS,
             height=420,
         )
+        st.caption("Por fila: **Compartir WhatsApp** / **Compartir Email**.")
 
 
 # ---------------------------------------------------------------------------

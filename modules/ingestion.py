@@ -86,6 +86,8 @@ COLUMN_LABELS: dict[str, str] = {
     "cpvs_match": "CPV coincidentes",
     "keywords_match": "Palabras clave coincidentes",
     "justificacion": "Motivo de la puntuación",
+    "compartir_whatsapp": "Compartir WhatsApp",
+    "compartir_email": "Compartir Email",
 }
 
 CONTRACT_TYPES: dict[str, str] = {
