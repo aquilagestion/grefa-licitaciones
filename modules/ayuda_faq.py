@@ -92,6 +92,16 @@ SECCIONES_FAQ: list[dict[str, str]] = [
     },
     {
         "categoria": "Preparar documentación",
+        "pregunta": "¿Puedo subir documentos en el formulario en lugar de escribir?",
+        "respuesta": (
+            "Sí. En el paso 2 puedes rellenar campos de texto **y/o** subir hasta "
+            "**4 archivos** (PDF, Word .docx o Excel .xlsx). "
+            "Asigna cada archivo a un **campo** y usa **Comprobar documento** "
+            "para ver si corresponde y es válido. Luego se usan al generar el borrador."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
         "pregunta": "¿Cómo uso los anexos campo a campo?",
         "respuesta": (
             "En el paso 1, tras extraer exigencias, pulsa "

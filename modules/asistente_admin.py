@@ -639,12 +639,137 @@ def extraer_exigencias(
         )
 
 
+MAX_DOCS_APOYO = 4
+
+PROMPT_DOC_CAMPO = """Eres un revisor de documentación de oferta para licitaciones públicas
+españolas (PLACSP), trabajando para GREFA.
+
+Te pasan:
+1) Un **documento aportado** por GREFA.
+2) El **campo del formulario** al que se quiere asociar (nombre y contexto).
+3) Exigencias / modelos del pliego del bloque (administrativo, económico o técnico).
+
+## Objetivo
+Comprobar si ese documento **corresponde, se adapta y es válido** para el campo
+indicado según el pliego (tipo de documento, contenido, estructura, modelo/anexo,
+idioma, firmas visibles, datos coherentes con el campo).
+
+No inventes requisitos que no estén en el pliego o en la descripción del campo.
+Si el pliego no detalla el campo, evalúa coherencia formal razonable y márcalo
+en limitaciones.
+
+Responde en **español**, markdown, con estas secciones:
+
+## Veredicto
+Una línea con UNA etiqueta:
+- `✅ VÁLIDO PARA EL CAMPO` — encaja con lo pedido para ese campo
+- `⚠️ VÁLIDO CON RESERVAS` — útil pero incompleto o con dudas
+- `❌ NO VÁLIDO / NO CORRESPONDE` — no es el documento del campo o no se adapta
+
+Luego 2–4 frases.
+
+## Correspondencia con el campo
+¿Es el tipo de documento/modelo que pide ese campo? sí / parcial / no.
+
+## Adaptación al pliego / modelo
+Estructura, cláusulas, anexos o formato exigido vs lo aportado.
+
+## Defectos o huecos
+Lista breve (gravedad Bloqueante / Importante / Menor). Si no hay: «Ninguno evidente».
+
+## Limitaciones
+Qué no has podido verificar.
+
+Sé concreto. El veredicto es solo sobre **este documento ↔ este campo**."""
+
+
+def listar_campos_formulario(
+    bloque: str = "admin",
+    modelos: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Campos del bloque (+ anexos dinámicos) para asociar documentos."""
+    salida: list[dict[str, str]] = []
+    for campo in config_bloque(bloque)["campos"]:
+        salida.append(
+            {
+                "id": str(campo["id"]),
+                "label": str(campo["label"]),
+                "grupo": str(campo.get("grupo") or ""),
+            }
+        )
+    for campo in campos_desde_modelos(modelos or {}):
+        salida.append(
+            {
+                "id": str(campo["id"]),
+                "label": str(campo["label"]),
+                "grupo": str(campo.get("grupo") or ""),
+            }
+        )
+    return salida
+
+
+def comprobar_documento_para_campo(
+    bloque: str,
+    documento: dict[str, Any],
+    *,
+    campo_id: str,
+    campo_label: str,
+    exigencias: str = "",
+    documentos_pliego: list[dict[str, Any]] | None = None,
+    modelos: dict[str, Any] | None = None,
+) -> str:
+    """Valida si un documento aportado corresponde al campo del formulario."""
+    if not documento or not documento.get("bytes"):
+        raise pdf_summary.PdfSummaryError("No hay documento para comprobar.")
+    if not (campo_id or campo_label):
+        raise pdf_summary.PdfSummaryError(
+            "Indica a qué campo del formulario corresponde el documento."
+        )
+
+    cfg = config_bloque(bloque)
+    utiles = pdf_summary._validar_pdfs([documento], etiqueta="documento aportado")
+    doc = utiles[0]
+    estructura = ""
+    if modelos and modelos.get("anexos"):
+        estructura = "MODELOS/ANEXOS DEL PLIEGO:\n" + json.dumps(
+            modelos.get("anexos"), ensure_ascii=False, indent=2
+        )[:10000]
+
+    contexto = (
+        f"Bloque: {cfg['etiqueta']}\n"
+        f"Campo del formulario (id): {campo_id or '—'}\n"
+        f"Campo del formulario (etiqueta): {campo_label or '—'}\n"
+        f"Nombre del fichero: {doc.get('nombre', 'documento')}\n\n"
+        "EXIGENCIAS DEL PLIEGO (bloque):\n"
+        f"{(exigencias or 'No disponibles').strip()[:12000]}\n\n"
+        f"{estructura}"
+    )
+    partes: list[Any] = [
+        "Comprueba si el documento adjunto corresponde y es válido "
+        f"para el campo «{campo_label or campo_id}»."
+    ]
+    partes.extend(pdf_summary._partes_gemini_pdfs([doc], max_docs=1))
+    if documentos_pliego:
+        try:
+            pliegos = _docs_pliego(documentos_pliego)[:2]
+            partes.append("Pliego de referencia (modelos oficiales):")
+            partes.extend(pdf_summary._partes_gemini_pdfs(pliegos, max_docs=2))
+        except pdf_summary.PdfSummaryError:
+            pass
+    return pdf_summary._generar_con_gemini(
+        partes,
+        contexto=contexto,
+        prompt_base=PROMPT_DOC_CAMPO,
+    )
+
+
 def generar_borrador(
     bloque: str,
     datos: dict[str, str],
     exigencias: str,
     *,
     documentos_pliego: list[dict[str, Any]] | None = None,
+    documentos_apoyo: list[dict[str, Any]] | None = None,
     modelos: dict[str, Any] | None = None,
 ) -> str:
     cfg = config_bloque(bloque)
@@ -658,21 +783,42 @@ def generar_borrador(
     if extras:
         lineas_datos.append("VARIABLES DE ANEXOS/MODELOS:")
         lineas_datos.extend(extras)
+    extracto_apoyo = str((datos or {}).get("_extracto_docs_apoyo") or "").strip()
+    if extracto_apoyo:
+        lineas_datos.append(
+            "EXTRACTO DE DOCUMENTOS APORTADOS POR GREFA:\n" + extracto_apoyo[:20000]
+        )
     estructura = ""
     if modelos and modelos.get("anexos"):
         estructura = "ESTRUCTURA OBLIGATORIA DE ANEXOS DEL PLIEGO:\n" + json.dumps(
             modelos.get("anexos"), ensure_ascii=False, indent=2
         )[:12000]
     contexto = (
-        "DATOS DEL FORMULARIO:\n"
+        "DATOS DEL FORMULARIO (texto y/o documentos aportados):\n"
         f"{chr(10).join(lineas_datos)}\n\n"
         "EXIGENCIAS EXTRAÍDAS DEL PLIEGO:\n"
         f"{(exigencias or 'No disponibles').strip()[:16000]}\n\n"
         f"{estructura}"
     )
     partes: list[Any] = [
-        f"Genera el borrador {cfg['etiqueta'].lower()} con la información anterior."
+        f"Genera el borrador {cfg['etiqueta'].lower()} con la información anterior. "
+        "Si hay documentos aportados por GREFA, úsalos como fuente de datos "
+        "(junto o en lugar de los campos de texto)."
     ]
+    if documentos_apoyo:
+        try:
+            utiles_ap = pdf_summary._validar_pdfs(
+                documentos_apoyo, etiqueta="documentos aportados"
+            )[:MAX_DOCS_APOYO]
+            partes.append(
+                "DOCUMENTOS APORTADOS POR GREFA (fuente de datos del formulario; "
+                "NO son el pliego oficial):"
+            )
+            partes.extend(
+                pdf_summary._partes_gemini_pdfs(utiles_ap, max_docs=MAX_DOCS_APOYO)
+            )
+        except pdf_summary.PdfSummaryError:
+            pass
     if documentos_pliego:
         try:
             tope = 3 if bloque == "tec" else 2
