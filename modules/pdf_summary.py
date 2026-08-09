@@ -1,9 +1,10 @@
-"""Resumen de pliegos PDF con Gemini (tier gratuito de Google AI Studio)."""
+"""Resumen / comprobación de pliegos y ofertas con Gemini (PDF, Word, Excel)."""
 
 from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from modules.sheets_store import _secret
@@ -14,6 +15,13 @@ DEFAULT_MODEL = "gemini-flash-latest"
 MAX_PDF_BYTES = 15 * 1024 * 1024  # ~15 MB
 MAX_TEXTO_EXTRAIDO = 120_000
 
+#: Extensiones aceptadas en uploaders y validación.
+EXTENSIONES_DOC = ("pdf", "docx", "xlsx")
+MIME_POR_EXT = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 PROMPT_PLIEGO = """Eres un analista de licitaciones públicas para el equipo GREFA
 (Grupo para la Recuperación de la Fauna Autóctona).
 
@@ -126,8 +134,10 @@ Qué no has podido verificar (falta PCAP o PPT, escaneos, firmas, DEH, etc.).
 
 Sé concreto. El veredicto mide conformidad de lo subido frente a administrativas
 y técnicas, no la completitud del lote."""
+
+
 class PdfSummaryError(RuntimeError):
-    """Error al procesar o resumir un PDF."""
+    """Error al procesar o resumir un documento (PDF / Word / Excel)."""
 
 
 def api_key() -> str | None:
@@ -141,6 +151,10 @@ def model_name() -> str:
 
 def is_configured() -> bool:
     return bool(api_key())
+
+
+def _extension(nombre: str) -> str:
+    return Path(nombre or "").suffix.lower().lstrip(".")
 
 
 def _extraer_texto_pdf(pdf_bytes: bytes) -> str:
@@ -159,6 +173,84 @@ def _extraer_texto_pdf(pdf_bytes: bytes) -> str:
         return "\n\n".join(partes)[:MAX_TEXTO_EXTRAIDO]
     except Exception as exc:
         raise PdfSummaryError(f"No se pudo leer el PDF: {exc}") from exc
+
+
+def _extraer_texto_docx(datos: bytes) -> str:
+    try:
+        from io import BytesIO
+
+        from docx import Document
+    except ImportError as exc:
+        raise PdfSummaryError("Falta python-docx para leer Word (.docx).") from exc
+    try:
+        doc = Document(BytesIO(datos))
+        partes: list[str] = []
+        for p in doc.paragraphs:
+            t = (p.text or "").strip()
+            if t:
+                partes.append(t)
+            if sum(len(x) for x in partes) >= MAX_TEXTO_EXTRAIDO:
+                break
+        for tabla in doc.tables:
+            for fila in tabla.rows:
+                celdas = [((c.text or "").strip()) for c in fila.cells]
+                if any(celdas):
+                    partes.append(" | ".join(celdas))
+            if sum(len(x) for x in partes) >= MAX_TEXTO_EXTRAIDO:
+                break
+        return "\n".join(partes)[:MAX_TEXTO_EXTRAIDO]
+    except Exception as exc:
+        raise PdfSummaryError(f"No se pudo leer el Word (.docx): {exc}") from exc
+
+
+def _extraer_texto_xlsx(datos: bytes) -> str:
+    try:
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise PdfSummaryError("Falta openpyxl para leer Excel (.xlsx).") from exc
+    try:
+        wb = load_workbook(BytesIO(datos), read_only=True, data_only=True)
+        partes: list[str] = []
+        for hoja in wb.worksheets:
+            partes.append(f"## Hoja: {hoja.title}")
+            for fila in hoja.iter_rows(values_only=True):
+                vals = ["" if v is None else str(v).strip() for v in fila]
+                if any(vals):
+                    partes.append(" | ".join(vals))
+                if sum(len(x) for x in partes) >= MAX_TEXTO_EXTRAIDO:
+                    break
+            if sum(len(x) for x in partes) >= MAX_TEXTO_EXTRAIDO:
+                break
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return "\n".join(partes)[:MAX_TEXTO_EXTRAIDO]
+    except Exception as exc:
+        raise PdfSummaryError(f"No se pudo leer el Excel (.xlsx): {exc}") from exc
+
+
+def _extraer_texto_documento(doc: dict[str, Any]) -> str:
+    """Extrae texto según extensión (pdf / docx / xlsx)."""
+    nombre = str(doc.get("nombre") or "documento.pdf")
+    datos = doc.get("bytes") or b""
+    ext = _extension(nombre)
+    if ext == "pdf":
+        return _extraer_texto_pdf(datos)
+    if ext == "docx":
+        return _extraer_texto_docx(datos)
+    if ext == "xlsx":
+        return _extraer_texto_xlsx(datos)
+    if ext in {"doc", "xls"}:
+        raise PdfSummaryError(
+            f"{nombre}: el formato .{ext} antiguo no está soportado. "
+            "Guárdalo como .docx o .xlsx e inténtalo de nuevo."
+        )
+    raise PdfSummaryError(
+        f"{nombre}: extensión no soportada. Usa PDF, Word (.docx) o Excel (.xlsx)."
+    )
 
 
 def _generar_con_gemini(
@@ -200,37 +292,63 @@ def _generar_con_gemini(
 
 
 def _validar_pdfs(documentos: list[dict[str, Any]], *, etiqueta: str) -> list[dict[str, Any]]:
+    """Valida PDF / Word / Excel (nombre histórico por compatibilidad)."""
     utiles = [
         d
         for d in documentos
         if isinstance(d, dict) and d.get("bytes") and len(d.get("bytes") or b"") > 0
     ]
     if not utiles:
-        raise PdfSummaryError(f"No hay PDFs válidos en {etiqueta}.")
+        raise PdfSummaryError(
+            f"No hay documentos válidos en {etiqueta} (PDF, DOCX o XLSX)."
+        )
     for doc in utiles:
+        nombre = str(doc.get("nombre") or "documento")
+        ext = _extension(nombre)
+        if ext not in EXTENSIONES_DOC and ext not in {"doc", "xls"}:
+            raise PdfSummaryError(
+                f"{nombre}: formato no soportado. Usa PDF, Word (.docx) o Excel (.xlsx)."
+            )
         if len(doc["bytes"]) > MAX_PDF_BYTES:
             raise PdfSummaryError(
-                f"{doc.get('nombre', 'PDF')} supera {MAX_PDF_BYTES // (1024 * 1024)} MB."
+                f"{nombre} supera {MAX_PDF_BYTES // (1024 * 1024)} MB."
             )
     return utiles
 
 
 def _partes_gemini_pdfs(documentos: list[dict[str, Any]], *, max_docs: int = 4) -> list[Any]:
+    """Prepara partes para Gemini: PDF nativo; Word/Excel como texto extraído."""
     partes: list[Any] = []
     for doc in documentos[:max_docs]:
-        etiqueta = f"[{doc.get('tipo', 'OTRO')}] {doc.get('nombre', 'documento.pdf')}"
+        nombre = str(doc.get("nombre") or "documento.pdf")
+        etiqueta = f"[{doc.get('tipo', 'OTRO')}] {nombre}"
         partes.append(etiqueta)
-        partes.append({"mime_type": "application/pdf", "data": doc["bytes"]})
+        ext = _extension(nombre)
+        if ext == "pdf":
+            partes.append({"mime_type": "application/pdf", "data": doc["bytes"]})
+        else:
+            # Word/Excel: texto (Gemini no siempre acepta estos MIME con fiabilidad).
+            texto = _extraer_texto_documento(doc)
+            if len(texto.strip()) < 20:
+                raise PdfSummaryError(
+                    f"{nombre} no tiene texto extraíble (vacío o solo imágenes)."
+                )
+            partes.append(
+                f"Contenido extraído de {nombre} ({ext}):\n---\n{texto}\n---"
+            )
     return partes
 
 
 def _texto_desde_pdfs(documentos: list[dict[str, Any]]) -> str:
     bloques: list[str] = []
     for doc in documentos:
-        texto = _extraer_texto_pdf(doc["bytes"])
+        try:
+            texto = _extraer_texto_documento(doc)
+        except PdfSummaryError:
+            continue
         if texto.strip():
             bloques.append(
-                f"### {doc.get('tipo', 'OTRO')} — {doc.get('nombre', 'documento.pdf')}\n{texto}"
+                f"### {doc.get('tipo', 'OTRO')} — {doc.get('nombre', 'documento')}\n{texto}"
             )
     return "\n\n".join(bloques)[:MAX_TEXTO_EXTRAIDO]
 
@@ -279,8 +397,8 @@ def summarize_documentos(
     combinado = _texto_desde_pdfs(utiles)
     if len(combinado.strip()) < 200:
         raise PdfSummaryError(
-            "Los PDF parecen escaneados o sin texto seleccionable. "
-            "Sube PDFs con texto o nativos digitales."
+            "No se pudo extraer texto suficiente. "
+            "Sube PDF con texto, Word (.docx) o Excel (.xlsx) nativos."
         )
 
     prompt = PROMPT_TEXTO.format(texto=combinado)
@@ -324,7 +442,7 @@ def comprobar_documentos(
             f"{d.get('tipo', 'OFERTA')}: {d.get('nombre', 'documento.pdf')}"
             for d in oferta_envio
         ),
-        f"Total PDF oferta seleccionados: {len(oferta)}"
+        f"Total documentos oferta seleccionados: {len(oferta)}"
         + (
             f" (se analizan los {len(oferta_envio)} primeros; {omitidos_oferta} omitidos)"
             if omitidos_oferta
@@ -341,7 +459,7 @@ def comprobar_documentos(
         )
         if omitidos_pliego:
             contexto_parts.append(
-                f"Se omiten {omitidos_pliego} PDF de referencia por límite de análisis."
+                f"Se omiten {omitidos_pliego} documentos de referencia por límite de análisis."
             )
     else:
         contexto_parts.append(
@@ -379,12 +497,103 @@ def comprobar_documentos(
     combinado = "\n\n".join(b for b in bloques if b).strip()[:MAX_TEXTO_EXTRAIDO]
     if len(combinado) < 200:
         raise PdfSummaryError(
-            "Los PDF parecen escaneados o sin texto seleccionable. "
-            "Sube PDFs con texto o nativos digitales."
+            "No se pudo extraer texto suficiente de los documentos. "
+            "Sube PDF con texto, Word (.docx) o Excel (.xlsx)."
         )
 
     return _generar_con_gemini(
         [f"Extracto de documentos:\n---\n{combinado}\n---"],
         contexto=contexto,
         prompt_base=PROMPT_COMPROBADOR,
+    )
+
+
+PROMPT_SINTESIS_LOTES = """Eres un revisor de documentación de oferta para licitaciones públicas
+españolas (PLACSP), trabajando para GREFA.
+
+Te pasan **varios informes parciales** de conformidad. Cada uno analiza un lote
+de documentos (máx. 4) del **mismo expediente**. NO tienes los PDF originales:
+solo los informes parciales.
+
+## Objetivo
+Elaborar **un único informe global** que unifique todos los lotes: veredicto
+conjunto, errores, adaptación a cláusulas administrativas y prescripciones
+técnicas, cobertura del paquete e inconsistencias cruzadas entre lotes.
+
+Reglas de veredicto global:
+- Si algún lote es `❌ NO CONFORME` por defectos en lo subido → el global no
+  puede ser `✅ CONFORME` (como mínimo `⚠️ CONFORME CON RESERVAS` o `❌ NO CONFORME`).
+- No castigues por documentos no aportados en ningún lote (cobertura informativa).
+- Si los lotes se complementan bien, dilo explícitamente.
+
+Usa las mismas secciones markdown que un informe de conformidad:
+
+## Veredicto
+Una línea con `✅ CONFORME` / `⚠️ CONFORME CON RESERVAS` / `❌ NO CONFORME`,
+luego 2–4 frases.
+
+## Errores y defectos en lo subido
+## Adaptación a cláusulas administrativas
+## Adaptación a prescripciones técnicas
+## Cobertura del paquete (informativo; no decide el veredicto)
+## Inconsistencias y riesgos
+## Checklist sobre los documentos revisados
+## Limitaciones de este análisis
+(Incluye que el global se basa en síntesis de informes parciales, no en relectura de PDF.)
+
+Sé concreto y accionable. En español."""
+
+
+def sintetizar_informes_comprobador(
+    informes_parciales: list[dict[str, Any]],
+    *,
+    expediente: str = "",
+    titulo: str = "",
+    requisitos_texto: str = "",
+) -> str:
+    """Unifica varios informes parciales de lotes en un informe global."""
+    utiles = [
+        i
+        for i in (informes_parciales or [])
+        if isinstance(i, dict) and str(i.get("informe") or "").strip()
+    ]
+    if not utiles:
+        raise PdfSummaryError("No hay informes parciales para sintetizar.")
+    if len(utiles) == 1:
+        # Un solo lote: el global es ese informe (marcado como tal).
+        unico = str(utiles[0]["informe"]).strip()
+        cabecera = (
+            "_Informe global a partir de 1 lote (sin síntesis adicional)._\n\n"
+        )
+        return cabecera + unico
+
+    bloques = []
+    for i, item in enumerate(utiles, start=1):
+        nombres = item.get("nombres") or []
+        lista = ", ".join(str(n) for n in nombres) if nombres else "—"
+        bloques.append(
+            f"### Informe parcial — Lote {i}\n"
+            f"Documentos: {lista}\n\n"
+            f"{str(item.get('informe') or '').strip()}"
+        )
+    cuerpo = "\n\n---\n\n".join(bloques)[:MAX_TEXTO_EXTRAIDO]
+
+    contexto_parts = [
+        "Modo: SÍNTESIS DE LOTES DEL COMPROBADOR.",
+        f"Expediente: {expediente or '—'}",
+        f"Título / referencia: {titulo or '—'}",
+        f"Número de lotes parciales: {len(utiles)}",
+    ]
+    if requisitos_texto and requisitos_texto.strip():
+        contexto_parts.append(
+            "Checklist / requisitos del usuario:\n" + requisitos_texto.strip()[:4000]
+        )
+    contexto = "\n".join(contexto_parts)
+
+    return _generar_con_gemini(
+        [
+            "=== INFORMES PARCIALES A UNIFICAR ===\n\n" + cuerpo,
+        ],
+        contexto=contexto,
+        prompt_base=PROMPT_SINTESIS_LOTES,
     )

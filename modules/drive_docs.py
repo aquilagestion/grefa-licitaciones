@@ -71,6 +71,14 @@ def nombre_carpeta_expediente(expediente: str, organo: str = "") -> str:
     return exp[:180]
 
 
+def nombre_resumen_pliego(organo: str, expediente: str, *, extension: str = "md") -> str:
+    """Nombre de copia del resumen: ``{contratista}_{expediente}.md``."""
+    org = _sanitizar_nombre(organo) or "sin-contratista"
+    exp = _sanitizar_nombre(expediente) or "sin-expediente"
+    ext = (extension or "md").lstrip(".")
+    return f"{org}_{exp}.{ext}"[:200]
+
+
 def _escape_drive_query(valor: str) -> str:
     return str(valor).replace("\\", "\\\\").replace("'", "\\'")
 

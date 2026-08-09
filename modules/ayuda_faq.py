@@ -59,6 +59,15 @@ SECCIONES_FAQ: list[dict[str, str]] = [
     },
     {
         "categoria": "Pliegos e IA",
+        "pregunta": "¿El resumen de pliegos se guarda solo?",
+        "respuesta": (
+            "No: al generarlo queda solo en pantalla. Pulsa **Guardar resumen** "
+            "para conservarlo (Sheets + copia en Drive con nombre "
+            "`contratista_expediente.md`). **Borrar** lo quita de pantalla y memoria."
+        ),
+    },
+    {
+        "categoria": "Pliegos e IA",
         "pregunta": "¿El resumen de pliegos sustituye leer el PCAP?",
         "respuesta": (
             "No. Es una ayuda orientativa. Siempre revisa el pliego oficial "
@@ -128,8 +137,9 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "categoria": "Comprobador",
         "pregunta": "¿Qué comprueba el Comprobador de documentos?",
         "respuesta": (
-            "Si **los PDF que subes se adaptan** a las **cláusulas administrativas "
+            "Si **los documentos que subes se adaptan** a las **cláusulas administrativas "
             "(PCAP/PCP)** y a las **prescripciones técnicas (PPT)**. "
+            "Acepta **PDF, Word (.docx) y Excel (.xlsx)**. "
             "Aunque no sea el paquete completo, lo que falta del lote va en una "
             "sección informativa y **no** fuerza un «no conforme». "
             "Es una ayuda, no una validación oficial."
@@ -139,10 +149,10 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "categoria": "Comprobador",
         "pregunta": "Si subo 4 documentos de 16, ¿saldrá siempre incompleto?",
         "respuesta": (
-            "No debería: el veredicto es ✅/⚠️/❌ **conforme** con lo subido "
-            "frente a administrativas y técnicas. "
-            "La cobertura del resto del paquete se lista aparte. "
-            "Adjunta idealmente PCAP + PPT (y ficha PLACSP si quieres; hasta 3)."
+            "No: cada lote (máx. 4) da un informe parcial de conformidad. "
+            "Pulsa **➕ Subir más documentos** para el siguiente lote y, al acabar, "
+            "**📊 Analizar al completo** para unificar todos los parciales. "
+            "Adjunta PCAP + PPT una vez; se reutilizan en cada lote."
         ),
     },
     {

@@ -636,6 +636,32 @@ def save_pliego_resumen(
         raise SheetsError(f"Error guardando el resumen del pliego: {exc}") from exc
 
 
+def delete_pliego_resumen(
+    expediente: str,
+    enlace: str,
+    hoja_id: str | None = None,
+) -> bool:
+    """Elimina el resumen guardado del expediente. Devuelve True si había fila."""
+    hoja = get_spreadsheet(hoja_id)
+    clave_objetivo = _clave(expediente, enlace)
+    try:
+        pestana = _worksheet(hoja, PLIEGOS_SHEET, PLIEGO_HEADERS)
+        registros = pestana.get_all_records()
+        for indice, registro in enumerate(registros, start=2):
+            clave = _clave(
+                _campo(registro, "ID Expediente", "expediente"),
+                _campo(registro, "Enlace", "enlace"),
+            )
+            if clave == clave_objetivo:
+                pestana.delete_rows(indice)
+                return True
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(f"Error borrando el resumen del pliego: {exc}") from exc
+    return False
+
+
 def load_pliegos_index(hoja_id: str | None = None) -> dict[str, str]:
     """Mapa clave expediente|enlace → fecha del último análisis."""
     hoja = get_spreadsheet(hoja_id)

@@ -10,6 +10,7 @@ Ejecución:  streamlit run app.py
 from __future__ import annotations
 
 import importlib
+import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -387,6 +388,7 @@ def init_state() -> None:
         "opp_categorias_aplicadas": ["Alta", "Media"],
         "opp_vista": "Tarjetas",
         "pdf_resumenes": {},
+        "pdf_resumenes_borrados": set(),
         "seguimiento_cache": {},
         "mis_licitaciones_cache": None,
         "pliego_expediente_sel": "",
@@ -743,45 +745,62 @@ def _render_resultados_con_interes(
     clave_prefix: str,
     max_filas: int = 40,
 ) -> None:
-    """Lista resultados con checkbox «Me interesa» a la izquierda."""
+    """Lista resultados con acciones Mis Licitaciones y Preparar docs."""
     if resultados.empty:
         return
     interes = _claves_interes()
     st.caption(
-        "Marca ⭐ **Me interesa** para enviarla a la pestaña **Mis Licitaciones**."
+        "Usa **⭐ A Mis Licitaciones** para guardarla en esa pestaña, "
+        "o **📝 Preparar docs** para abrir el asistente."
     )
     for i, (_, fila) in enumerate(resultados.head(max_filas).iterrows()):
         clave = _clave_expediente(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
         marcado = clave in interes
-        c0, c1 = st.columns([0.08, 0.92])
-        with c0:
-            nuevo = st.checkbox(
-                "⭐",
-                value=marcado,
-                key=f"int_{clave_prefix}_{i}_{clave[:40]}",
-                help="Me interesa esta licitación",
+        exp = fila.get("expediente") or "—"
+        tit = str(fila.get("titulo") or "")[:120]
+        organo = str(fila.get("organo_contratacion") or "")[:80]
+        meta = " · ".join(
+            x
+            for x in (
+                str(fila.get("estado") or ""),
+                organo,
+                f"{fila.get('relevancia')} %" if pd.notna(fila.get("relevancia")) else "",
             )
-        with c1:
-            exp = fila.get("expediente") or "—"
-            tit = str(fila.get("titulo") or "")[:120]
-            organo = str(fila.get("organo_contratacion") or "")[:80]
-            meta = " · ".join(
-                x
-                for x in (
-                    str(fila.get("estado") or ""),
-                    organo,
-                    f"{fila.get('relevancia')} %" if pd.notna(fila.get("relevancia")) else "",
-                )
-                if x
+            if x
+        )
+        st.markdown(f"**{exp}** — {tit}")
+        if meta:
+            st.caption(meta)
+        if fila.get("url"):
+            st.markdown(f"[PLACSP ↗]({fila.get('url')})")
+        c_mis, c_prep = st.columns(2)
+        with c_mis:
+            etiqueta_mis = (
+                "⭐ Ya en Mis Licitaciones" if marcado else "⭐ A Mis Licitaciones"
             )
-            st.markdown(f"**{exp}** — {tit}")
-            if meta:
-                st.caption(meta)
-            if fila.get("url"):
-                st.markdown(f"[PLACSP ↗]({fila.get('url')})")
+            if st.button(
+                etiqueta_mis,
+                key=f"mis_from_{clave_prefix}_{i}_{clave[:36]}",
+                type="primary" if not marcado else "secondary",
+                width="stretch",
+                help="Incluir o quitar de Mis Licitaciones",
+            ):
+                try:
+                    _marcar_interes(fila, interesa=not marcado)
+                    st.toast(
+                        "Añadida a Mis Licitaciones."
+                        if not marcado
+                        else "Quitada de Mis Licitaciones.",
+                        icon="⭐" if not marcado else "🗑️",
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+        with c_prep:
             if st.button(
                 "📝 Preparar docs",
                 key=f"prep_from_{clave_prefix}_{i}_{clave[:36]}",
+                width="stretch",
                 help="Abrir asistente de documentación con este expediente",
             ):
                 _abrir_preparar_docs(
@@ -790,16 +809,6 @@ def _render_resultados_con_interes(
                     organo=str(fila.get("organo_contratacion") or ""),
                     url=str(fila.get("url") or ""),
                 )
-        if nuevo != marcado:
-            try:
-                _marcar_interes(fila, interesa=nuevo)
-                st.toast(
-                    "Añadida a Mis Licitaciones." if nuevo else "Quitada de Mis Licitaciones.",
-                    icon="⭐" if nuevo else "🗑️",
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
     if len(resultados) > max_filas:
         st.caption(f"Mostrando {max_filas} de {len(resultados):,} (exporta para ver todas).")
 
@@ -1014,6 +1023,16 @@ def _widget_checklist_docs(
                     st.error(str(exc))
 
 
+def _nombre_copia_resumen(organo: str, expediente: str) -> str:
+    """Nombre de archivo: contratista/órgano + nº expediente."""
+    fn = getattr(drive_docs, "nombre_resumen_pliego", None)
+    if callable(fn):
+        return fn(organo, expediente)
+    org = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", (organo or "").strip()) or "sin-contratista"
+    exp = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", (expediente or "").strip()) or "sin-expediente"
+    return f"{org}_{exp}.md"[:200]
+
+
 def _widget_resumen_pliego(
     expediente: str,
     url: str,
@@ -1021,6 +1040,7 @@ def _widget_resumen_pliego(
     *,
     clave_prefix: str,
     documentos: list[dict] | None = None,
+    organo: str = "",
 ) -> None:
     """Multi-PDF (PCAP/PPT) + descarga desde ficha PLACSP + resumen IA."""
     if not pdf_summary.is_configured():
@@ -1029,6 +1049,10 @@ def _widget_resumen_pliego(
 
     clave = _clave_expediente(expediente, url)
     resumenes = st.session_state.setdefault("pdf_resumenes", {})
+    borrados = st.session_state.setdefault("pdf_resumenes_borrados", set())
+    if not isinstance(borrados, set):
+        borrados = set(borrados or [])
+        st.session_state["pdf_resumenes_borrados"] = borrados
     cache_docs_key = f"placsp_docs_cache_{clave_prefix}"
     docs_placsp = list(
         st.session_state.get(cache_docs_key)
@@ -1039,16 +1063,106 @@ def _widget_resumen_pliego(
     stash_key = f"pdf_stash_{clave_prefix}"
     stash: dict[str, bytes] = st.session_state.setdefault(stash_key, {})
 
-    if sheets_store.is_configured():
+    # Solo rehidratar desde Sheets si el usuario no lo ha borrado en esta sesión
+    # y aún no hay resumen en memoria.
+    if (
+        sheets_store.is_configured()
+        and clave not in resumenes
+        and clave not in borrados
+    ):
         guardado = sheets_store.load_pliego_resumen(expediente, url)
-        if guardado and clave not in resumenes:
+        if guardado:
             resumenes[clave] = guardado
 
     if clave in resumenes:
         st.markdown(resumenes[clave])
-        if st.button("🗑️ Borrar resumen de sesión", key=f"borrar_resumen_{clave_prefix}"):
-            resumenes.pop(clave, None)
-            st.rerun()
+        st.caption(
+            "El resumen está en pantalla (sesión). Solo se conserva en Sheets/Drive "
+            "si pulsas **Guardar**."
+        )
+        nombre_copia = _nombre_copia_resumen(organo, expediente)
+        c_guardar, c_borrar, c_dl = st.columns(3)
+        with c_guardar:
+            if st.button(
+                "💾 Guardar resumen",
+                key=f"guardar_resumen_{clave_prefix}",
+                type="primary",
+                width="stretch",
+                help=f"Guarda copia como {nombre_copia}",
+            ):
+                texto = resumenes[clave]
+                try:
+                    mensajes = []
+                    if sheets_store.is_configured():
+                        sheets_store.save_pliego_resumen(
+                            expediente, url, titulo, texto
+                        )
+                        _sembrar_checklist_desde_resumen(
+                            expediente, url, titulo, texto
+                        )
+                        mensajes.append("Sheets")
+                    if sheets_store.is_configured():
+                        try:
+                            subido = drive_docs.upload_bytes(
+                                texto.encode("utf-8"),
+                                nombre_copia,
+                                mime_type="text/markdown",
+                                expediente=expediente,
+                                organo=organo,
+                            )
+                            mensajes.append(f"Drive ({nombre_copia})")
+                            enlace = subido.get("webViewLink") or ""
+                            if enlace:
+                                st.session_state[
+                                    f"resumen_drive_link_{clave_prefix}"
+                                ] = enlace
+                        except Exception as exc_drive:
+                            st.warning(f"No se pudo subir a Drive: {exc_drive}")
+                    borrados.discard(clave)
+                    st.session_state["pdf_resumenes_borrados"] = borrados
+                    if mensajes:
+                        st.toast(
+                            "Guardado: " + ", ".join(mensajes),
+                            icon="✅",
+                        )
+                    else:
+                        st.warning(
+                            "Sin Sheets/Drive configurados. Usa Descargar para "
+                            f"conservar {nombre_copia}."
+                        )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo guardar: {exc}")
+        with c_borrar:
+            if st.button(
+                "🗑️ Borrar resumen",
+                key=f"borrar_resumen_{clave_prefix}",
+                width="stretch",
+                help="Quita el resumen de pantalla y de la memoria persistida",
+            ):
+                resumenes.pop(clave, None)
+                borrados.add(clave)
+                st.session_state["pdf_resumenes_borrados"] = borrados
+                st.session_state.pop(f"resumen_drive_link_{clave_prefix}", None)
+                if sheets_store.is_configured():
+                    try:
+                        sheets_store.delete_pliego_resumen(expediente, url)
+                    except Exception as exc:
+                        st.warning(f"Borrado en pantalla; Sheets: {exc}")
+                st.toast("Resumen eliminado de pantalla y memoria.", icon="🗑️")
+                st.rerun()
+        with c_dl:
+            st.download_button(
+                "⬇️ Descargar",
+                data=resumenes[clave].encode("utf-8"),
+                file_name=nombre_copia,
+                mime="text/markdown",
+                key=f"dl_resumen_vista_{clave_prefix}",
+                width="stretch",
+            )
+        enlace_drive = st.session_state.get(f"resumen_drive_link_{clave_prefix}")
+        if enlace_drive:
+            st.caption(f"Copia en Drive: [{nombre_copia} ↗]({enlace_drive})")
         return
 
     if url:
@@ -1123,12 +1237,12 @@ def _widget_resumen_pliego(
                             ok, expediente=expediente, titulo=titulo
                         )
                         resumenes[clave] = texto
-                        if sheets_store.is_configured():
-                            sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
-                            _sembrar_checklist_desde_resumen(
-                                expediente, url, titulo, texto
-                            )
-                            st.toast("Resumen y checklist guardados en Drive.", icon="✅")
+                        borrados.discard(clave)
+                        st.session_state["pdf_resumenes_borrados"] = borrados
+                        st.toast(
+                            "Resumen generado (solo en pantalla). Pulsa Guardar si quieres conservarlo.",
+                            icon="✨",
+                        )
                         st.rerun()
                 except pdf_summary.PdfSummaryError as exc:
                     st.error(str(exc))
@@ -1139,14 +1253,14 @@ def _widget_resumen_pliego(
             "Sin enlace PLACSP: sube manualmente el PCAP y el PPT (PDF)."
         )
 
-    st.markdown("**Subir pliegos (varios PDF)**")
+    st.markdown("**Subir pliegos (PDF / Word / Excel)**")
     st.caption(
         "Puedes subir el PCAP y el PPT en pasos sucesivos: cada archivo se acumula "
-        "en la lista (no sustituye al anterior). También puedes seleccionar varios a la vez."
+        "en la lista (no sustituye al anterior). Formatos: .pdf, .docx, .xlsx."
     )
     ficheros = st.file_uploader(
-        "Añadir PDF a la cola de análisis",
-        type=["pdf"],
+        "Añadir archivo a la cola de análisis",
+        type=list(getattr(pdf_summary, "EXTENSIONES_DOC", ("pdf", "docx", "xlsx"))),
         accept_multiple_files=True,
         key=f"pdf_up_{clave_prefix}",
     )
@@ -1165,15 +1279,13 @@ def _widget_resumen_pliego(
         if firma != st.session_state.get(sig_key):
             for f in ficheros:
                 nombre = Path(getattr(f, "name", "") or "documento.pdf").name
-                if not nombre.lower().endswith(".pdf"):
-                    nombre = f"{nombre}.pdf"
                 stash[nombre] = f.getvalue()
             st.session_state[stash_key] = stash
             st.session_state[sig_key] = firma
 
     if stash:
         st.success(
-            f"**{len(stash)} PDF en cola:** "
+            f"**{len(stash)} archivo(s) en cola:** "
             + ", ".join(
                 f"{pliegos_placsp.etiquetar_upload(n)} · {n}" for n in stash.keys()
             )
@@ -1191,7 +1303,7 @@ def _widget_resumen_pliego(
                 type="primary",
                 width="stretch",
             ):
-                with st.spinner(f"Analizando {len(stash)} PDF con Gemini…"):
+                with st.spinner(f"Analizando {len(stash)} archivo(s) con Gemini…"):
                     try:
                         docs_up = [
                             {
@@ -1206,21 +1318,17 @@ def _widget_resumen_pliego(
                         )
                         resumenes[clave] = texto
                         st.session_state[stash_key] = {}
-                        if sheets_store.is_configured():
-                            sheets_store.save_pliego_resumen(expediente, url, titulo, texto)
-                            _sembrar_checklist_desde_resumen(
-                                expediente, url, titulo, texto
-                            )
-                            st.toast("Resumen y checklist guardados en Drive.", icon="✅")
+                        borrados.discard(clave)
+                        st.session_state["pdf_resumenes_borrados"] = borrados
+                        st.toast(
+                            "Resumen generado (solo en pantalla). Pulsa Guardar si quieres conservarlo.",
+                            icon="✨",
+                        )
                         st.rerun()
                     except pdf_summary.PdfSummaryError as exc:
                         st.error(str(exc))
-                    except sheets_store.SheetsError as exc:
-                        st.warning(f"Resumen generado pero no guardado en Sheets: {exc}")
-                        if clave in resumenes:
-                            st.markdown(resumenes[clave])
     else:
-        st.info("Aún no hay PDF en cola. Sube al menos el PCAP y el PPT.")
+        st.info("Aún no hay archivos en cola. Sube al menos el PCAP y el PPT (PDF/Word/Excel).")
 
 
 def tarjeta_licitacion(fila: pd.Series) -> None:
@@ -1255,14 +1363,39 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         """,
         unsafe_allow_html=True,
     )
-    columna_enlace, columna_prep, columna_motivo = st.columns([1, 1, 3])
+    clave_card = _clave_expediente(
+        str(fila.get("expediente") or ""), str(fila.get("url") or "")
+    )
+    en_mis = clave_card in _claves_interes()
+    columna_enlace, columna_mis, columna_prep, columna_motivo = st.columns([1, 1, 1, 2])
     with columna_enlace:
         if fila.get("url"):
             st.link_button("Ver en PLACSP ↗", fila["url"], width="stretch")
+    with columna_mis:
+        etiqueta_mis = (
+            "⭐ Ya en Mis Lic." if en_mis else "⭐ A Mis Licitaciones"
+        )
+        if st.button(
+            etiqueta_mis,
+            key=f"mis_card_{clave_card[:40]}",
+            width="stretch",
+            type="primary" if not en_mis else "secondary",
+        ):
+            try:
+                _marcar_interes(fila, interesa=not en_mis)
+                st.toast(
+                    "Añadida a Mis Licitaciones."
+                    if not en_mis
+                    else "Quitada de Mis Licitaciones.",
+                    icon="⭐" if not en_mis else "🗑️",
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
     with columna_prep:
         if st.button(
             "📝 Preparar docs",
-            key=f"prep_card_{_clave_expediente(str(fila.get('expediente') or ''), str(fila.get('url') or ''))[:40]}",
+            key=f"prep_card_{clave_card[:40]}",
             width="stretch",
         ):
             _abrir_preparar_docs(
@@ -1279,7 +1412,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
 
     expediente = str(fila.get("expediente") or "")
     url = str(fila.get("url") or "")
-    clave = _clave_expediente(expediente, url)
+    clave = clave_card
     seguimiento = st.session_state.get("seguimiento_cache", {}).get(clave, {})
     if seguimiento:
         st.caption(f"📋 Seguimiento: **{seguimiento.get('seguimiento', '—')}**")
@@ -1291,8 +1424,8 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             str(fila.get("titulo") or ""),
             clave_prefix=f"tarjeta_{clave[:40]}",
             documentos=_docs_desde_fila(fila),
+            organo=str(fila.get("organo_contratacion") or ""),
         )
-
 
 # ---------------------------------------------------------------------------
 # Barra superior: criterios de búsqueda (CPV, términos, estado)
@@ -2422,6 +2555,7 @@ def pestana_analisis_pliegos(
             titulo,
             clave_prefix="tab_pliego",
             documentos=documentos,
+            organo=organo,
         )
     else:
         st.info("Configura Gemini para generar el resumen IA.")
@@ -2436,151 +2570,9 @@ def pestana_analisis_pliegos(
     )
 
 
-def pestana_comprobador_documentos() -> None:
-    """Revisa si los documentos subidos se adaptan al pliego (revisión parcial)."""
-    max_oferta = int(getattr(pdf_summary, "MAX_OFERTA_COMPROBADOR", 4) or 4)
-    max_pliego = int(getattr(pdf_summary, "MAX_PLIEGO_COMPROBADOR", 3) or 3)
-
-    st.subheader("Comprobador de documentos")
-    st.caption(
-        "Comprueba si **los PDF que subes se adaptan a las cláusulas administrativas "
-        "(PCAP/PCP) y a las prescripciones técnicas (PPT)**, aunque no sea el paquete "
-        "completo (p. ej. 4 de 16). El veredicto es de **conformidad**, no de completitud. "
-        "Adjunta idealmente PCAP + PPT (+ ficha PLACSP si quieres), hasta 3. "
-        "No sustituye la revisión jurídica final."
-    )
-
-    if not pdf_summary.is_configured():
-        st.warning(
-            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
-            "([Google AI Studio](https://aistudio.google.com/apikey))."
-        )
-        return
-
-    col_meta1, col_meta2 = st.columns(2)
-    with col_meta1:
-        expediente = st.text_input(
-            "ID expediente (opcional)",
-            key="comp_expediente",
-            placeholder="Ej. 2026/…",
-        )
-    with col_meta2:
-        titulo = st.text_input(
-            "Título / referencia (opcional)",
-            key="comp_titulo",
-            placeholder="Objeto del contrato o nombre interno",
-        )
-
-    st.markdown("**1. Documentos a revisar (obligatorio)**")
-    st.caption(
-        f"Puedes subir varios; se analizan hasta {max_oferta}. "
-        "El resto del paquete no hace fallar el veredicto."
-    )
-    oferta_files = st.file_uploader(
-        "PDF de oferta, memoria, DECLAREs, anexos…",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="comp_oferta_pdfs",
-    )
-
-    st.markdown("**2. Administrativas y técnicas de referencia (recomendado)**")
-    st.caption(
-        "Prioritario: cláusulas/condiciones administrativas (PCAP) + "
-        f"prescripciones técnicas (PPT). Opcional: ficha PLACSP. "
-        f"Hasta {max_pliego} PDF."
-    )
-    pliego_files = st.file_uploader(
-        "PCAP / condiciones administrativas, PPT y, si quieres, ficha PLACSP",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="comp_pliego_pdfs",
-    )
-
-    requisitos = st.text_area(
-        "Checklist o requisitos adicionales (opcional)",
-        key="comp_requisitos",
-        placeholder=(
-            "Ej.:\n- DEUC / DECLARA\n- Certificado de estar al corriente AEAT/SS\n"
-            "- Memoria técnica firmada\n- Oferta económica en modelo Anexo X"
-        ),
-        height=120,
-    )
-
-    analizar = st.button(
-        "🔎 Comprobar conformidad",
-        type="primary",
-        key="comp_btn_analizar",
-        disabled=not oferta_files,
-    )
-
-    if not oferta_files:
-        st.info("Sube al menos un PDF de oferta a revisar.")
-        informe_prev = st.session_state.get("comp_informe")
-        if informe_prev:
-            with st.expander("Último informe", expanded=True):
-                st.markdown(informe_prev)
-        return
-
-    if not analizar:
-        informe_prev = st.session_state.get("comp_informe")
-        if informe_prev:
-            with st.expander("Último informe", expanded=False):
-                st.markdown(informe_prev)
-        return
-
-    docs_oferta = [
-        {
-            "nombre": Path(getattr(f, "name", "") or "oferta.pdf").name,
-            "tipo": "OFERTA",
-            "bytes": f.getvalue(),
-        }
-        for f in oferta_files
-    ]
-    docs_pliego = [
-        {
-            "nombre": Path(getattr(f, "name", "") or "pliego.pdf").name,
-            "tipo": pliegos_placsp.etiquetar_upload(
-                Path(getattr(f, "name", "") or "pliego.pdf").name
-            ),
-            "bytes": f.getvalue(),
-        }
-        for f in (pliego_files or [])
-    ]
-    if len(docs_oferta) > max_oferta:
-        st.info(
-            f"Has seleccionado {len(docs_oferta)} PDF de oferta; "
-            f"se analizarán los {max_oferta} primeros."
-        )
-    if len(docs_pliego) > max_pliego:
-        st.info(
-            f"Has seleccionado {len(docs_pliego)} PDF de pliego; "
-            f"se usarán los {max_pliego} primeros como referencia."
-        )
-
-    with st.spinner("Revisando conformidad con Gemini…"):
-        try:
-            informe = pdf_summary.comprobar_documentos(
-                docs_oferta,
-                documentos_pliego=docs_pliego or None,
-                expediente=(expediente or "").strip(),
-                titulo=(titulo or "").strip(),
-                requisitos_texto=(requisitos or "").strip(),
-            )
-            st.session_state["comp_informe"] = informe
-            st.session_state["comp_informe_meta"] = {
-                "expediente": (expediente or "").strip(),
-                "n_oferta": len(docs_oferta),
-                "n_pliego": len(docs_pliego),
-            }
-        except pdf_summary.PdfSummaryError as exc:
-            st.error(str(exc))
-            return
-        except Exception as exc:
-            st.error(f"Error inesperado: {exc}")
-            return
-
+def _mostrar_veredicto_comprobador(informe: str) -> None:
     veredicto = ""
-    for linea in informe.splitlines():
+    for linea in (informe or "").splitlines():
         baja = linea.strip().lower()
         if (
             "conforme" in baja
@@ -2598,14 +2590,264 @@ def pestana_comprobador_documentos() -> None:
     else:
         st.success(veredicto or "Análisis completado")
 
-    st.markdown(informe)
-    st.download_button(
-        "⬇️ Descargar informe (.md)",
-        data=informe.encode("utf-8"),
-        file_name=f"comprobacion_{(expediente or 'documento').replace('/', '-')}.md",
-        mime="text/markdown",
-        key="comp_dl_informe",
+
+def pestana_comprobador_documentos() -> None:
+    """Comprobador por lotes (máx. 4 docs) + síntesis global al final."""
+    max_oferta = int(getattr(pdf_summary, "MAX_OFERTA_COMPROBADOR", 4) or 4)
+    max_pliego = int(getattr(pdf_summary, "MAX_PLIEGO_COMPROBADOR", 3) or 3)
+    tipos_doc = list(getattr(pdf_summary, "EXTENSIONES_DOC", ("pdf", "docx", "xlsx")))
+
+    st.subheader("Comprobador de documentos")
+    st.caption(
+        f"Sube hasta **{max_oferta} documentos por lote**, obtén un informe parcial y "
+        "pulsa **➕ Subir más documentos** para el siguiente lote del mismo expediente. "
+        "Cuando termines, **📊 Analizar al completo** unifica todos los informes parciales. "
+        "La referencia (PCAP/PPT) se reutiliza en cada lote. "
+        "No sustituye la revisión jurídica final."
     )
+
+    if not pdf_summary.is_configured():
+        st.warning(
+            "Gemini no está configurado. Añade `[gemini] api_key` en Secrets "
+            "([Google AI Studio](https://aistudio.google.com/apikey))."
+        )
+        return
+
+    st.session_state.setdefault("comp_lotes", [])
+    st.session_state.setdefault("comp_lote_idx", 0)
+    st.session_state.setdefault("comp_pliego_ref", [])
+    st.session_state.setdefault("comp_informe_global", "")
+
+    col_meta1, col_meta2 = st.columns(2)
+    with col_meta1:
+        expediente = st.text_input(
+            "ID expediente (recomendado)",
+            key="comp_expediente",
+            placeholder="Ej. 2026/…",
+        )
+    with col_meta2:
+        titulo = st.text_input(
+            "Título / referencia (opcional)",
+            key="comp_titulo",
+            placeholder="Objeto del contrato o nombre interno",
+        )
+
+    st.markdown("**1. Administrativas y técnicas de referencia (recomendado)**")
+    st.caption(
+        f"PCAP + PPT (+ ficha PLACSP). Hasta {max_pliego}. "
+        "Se guarda y reutiliza en todos los lotes de este expediente."
+    )
+    pliego_files = st.file_uploader(
+        "PCAP, PPT u otros (PDF / Word / Excel)",
+        type=tipos_doc,
+        accept_multiple_files=True,
+        key="comp_pliego_pdfs",
+    )
+    if pliego_files:
+        st.session_state["comp_pliego_ref"] = [
+            {
+                "nombre": Path(getattr(f, "name", "") or "pliego.pdf").name,
+                "tipo": pliegos_placsp.etiquetar_upload(
+                    Path(getattr(f, "name", "") or "pliego.pdf").name
+                ),
+                "bytes": f.getvalue(),
+            }
+            for f in pliego_files[:max_pliego]
+        ]
+    pliego_ref = list(st.session_state.get("comp_pliego_ref") or [])
+    if pliego_ref:
+        st.caption(
+            "Referencia activa: "
+            + ", ".join(d.get("nombre", "?") for d in pliego_ref)
+        )
+
+    requisitos = st.text_area(
+        "Checklist o requisitos adicionales (opcional)",
+        key="comp_requisitos",
+        placeholder=(
+            "Ej.:\n- DEUC / DECLARA\n- Certificado de estar al corriente AEAT/SS\n"
+            "- Memoria técnica firmada\n- Oferta económica en modelo Anexo X"
+        ),
+        height=100,
+    )
+
+    lotes: list[dict] = list(st.session_state.get("comp_lotes") or [])
+    lote_idx = int(st.session_state.get("comp_lote_idx") or 0)
+    n_lote_actual = len(lotes) + 1
+
+    st.markdown(f"**2. Lote {n_lote_actual} — documentos a revisar (máx. {max_oferta})**")
+    st.caption(
+        "Tras analizar este lote podrás subir otros (mismo expediente) sin perder "
+        "los informes parciales anteriores."
+    )
+    oferta_files = st.file_uploader(
+        f"Lote {n_lote_actual}: oferta, memoria, anexos… (PDF / Word / Excel)",
+        type=tipos_doc,
+        accept_multiple_files=True,
+        key=f"comp_oferta_lote_{lote_idx}",
+    )
+    if oferta_files and len(oferta_files) > max_oferta:
+        st.warning(
+            f"Solo se analizarán los {max_oferta} primeros de este lote "
+            f"(has seleccionado {len(oferta_files)})."
+        )
+
+    c_analizar, c_mas, c_vaciar = st.columns(3)
+    with c_analizar:
+        analizar_lote = st.button(
+            f"🔎 Analizar lote {n_lote_actual}",
+            type="primary",
+            key="comp_btn_analizar_lote",
+            width="stretch",
+            disabled=not oferta_files,
+        )
+    with c_mas:
+        subir_mas = st.button(
+            "➕ Subir más documentos",
+            key="comp_btn_subir_mas",
+            width="stretch",
+            disabled=not lotes,
+            help="Prepara un nuevo lote vacío (conserva los informes parciales).",
+        )
+    with c_vaciar:
+        vaciar = st.button(
+            "🗑️ Vaciar lotes",
+            key="comp_btn_vaciar_lotes",
+            width="stretch",
+            disabled=not lotes and not st.session_state.get("comp_informe_global"),
+        )
+
+    if vaciar:
+        st.session_state["comp_lotes"] = []
+        st.session_state["comp_informe_global"] = ""
+        st.session_state["comp_lote_idx"] = int(lote_idx) + 1
+        st.session_state["comp_pliego_ref"] = []
+        st.toast("Lotes e informe global vaciados.", icon="🗑️")
+        st.rerun()
+
+    if subir_mas:
+        st.session_state["comp_lote_idx"] = int(lote_idx) + 1
+        st.toast(
+            f"Listo para el lote {len(lotes) + 1}. Sube hasta {max_oferta} documentos.",
+            icon="➕",
+        )
+        st.rerun()
+
+    if analizar_lote and oferta_files:
+        docs_oferta = [
+            {
+                "nombre": Path(getattr(f, "name", "") or "oferta.pdf").name,
+                "tipo": "OFERTA",
+                "bytes": f.getvalue(),
+            }
+            for f in list(oferta_files)[:max_oferta]
+        ]
+        with st.spinner(f"Analizando lote {n_lote_actual} con Gemini…"):
+            try:
+                informe = pdf_summary.comprobar_documentos(
+                    docs_oferta,
+                    documentos_pliego=pliego_ref or None,
+                    expediente=(expediente or "").strip(),
+                    titulo=(titulo or "").strip(),
+                    requisitos_texto=(requisitos or "").strip(),
+                )
+                lotes.append(
+                    {
+                        "nombres": [d["nombre"] for d in docs_oferta],
+                        "informe": informe,
+                    }
+                )
+                st.session_state["comp_lotes"] = lotes
+                st.session_state["comp_informe"] = informe
+                st.session_state["comp_informe_global"] = ""
+                st.session_state["comp_lote_idx"] = int(lote_idx) + 1
+                st.toast(
+                    f"Lote {len(lotes)} analizado. Puedes subir más o analizar al completo.",
+                    icon="✅",
+                )
+                st.rerun()
+            except pdf_summary.PdfSummaryError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Error inesperado: {exc}")
+
+    if not lotes and not oferta_files:
+        st.info(
+            f"Sube hasta {max_oferta} documentos del expediente y pulsa "
+            f"**Analizar lote**."
+        )
+
+    if lotes:
+        st.markdown(f"### Informes parciales ({len(lotes)} lote{'s' if len(lotes) != 1 else ''})")
+        for i, lote in enumerate(lotes, start=1):
+            nombres = ", ".join(lote.get("nombres") or []) or "—"
+            with st.expander(f"Lote {i}: {nombres}", expanded=(i == len(lotes))):
+                _mostrar_veredicto_comprobador(str(lote.get("informe") or ""))
+                st.markdown(str(lote.get("informe") or ""))
+                st.download_button(
+                    f"⬇️ Descargar lote {i}",
+                    data=str(lote.get("informe") or "").encode("utf-8"),
+                    file_name=(
+                        f"comprobacion_lote{i}_"
+                        f"{(expediente or 'documento').replace('/', '-')}.md"
+                    ),
+                    mime="text/markdown",
+                    key=f"comp_dl_lote_{i}",
+                )
+
+        st.markdown("### Informe global")
+        st.caption(
+            "Une todos los informes parciales en un solo veredicto y checklist "
+            "para el expediente."
+        )
+        analizar_completo = st.button(
+            "📊 Analizar al completo",
+            type="primary",
+            key="comp_btn_analizar_completo",
+            disabled=len(lotes) < 1,
+        )
+        if analizar_completo:
+            with st.spinner(
+                f"Sintetizando {len(lotes)} informe(s) parcial(es)…"
+            ):
+                try:
+                    sintetizar = getattr(
+                        pdf_summary, "sintetizar_informes_comprobador", None
+                    )
+                    if not callable(sintetizar):
+                        raise pdf_summary.PdfSummaryError(
+                            "Falta sintetizar_informes_comprobador en el módulo "
+                            "(redeploy pendiente)."
+                        )
+                    global_md = sintetizar(
+                        lotes,
+                        expediente=(expediente or "").strip(),
+                        titulo=(titulo or "").strip(),
+                        requisitos_texto=(requisitos or "").strip(),
+                    )
+                    st.session_state["comp_informe_global"] = global_md
+                    st.session_state["comp_informe"] = global_md
+                    st.toast("Informe global listo.", icon="📊")
+                    st.rerun()
+                except pdf_summary.PdfSummaryError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Error inesperado: {exc}")
+
+        global_md = str(st.session_state.get("comp_informe_global") or "")
+        if global_md:
+            _mostrar_veredicto_comprobador(global_md)
+            st.markdown(global_md)
+            st.download_button(
+                "⬇️ Descargar informe global (.md)",
+                data=global_md.encode("utf-8"),
+                file_name=(
+                    f"comprobacion_global_"
+                    f"{(expediente or 'documento').replace('/', '-')}.md"
+                ),
+                mime="text/markdown",
+                key="comp_dl_informe_global",
+            )
 
 
 def _docs_desde_uploader(files, *, tipo: str = "PLIEGO") -> list[dict]:
@@ -2803,8 +3045,8 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
             titulo = st.text_input("Título / objeto (opcional)", key=f"{pref}_titulo")
 
         pliego_files = st.file_uploader(
-            cfg["uploader_help"],
-            type=["pdf"],
+            cfg["uploader_help"] + " (PDF / Word / Excel)",
+            type=list(getattr(pdf_summary, "EXTENSIONES_DOC", ("pdf", "docx", "xlsx"))),
             accept_multiple_files=True,
             key=f"{pref}_pliego_pdfs",
         )
@@ -3755,8 +3997,8 @@ def pestana_mis_licitaciones() -> None:
                             fila.get("titulo", ""),
                             clave_prefix=f"mispliego_{idx}_{clave[:20]}",
                             documentos=[],
+                            organo=str(fila.get("organo") or ""),
                         )
-
             if quitar:
                 try:
                     _marcar_interes(
@@ -3944,6 +4186,11 @@ def pestana_seguimiento() -> None:
                         titulo,
                         clave_prefix=f"seg_{clave[:30]}",
                         documentos=_docs_desde_fila(fila) if hasattr(fila, "get") else [],
+                        organo=str(
+                            fila.get("organo")
+                            or fila.get("organo_contratacion")
+                            or ""
+                        ),
                     )
             if sheets_store.is_configured():
                 with st.expander("Checklist documentación (Drive)"):
