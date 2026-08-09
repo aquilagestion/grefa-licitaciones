@@ -32,7 +32,10 @@ ASISTENTE_HEADERS = [
 BLOQUES = ("admin", "eco", "tec", "paquete", "revision")
 LOCAL_DIR = Path(__file__).resolve().parents[1] / "data" / "asistente"
 VERSIONS_DIR = LOCAL_DIR / "versions"
+DOCS_DIR = LOCAL_DIR / "docs"
+SESIONES_DIR = LOCAL_DIR / "sesiones"
 MAX_VERSIONES = 25
+MAX_SESIONES = 40
 
 ESTADOS_REVISION = (
     "Borrador",
@@ -242,6 +245,235 @@ def _leer_texto_drive(enlace_o_id: str) -> str:
         return ""
 
 
+def _docs_bloque_dir(expediente: str, enlace: str, bloque: str) -> Path:
+    clave = re.sub(r"[^\w]+", "_", _clave(expediente, enlace))[:60]
+    ruta = DOCS_DIR / f"{clave}_{bloque}"
+    ruta.mkdir(parents=True, exist_ok=True)
+    return ruta
+
+
+def _sesiones_index_path(expediente: str, enlace: str, bloque: str) -> Path:
+    SESIONES_DIR.mkdir(parents=True, exist_ok=True)
+    clave = re.sub(r"[^\w]+", "_", _clave(expediente, enlace))[:60]
+    return SESIONES_DIR / f"{clave}_{bloque}_sesiones.json"
+
+
+def persistir_docs_apoyo(
+    docs: list[dict[str, Any]] | None,
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+    organo: str = "",
+) -> list[dict[str, Any]]:
+    """Guarda binarios en local (y Drive si hay) y devuelve metadatos sin bytes."""
+    salida: list[dict[str, Any]] = []
+    if not docs:
+        return salida
+    carpeta = _docs_bloque_dir(expediente, enlace, bloque)
+    for i, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            continue
+        nombre = str(doc.get("nombre") or f"documento_{i + 1}.bin")
+        seguro = re.sub(r"[^\w.\-]+", "_", nombre)[:120] or f"doc_{i + 1}.bin"
+        datos = doc.get("bytes") or b""
+        local_path = ""
+        drive_link = ""
+        if datos:
+            ruta = carpeta / seguro
+            try:
+                ruta.write_bytes(datos)
+                local_path = str(ruta)
+            except Exception as exc:
+                LOGGER.warning("No se pudo guardar doc local %s: %s", nombre, exc)
+            if store.is_configured():
+                try:
+                    subido = drive_docs.upload_bytes(
+                        datos,
+                        f"{_sanitizar_exp(expediente)}_{bloque}_{seguro}",
+                        expediente=expediente,
+                        organo=organo,
+                    )
+                    drive_link = subido.get("webViewLink") or ""
+                except Exception as exc:
+                    LOGGER.warning("No se pudo subir doc apoyo a Drive: %s", exc)
+        elif doc.get("local_path") and Path(str(doc["local_path"])).is_file():
+            local_path = str(doc["local_path"])
+            drive_link = str(doc.get("drive") or "")
+        elif doc.get("drive"):
+            drive_link = str(doc.get("drive") or "")
+            local_path = str(doc.get("local_path") or "")
+
+        salida.append(
+            {
+                "nombre": nombre,
+                "tipo": str(doc.get("tipo") or "APOYO"),
+                "campo_id": str(doc.get("campo_id") or ""),
+                "campo_label": str(doc.get("campo_label") or ""),
+                "comprobacion": str(doc.get("comprobacion") or "")[:20000],
+                "local_path": local_path,
+                "drive": drive_link,
+            }
+        )
+    return salida
+
+
+def hidratar_docs_apoyo(meta: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Recupera bytes desde disco local o Drive a partir de metadatos."""
+    salida: list[dict[str, Any]] = []
+    for doc in meta or []:
+        if not isinstance(doc, dict):
+            continue
+        item = dict(doc)
+        datos = b""
+        ruta = str(doc.get("local_path") or "")
+        if ruta and Path(ruta).is_file():
+            try:
+                datos = Path(ruta).read_bytes()
+            except Exception:
+                datos = b""
+        if not datos and doc.get("drive"):
+            fid = drive_docs.file_id_desde_enlace(str(doc["drive"]))
+            if fid:
+                try:
+                    datos = drive_docs.download_bytes(fid)
+                except Exception as exc:
+                    LOGGER.warning("No se pudo descargar doc apoyo: %s", exc)
+        if datos:
+            item["bytes"] = datos
+        salida.append(item)
+    return salida
+
+
+def registrar_sesion_borrador(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Guarda una foto completa del borrador de sesión (recuperable)."""
+    if not isinstance(payload, dict):
+        return None
+    bloque = str(payload.get("bloque") or "")
+    exp = str(payload.get("expediente") or "").strip() or "sin-expediente"
+    enlace = str(payload.get("enlace") or "")
+    if bloque not in BLOQUES:
+        return None
+
+    momento = datetime.now()
+    # Snapshot sin bytes crudos
+    snap = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"aviso_sheets"}
+    }
+    # docs_apoyo ya debe ir sin bytes
+    docs = []
+    for d in snap.get("docs_apoyo") or []:
+        if isinstance(d, dict):
+            docs.append({k: v for k, v in d.items() if k != "bytes"})
+    snap["docs_apoyo"] = docs
+
+    blob = json.dumps(snap, ensure_ascii=False, sort_keys=True)
+    sha = _sha_corto(blob)
+    indice = []
+    ruta_idx = _sesiones_index_path(exp, enlace, bloque)
+    if ruta_idx.is_file():
+        try:
+            indice = json.loads(ruta_idx.read_text(encoding="utf-8"))
+            if not isinstance(indice, list):
+                indice = []
+        except Exception:
+            indice = []
+    if indice and indice[0].get("sha") == sha:
+        return indice[0]
+
+    version_id = (
+        f"{_sanitizar_exp(exp)}_{bloque}_sesion_"
+        f"{momento.strftime('%Y%m%d_%H%M%S')}_{sha}"
+    )
+    SESIONES_DIR.mkdir(parents=True, exist_ok=True)
+    ruta_snap = SESIONES_DIR / f"{version_id}.json"
+    ruta_snap.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    entrada = {
+        "id": version_id,
+        "bloque": bloque,
+        "expediente": exp,
+        "enlace": enlace,
+        "timestamp": momento.strftime("%d/%m/%Y %H:%M:%S"),
+        "sha": sha,
+        "tiene_borrador": bool(str(snap.get("borrador") or "").strip()),
+        "tiene_exigencias": bool(str(snap.get("exigencias") or "").strip()),
+        "n_docs": len(docs),
+        "n_campos": sum(
+            1
+            for k, v in (snap.get("datos") or {}).items()
+            if v and not str(k).startswith("_")
+        ),
+        "ruta_local": ruta_snap.name,
+    }
+    indice.insert(0, entrada)
+    for vieja in indice[MAX_SESIONES:]:
+        try:
+            (SESIONES_DIR / str(vieja.get("ruta_local") or "")).unlink(missing_ok=True)
+        except Exception:
+            pass
+    ruta_idx.write_text(
+        json.dumps(indice[:MAX_SESIONES], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return entrada
+
+
+def listar_sesiones(
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+) -> list[dict[str, Any]]:
+    ruta = _sesiones_index_path(expediente, enlace, bloque)
+    if not ruta.is_file():
+        return []
+    try:
+        data = json.loads(ruta.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def cargar_sesion(
+    *,
+    expediente: str,
+    enlace: str = "",
+    bloque: str,
+    sesion_id: str,
+) -> dict[str, Any] | None:
+    """Carga un snapshot de sesión y rehidrata documentos aportados."""
+    for entrada in listar_sesiones(expediente=expediente, enlace=enlace, bloque=bloque):
+        if str(entrada.get("id")) != str(sesion_id):
+            continue
+        ruta = SESIONES_DIR / str(entrada.get("ruta_local") or f"{sesion_id}.json")
+        if not ruta.is_file():
+            ruta = SESIONES_DIR / f"{sesion_id}.json"
+        if not ruta.is_file():
+            return None
+        try:
+            payload = json.loads(ruta.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            payload["docs_apoyo"] = hidratar_docs_apoyo(payload.get("docs_apoyo") or [])
+        return payload
+    ruta = SESIONES_DIR / f"{sesion_id}.json"
+    if ruta.is_file():
+        try:
+            payload = json.loads(ruta.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["docs_apoyo"] = hidratar_docs_apoyo(
+                    payload.get("docs_apoyo") or []
+                )
+            return payload
+        except Exception:
+            return None
+    return None
+
+
 def save_bloque(
     *,
     expediente: str,
@@ -255,14 +487,26 @@ def save_bloque(
     borrador: str = "",
     verificacion: str = "",
     paquete: str = "",
+    docs_apoyo: list[dict[str, Any]] | None = None,
+    modelos: dict[str, Any] | None = None,
     hoja_id: str | None = None,
 ) -> dict[str, Any]:
-    """Guarda un bloque (admin/eco/tec/paquete) en local y, si hay Sheets, en la nube."""
+    """Guarda un bloque (admin/eco/tec/paquete) en local y, si hay Sheets, en la nube.
+
+    Cada guardado actualiza el borrador actual y añade una sesión recuperable.
+    """
     if bloque not in BLOQUES:
         raise AsistenteStoreError(f"Bloque no válido: {bloque}")
 
     momento = datetime.now().strftime("%d/%m/%Y %H:%M")
     exp = (expediente or "").strip() or "sin-expediente"
+    docs_meta = persistir_docs_apoyo(
+        docs_apoyo,
+        expediente=exp,
+        enlace=enlace,
+        bloque=bloque,
+        organo=organo,
+    )
     payload = {
         "expediente": exp,
         "enlace": enlace or "",
@@ -275,14 +519,16 @@ def save_bloque(
         "borrador": borrador or "",
         "verificacion": verificacion or "",
         "paquete": paquete or "",
+        "docs_apoyo": docs_meta,
+        "modelos": modelos or {},
         "actualizado": momento,
         "links": {},
     }
 
-    # Local siempre (fallback sin Sheets)
+    # Local siempre (fallback sin Sheets) — borrador actual recuperable
     _guardar_local(exp, enlace, bloque, payload)
 
-    # Histórico de versiones (borrador o paquete)
+    # Histórico de versiones del texto de borrador/paquete
     texto_version = (paquete if bloque == "paquete" else borrador) or ""
     if texto_version.strip() and bloque in {"admin", "eco", "tec", "paquete"}:
         try:
@@ -299,6 +545,15 @@ def save_bloque(
                 payload["ultima_version_id"] = ver.get("id")
         except Exception as exc:
             LOGGER.warning("No se pudo registrar versión: %s", exc)
+
+    # Snapshot de sesión (datos + docs + exigencias + borrador…)
+    try:
+        ses = registrar_sesion_borrador(payload)
+        if ses:
+            payload["ultima_sesion_id"] = ses.get("id")
+            _guardar_local(exp, enlace, bloque, payload)
+    except Exception as exc:
+        LOGGER.warning("No se pudo registrar sesión de borrador: %s", exc)
 
     links: dict[str, str] = {}
     if store.is_configured():
@@ -337,13 +592,18 @@ def save_bloque(
         try:
             hoja = store.get_spreadsheet(hoja_id)
             pestana = store._worksheet(hoja, ASISTENTE_SHEET, ASISTENTE_HEADERS)
+            # Incluye metadatos de docs en el JSON de datos (sin bytes)
+            datos_nube = dict(datos or {})
+            datos_nube["_docs_apoyo_meta"] = docs_meta
+            if payload.get("ultima_sesion_id"):
+                datos_nube["_ultima_sesion_id"] = payload["ultima_sesion_id"]
             fila = [
                 exp,
                 enlace or "",
                 titulo or "",
                 organo or "",
                 bloque,
-                json.dumps(datos or {}, ensure_ascii=False)[:45000],
+                json.dumps(datos_nube, ensure_ascii=False)[:45000],
                 json.dumps(formato or {}, ensure_ascii=False)[:4000],
                 links.get("exigencias", ""),
                 links.get("borrador", ""),
@@ -430,6 +690,8 @@ def load_bloque(
                 verificacion = _leer_texto_drive(str(links.get("verificacion") or ""))
                 paquete = _leer_texto_drive(str(links.get("paquete") or ""))
                 # Si Drive no devolvió texto, usa local
+                modelos = {}
+                docs_meta: list[dict[str, Any]] = []
                 if local:
                     exigencias = exigencias or local.get("exigencias") or ""
                     borrador = borrador or local.get("borrador") or ""
@@ -439,6 +701,11 @@ def load_bloque(
                         datos = local.get("datos") or {}
                     if not formato:
                         formato = local.get("formato") or {}
+                    modelos = local.get("modelos") or {}
+                    docs_meta = list(local.get("docs_apoyo") or [])
+                if isinstance(datos, dict) and not docs_meta:
+                    docs_meta = list(datos.get("_docs_apoyo_meta") or [])
+                docs_apoyo = hidratar_docs_apoyo(docs_meta)
                 return {
                     "expediente": store._campo(registro, "ID Expediente", "expediente"),
                     "enlace": store._campo(registro, "Enlace", "enlace"),
@@ -451,12 +718,17 @@ def load_bloque(
                     "borrador": borrador,
                     "verificacion": verificacion,
                     "paquete": paquete,
+                    "docs_apoyo": docs_apoyo,
+                    "modelos": modelos if isinstance(modelos, dict) else {},
                     "links": links,
                     "actualizado": store._campo(registro, "Actualizado", "actualizado"),
                 }
         except Exception as exc:
             LOGGER.warning("Carga AsistenteDocs falló, uso local: %s", exc)
 
+    if local and isinstance(local, dict):
+        local = dict(local)
+        local["docs_apoyo"] = hidratar_docs_apoyo(local.get("docs_apoyo") or [])
     return local
 
 

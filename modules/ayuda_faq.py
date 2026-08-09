@@ -5,14 +5,18 @@ from __future__ import annotations
 GUIA_RAPIDA = """
 ### Flujo recomendado
 
-1. **Oportunidades** — filtra CPV/términos y revisa las de alta/media relevancia.  
-2. **⭐ Me interesa** — márcalas para **Mis Licitaciones**.  
-3. **Análisis de pliegos** — resume PCAP/PPT con IA.  
-4. **Preparar documentación** — Admin → Económico → Técnico (modelos del pliego).  
-5. **Comprobador** — revisa los PDF que vas a presentar.  
-6. **Revisión humana** — estados y observaciones internas.  
+1. **Oportunidades / Buscador** — filtra y revisa expedientes.  
+2. **⭐ A Mis Licitaciones** — guarda las que te interesen (también desde el buscador).  
+3. **Análisis de pliegos** — resume PCAP/PPT (PDF, Word o Excel); **Guardar** solo si quieres conservarlo.  
+4. **Preparar documentación** — Admin → Económico → Técnico:  
+   - Paso 1: pliego y exigencias (se autoguarda sesión).  
+   - Paso 2: texto **y/o** hasta 4 docs + **Comprobar documento** por campo.  
+   - Paso 3: borrador y verificación.  
+   - Usa **Guardar sesión** / **Recuperar último borrador** en cualquier momento.  
+5. **Comprobador** — lotes de hasta 4 docs; al final **Analizar al completo**.  
+6. **Revisión humana** — estados y observaciones internas (no es VB jurídico).  
 7. **Paquete final** — une los tres bloques y exporta Word/PDF.  
-8. **Presentar** en PLACSP y marca el estado *Presentada*.
+8. **Presentar** en PLACSP y marca *Presentada*.
 """
 
 SECCIONES_FAQ: list[dict[str, str]] = [
@@ -21,7 +25,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Por dónde empiezo?",
         "respuesta": (
             "Actualiza el feed en la barra lateral, ve a **Oportunidades GREFA**, "
-            "ajusta CPV/términos y pulsa Buscar. Marca con ⭐ las que te interesen."
+            "ajusta CPV/términos y pulsa Buscar. Usa **⭐ A Mis Licitaciones** "
+            "o **📝 Preparar docs** en cada resultado."
         ),
     },
     {
@@ -29,8 +34,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Necesito Google Sheets / Gemini?",
         "respuesta": (
             "Para buscar en el feed y el Parquet histórico local, no. "
-            "Para sync, Mis Licitaciones, checklist, Drive y análisis/preparación con IA "
-            "sí hacen falta Secrets de Sheets y `[gemini] api_key`."
+            "Para sync, Mis Licitaciones, checklist, Drive, resúmenes IA, "
+            "preparación y comprobador sí hacen falta Secrets de Sheets y `[gemini] api_key`."
         ),
     },
     {
@@ -58,12 +63,30 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         ),
     },
     {
+        "categoria": "Búsqueda e histórico",
+        "pregunta": "¿Cómo añado una licitación del buscador a Mis Licitaciones?",
+        "respuesta": (
+            "En cada registro del **Buscador general** (e Histórico) tienes "
+            "**⭐ A Mis Licitaciones** junto a **📝 Preparar docs**. "
+            "Si ya está añadida, el botón indica *Ya en Mis Licitaciones* y permite quitarla."
+        ),
+    },
+    {
+        "categoria": "Pliegos e IA",
+        "pregunta": "¿Qué formatos acepta el resumen / la IA?",
+        "respuesta": (
+            "**PDF, Word (.docx) y Excel (.xlsx)**. "
+            "Los `.doc` / `.xls` antiguos hay que guardarlos como .docx / .xlsx."
+        ),
+    },
+    {
         "categoria": "Pliegos e IA",
         "pregunta": "¿El resumen de pliegos se guarda solo?",
         "respuesta": (
             "No: al generarlo queda solo en pantalla. Pulsa **Guardar resumen** "
             "para conservarlo (Sheets + copia en Drive con nombre "
-            "`contratista_expediente.md`). **Borrar** lo quita de pantalla y memoria."
+            "`contratista_expediente.md`). **Borrar** lo quita de pantalla y de memoria "
+            "(también de Sheets si estaba guardado)."
         ),
     },
     {
@@ -79,7 +102,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "Los PDF están escaneados y falla el análisis",
         "respuesta": (
             "Gemini necesita texto seleccionable o PDFs nativos. "
-            "Si están solo imagen, OCR externo o sube una versión con texto."
+            "Si están solo imagen, OCR externo o sube una versión con texto. "
+            "Word/Excel con texto también sirven."
         ),
     },
     {
@@ -87,7 +111,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "pregunta": "¿Qué documentos genera el asistente?",
         "respuesta": (
             "Borradores basados en los **modelos/anexos del PCAP/PPT**, "
-            "rellenando variables del formulario. No inventa anexos distintos al pliego."
+            "rellenando variables del formulario y/o documentos aportados. "
+            "No inventa anexos distintos al pliego."
         ),
     },
     {
@@ -96,8 +121,37 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "respuesta": (
             "Sí. En el paso 2 puedes rellenar campos de texto **y/o** subir hasta "
             "**4 archivos** (PDF, Word .docx o Excel .xlsx). "
-            "Asigna cada archivo a un **campo** y usa **Comprobar documento** "
-            "para ver si corresponde y es válido. Luego se usan al generar el borrador."
+            "Asigna cada archivo a un **campo** del formulario."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
+        "pregunta": "¿Cómo compruebo que un documento subido vale para su campo?",
+        "respuesta": (
+            "Tras subir el archivo, elige el **campo** al que corresponde y pulsa "
+            "**🔎 Comprobar documento**. La IA indica si es ✅ válido, ⚠️ con reservas "
+            "o ❌ no corresponde, frente a ese campo y al pliego (PCAP/PPT)."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
+        "pregunta": "¿Cómo funciona el borrador recuperable / guardar sesión?",
+        "respuesta": (
+            "Arriba del asistente: **💾 Guardar sesión ahora** actualiza el borrador "
+            "completo (formulario, docs aportados, exigencias, borrador generado) "
+            "y añade una **sesión** al historial. "
+            "**📂 Recuperar último borrador** restaura el estado actual; "
+            "en el historial puedes **Restaurar** cualquier sesión anterior. "
+            "También se autoguarda al extraer exigencias del pliego."
+        ),
+    },
+    {
+        "categoria": "Preparar documentación",
+        "pregunta": "¿Se pierden los datos al cerrar la app?",
+        "respuesta": (
+            "Solo lo que no hayas guardado. Tras **Guardar sesión / formulario / borrador**, "
+            "puedes recuperarlo en otra visita con el mismo expediente y bloque "
+            "(local + Sheets/Drive si están configurados)."
         ),
     },
     {
@@ -128,10 +182,10 @@ SECCIONES_FAQ: list[dict[str, str]] = [
     },
     {
         "categoria": "Preparar documentación",
-        "pregunta": "¿Se guardan versiones de los borradores?",
+        "pregunta": "¿Se guardan versiones del texto del borrador?",
         "respuesta": (
-            "Sí. Cada vez que guardas un borrador se añade una versión "
-            "(máx. 25). Puedes verlas y restaurarlas en el historial del paso 3."
+            "Sí: además de las **sesiones** completas, el texto del borrador "
+            "tiene historial de versiones en el paso 3 (ver / restaurar)."
         ),
     },
     {
@@ -150,26 +204,34 @@ SECCIONES_FAQ: list[dict[str, str]] = [
             "Si **los documentos que subes se adaptan** a las **cláusulas administrativas "
             "(PCAP/PCP)** y a las **prescripciones técnicas (PPT)**. "
             "Acepta **PDF, Word (.docx) y Excel (.xlsx)**. "
-            "Aunque no sea el paquete completo, lo que falta del lote va en una "
-            "sección informativa y **no** fuerza un «no conforme». "
+            "El veredicto es de **conformidad de lo subido**, no de completitud del paquete. "
             "Es una ayuda, no una validación oficial."
+        ),
+    },
+    {
+        "categoria": "Comprobador",
+        "pregunta": "¿Cómo trabajo si tengo más de 4 documentos?",
+        "respuesta": (
+            "Analiza por **lotes de hasta 4**: **Analizar lote** → informe parcial → "
+            "**➕ Subir más documentos** → otro lote. "
+            "Cuando termines, **📊 Analizar al completo** unifica todos los parciales "
+            "en un informe global. El PCAP/PPT de referencia se reutiliza en cada lote."
         ),
     },
     {
         "categoria": "Comprobador",
         "pregunta": "Si subo 4 documentos de 16, ¿saldrá siempre incompleto?",
         "respuesta": (
-            "No: cada lote (máx. 4) da un informe parcial de conformidad. "
-            "Pulsa **➕ Subir más documentos** para el siguiente lote y, al acabar, "
-            "**📊 Analizar al completo** para unificar todos los parciales. "
-            "Adjunta PCAP + PPT una vez; se reutilizan en cada lote."
+            "No: el parcial mide conformidad de ese lote. "
+            "Lo que falta del paquete se lista aparte (informativo). "
+            "El informe global sale al pulsar **Analizar al completo**."
         ),
     },
     {
         "categoria": "Mis Licitaciones y plazos",
         "pregunta": "¿Cómo vinculo un expediente al asistente?",
         "respuesta": (
-            "Desde Oportunidades, resultados o **Mis Licitaciones**, "
+            "Desde Oportunidades, Buscador, Histórico o **Mis Licitaciones**, "
             "pulsa **Preparar docs / Preparar documentación**."
         ),
     },
@@ -202,8 +264,8 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "categoria": "Problemas frecuentes",
         "pregunta": "¿Los datos de formularios se pierden al cerrar?",
         "respuesta": (
-            "Si solo están de sesión, sí. Usa **Guardar formulario / borrador** "
-            "para persistir en local y, si hay configuración, en Sheets/Drive."
+            "Si no has guardado, sí. Usa **Guardar sesión ahora** "
+            "(o guardar formulario / borrador) y luego **Recuperar último borrador**."
         ),
     },
 ]

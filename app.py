@@ -2963,6 +2963,215 @@ def _botones_export_borrador(
             st.caption(f"PDF: {exc}")
 
 
+def _aplicar_borrador_sesion(pref: str, cargado: dict) -> None:
+    """Restaura en session_state un borrador/sesión cargada."""
+    if not isinstance(cargado, dict):
+        return
+    datos = cargado.get("datos") or {}
+    for cid, val in datos.items():
+        if str(cid).startswith("_"):
+            continue
+        st.session_state[f"{pref}_f_{cid}"] = val
+    if cargado.get("exigencias"):
+        st.session_state[f"{pref}_exigencias"] = cargado["exigencias"]
+    if cargado.get("borrador") is not None:
+        st.session_state[f"{pref}_borrador"] = cargado.get("borrador") or ""
+    if cargado.get("verificacion") is not None:
+        st.session_state[f"{pref}_verificacion"] = cargado.get("verificacion") or ""
+    if cargado.get("formato"):
+        st.session_state[f"{pref}_formato"] = cargado["formato"]
+    if cargado.get("modelos"):
+        st.session_state[f"{pref}_modelos"] = cargado["modelos"]
+    docs = cargado.get("docs_apoyo")
+    if docs is not None:
+        st.session_state[f"{pref}_docs_apoyo"] = list(docs or [])
+    st.session_state[f"{pref}_datos"] = {
+        k: v for k, v in datos.items() if not str(k).startswith("_")
+    } if isinstance(datos, dict) else {}
+    if cargado.get("expediente"):
+        st.session_state[f"{pref}_expediente"] = str(cargado["expediente"])
+        st.session_state[f"{pref}_f_expediente"] = str(cargado["expediente"])
+    if cargado.get("titulo"):
+        st.session_state[f"{pref}_titulo"] = str(cargado["titulo"])
+
+
+def _persistir_sesion_preparar(
+    *,
+    bloque: str,
+    pref: str,
+    ctx: dict,
+    datos: dict | None = None,
+    etiqueta_ok: str = "Borrador de sesión guardado.",
+) -> dict | None:
+    """Guarda estado completo (formulario, docs, exigencias, borrador) y sesión."""
+    datos_act = dict(datos or st.session_state.get(f"{pref}_datos") or {})
+    # Sincroniza campos visibles de sesión si existen
+    for k, v in list(st.session_state.items()):
+        if k.startswith(f"{pref}_f_") and not k.endswith("_up"):
+            cid = k[len(f"{pref}_f_") :]
+            if cid and not cid.startswith("_"):
+                datos_act.setdefault(cid, "" if v is None else str(v))
+    docs_apoyo = list(st.session_state.get(f"{pref}_docs_apoyo") or [])
+    if docs_apoyo:
+        datos_act["_docs_apoyo_nombres"] = ", ".join(
+            d.get("nombre", "?") for d in docs_apoyo
+        )
+        datos_act["_docs_apoyo_campos"] = "; ".join(
+            f"{d.get('nombre', '?')} → {d.get('campo_label') or d.get('campo_id') or 'sin campo'}"
+            for d in docs_apoyo
+        )
+    exp = str(
+        datos_act.get("expediente")
+        or st.session_state.get(f"{pref}_expediente")
+        or ctx.get("expediente")
+        or ""
+    ).strip() or "sin-expediente"
+    payload = asistente_store.save_bloque(
+        expediente=exp,
+        enlace=str(ctx.get("url") or ""),
+        titulo=str(
+            datos_act.get("objeto")
+            or st.session_state.get(f"{pref}_titulo")
+            or ctx.get("titulo")
+            or ""
+        ),
+        organo=str(
+            datos_act.get("organo") or ctx.get("organo") or ""
+        ),
+        bloque=bloque,
+        datos=datos_act,
+        formato=st.session_state.get(f"{pref}_formato") or {},
+        exigencias=st.session_state.get(f"{pref}_exigencias") or "",
+        borrador=st.session_state.get(f"{pref}_borrador") or "",
+        verificacion=st.session_state.get(f"{pref}_verificacion") or "",
+        docs_apoyo=docs_apoyo,
+        modelos=st.session_state.get(f"{pref}_modelos") or {},
+    )
+    st.session_state[f"{pref}_datos"] = {
+        k: v for k, v in datos_act.items() if not str(k).startswith("_")
+    }
+    # Rehidrata docs con rutas/drive tras persistir
+    if payload.get("docs_apoyo"):
+        st.session_state[f"{pref}_docs_apoyo"] = asistente_store.hidratar_docs_apoyo(
+            payload.get("docs_apoyo")
+        )
+    st.success(
+        f"{etiqueta_ok} "
+        f"Actualizado: {payload.get('actualizado') or 'ahora'}"
+        + (
+            f" · Sesión `{payload.get('ultima_sesion_id')}`"
+            if payload.get("ultima_sesion_id")
+            else ""
+        )
+    )
+    return payload
+
+
+def _ui_borrador_recuperable(bloque: str, pref: str, ctx: dict, cfg: dict) -> None:
+    """Panel para guardar / recuperar borradores de sesión."""
+    st.markdown("### 💾 Borrador recuperable")
+    st.caption(
+        "Todo lo que subas y guardes (formulario, documentos, exigencias, borrador) "
+        "queda en un **borrador de sesión** recuperable. Cada guardado **actualiza** "
+        "el borrador actual y añade una entrada al historial."
+    )
+    exp = str(
+        st.session_state.get(f"{pref}_expediente")
+        or ctx.get("expediente")
+        or st.session_state.get(f"{pref}_f_expediente")
+        or ""
+    ).strip()
+    url = str(ctx.get("url") or "")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button(
+            "💾 Guardar sesión ahora",
+            key=f"{pref}_btn_guardar_sesion",
+            type="primary",
+            width="stretch",
+            help="Guarda el estado completo del bloque y crea una sesión recuperable",
+        ):
+            try:
+                _persistir_sesion_preparar(
+                    bloque=bloque,
+                    pref=pref,
+                    ctx=ctx,
+                    etiqueta_ok="Sesión guardada (borrador actualizado).",
+                )
+            except Exception as exc:
+                st.error(str(exc))
+    with c2:
+        if st.button(
+            "📂 Recuperar último borrador",
+            key=f"{pref}_btn_recuperar_ultimo",
+            width="stretch",
+            disabled=not exp,
+        ):
+            if not exp:
+                st.error("Indica el ID de expediente.")
+            else:
+                cargado = asistente_store.load_bloque(
+                    expediente=exp, enlace=url, bloque=bloque
+                )
+                if not cargado:
+                    st.warning("No hay borrador guardado para este expediente/bloque.")
+                else:
+                    _aplicar_borrador_sesion(pref, cargado)
+                    st.success(
+                        f"Borrador recuperado ({cargado.get('actualizado') or 'sin fecha'})."
+                    )
+                    st.rerun()
+    with c3:
+        st.caption(f"Bloque: **{cfg.get('etiqueta', bloque)}**")
+        if exp:
+            st.caption(f"Expediente: `{exp}`")
+
+    sesiones = (
+        asistente_store.listar_sesiones(expediente=exp, enlace=url, bloque=bloque)
+        if exp
+        else []
+    )
+    with st.expander(
+        f"🕘 Historial de sesiones guardadas ({len(sesiones)})",
+        expanded=False,
+    ):
+        if not exp:
+            st.caption("Indica un expediente para ver sesiones.")
+        elif not sesiones:
+            st.caption(
+                "Aún no hay sesiones. Pulsa **Guardar sesión ahora** o "
+                "guarda el formulario / borrador."
+            )
+        else:
+            for ses in sesiones:
+                cc1, cc2 = st.columns([3, 1])
+                with cc1:
+                    st.markdown(
+                        f"**{ses.get('timestamp')}** · "
+                        f"{ses.get('n_campos', 0)} campos · "
+                        f"{ses.get('n_docs', 0)} docs"
+                        + (" · con borrador" if ses.get("tiene_borrador") else "")
+                    )
+                with cc2:
+                    if st.button(
+                        "Restaurar",
+                        key=f"{pref}_rest_ses_{ses.get('id')}",
+                        width="stretch",
+                    ):
+                        payload = asistente_store.cargar_sesion(
+                            expediente=exp,
+                            enlace=url,
+                            bloque=bloque,
+                            sesion_id=str(ses.get("id") or ""),
+                        )
+                        if not payload:
+                            st.error("No se pudo cargar esa sesión.")
+                        else:
+                            _aplicar_borrador_sesion(pref, payload)
+                            st.success(f"Sesión {ses.get('timestamp')} restaurada.")
+                            st.rerun()
+
+
 def pestana_preparar_documentacion() -> None:
     """Asistente por bloques: pliego → formulario → borrador → paquete final."""
     _aplicar_vinculo_preparar()
@@ -2970,8 +3179,8 @@ def pestana_preparar_documentacion() -> None:
     st.subheader("Preparar documentación")
     st.caption(
         "Bloques **Administrativo**, **Económico** o **Técnico**. "
-        "Anexos = modelos del PCAP/PPT. Guarda por expediente, exporta Word/PDF "
-        "y une el paquete final."
+        "Anexos = modelos del PCAP/PPT. Cada guardado deja un **borrador recuperable** "
+        "(sesión) actualizado. Exporta Word/PDF y une el paquete final."
     )
 
     with st.expander("📘 Guía rápida del flujo", expanded=False):
@@ -2985,7 +3194,8 @@ def pestana_preparar_documentacion() -> None:
 6. **Paquete final** — une Admin + Económico + Técnico y exporta Word/PDF.  
 7. **Presentar** — marca estado *Presentada* cuando envíes en PLACSP.  
 
-Cada vez que guardas un borrador se guarda una **versión** (historial restaurable).
+**Guardar sesión** actualiza el borrador recuperable y añade una entrada al historial
+(formulario, documentos aportados, exigencias y texto generado).
             """
         )
 
@@ -3023,6 +3233,8 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
     bloque = next(eid for eid, lab in etiquetas.items() if lab == bloque_lab)
     cfg = asistente_admin.config_bloque(bloque)
     pref = f"prep_{bloque}"
+
+    _ui_borrador_recuperable(bloque, pref, ctx, cfg)
 
     paso = st.radio(
         "Paso",
@@ -3102,6 +3314,19 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
                     if fl:
                         st.session_state.setdefault("prep_fecha_limite", fl)
                     st.success("Exigencias extraídas. Continúa en el paso 2.")
+                    try:
+                        _persistir_sesion_preparar(
+                            bloque=bloque,
+                            pref=pref,
+                            ctx=st.session_state.get("prep_contexto") or ctx,
+                            datos={
+                                "expediente": (expediente or "").strip(),
+                                "objeto": (titulo or "").strip(),
+                            },
+                            etiqueta_ok="Exigencias guardadas en borrador recuperable.",
+                        )
+                    except Exception as exc_save:
+                        st.caption(f"No se pudo autoguardar la sesión: {exc_save}")
                 except pdf_summary.PdfSummaryError as exc:
                     st.error(str(exc))
                 except Exception as exc:
@@ -3430,13 +3655,14 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
         col_g, col_c = st.columns(2)
         with col_g:
             guardar = st.button(
-                "💾 Guardar formulario (sesión + Sheets/Drive)",
+                "💾 Guardar formulario / sesión",
                 type="primary",
                 key=f"{pref}_btn_guardar",
+                help="Actualiza el borrador recuperable (formulario + docs + exigencias)",
             )
         with col_c:
             cargar = st.button(
-                "📂 Cargar formulario guardado",
+                "📂 Cargar borrador guardado",
                 key=f"{pref}_btn_cargar",
             )
 
@@ -3450,25 +3676,11 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
                     expediente=exp, enlace=url, bloque=bloque
                 )
                 if not cargado:
-                    st.warning("No hay datos guardados para este expediente/bloque.")
+                    st.warning("No hay borrador guardado para este expediente/bloque.")
                 else:
-                    for cid, val in (cargado.get("datos") or {}).items():
-                        if str(cid).startswith("_"):
-                            continue
-                        st.session_state[f"{pref}_f_{cid}"] = val
-                    if cargado.get("exigencias"):
-                        st.session_state[f"{pref}_exigencias"] = cargado["exigencias"]
-                    if cargado.get("borrador"):
-                        st.session_state[f"{pref}_borrador"] = cargado["borrador"]
-                    if cargado.get("verificacion"):
-                        st.session_state[f"{pref}_verificacion"] = cargado[
-                            "verificacion"
-                        ]
-                    if cargado.get("formato"):
-                        st.session_state[f"{pref}_formato"] = cargado["formato"]
-                    st.session_state[f"{pref}_datos"] = cargado.get("datos") or {}
+                    _aplicar_borrador_sesion(pref, cargado)
                     st.success(
-                        f"Cargado ({cargado.get('actualizado') or 'sin fecha'})."
+                        f"Borrador recuperado ({cargado.get('actualizado') or 'sin fecha'})."
                     )
                     st.rerun()
 
@@ -3486,56 +3698,28 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
                         extracto = pdf_summary._texto_desde_pdfs(docs_apoyo)
                         if extracto.strip():
                             limpios["_extracto_docs_apoyo"] = extracto.strip()[:20000]
-                        limpios["_docs_apoyo_nombres"] = ", ".join(
-                            d.get("nombre", "?") for d in docs_apoyo
-                        )
-                        limpios["_docs_apoyo_campos"] = "; ".join(
-                            f"{d.get('nombre', '?')} → {d.get('campo_label') or d.get('campo_id') or 'sin campo'}"
-                            for d in docs_apoyo
-                        )
                     except Exception:
-                        limpios["_docs_apoyo_nombres"] = ", ".join(
-                            d.get("nombre", "?") for d in docs_apoyo
-                        )
-                st.session_state[f"{pref}_datos"] = limpios
-                exp = str(
-                    limpios.get("expediente") or ctx.get("expediente") or ""
-                ).strip()
+                        pass
+                st.session_state[f"{pref}_datos"] = {
+                    k: v for k, v in limpios.items() if not str(k).startswith("_")
+                }
+                st.session_state[f"{pref}_docs_apoyo"] = docs_apoyo
                 try:
-                    asistente_store.save_bloque(
-                        expediente=exp or "sin-expediente",
-                        enlace=str(ctx.get("url") or ""),
-                        titulo=str(
-                            limpios.get("objeto") or ctx.get("titulo") or ""
-                        ),
-                        organo=str(
-                            limpios.get("organo") or ctx.get("organo") or ""
-                        ),
+                    _persistir_sesion_preparar(
                         bloque=bloque,
+                        pref=pref,
+                        ctx=ctx,
                         datos=limpios,
-                        formato=st.session_state.get(f"{pref}_formato") or {},
-                        exigencias=st.session_state.get(f"{pref}_exigencias") or "",
-                        borrador=st.session_state.get(f"{pref}_borrador") or "",
-                        verificacion=st.session_state.get(f"{pref}_verificacion")
-                        or "",
-                    )
-                    n_campos = sum(
-                        1
-                        for k, v in limpios.items()
-                        if v and not str(k).startswith("_")
-                    )
-                    extra = (
-                        f" + {len(docs_apoyo)} documento(s)"
-                        if docs_apoyo
-                        else ""
-                    )
-                    st.success(
-                        f"Formulario guardado ({n_campos} campos{extra}). "
-                        "Pasa al paso 3."
+                        etiqueta_ok=(
+                            "Formulario guardado en borrador recuperable "
+                            "(sesión actualizada)."
+                        ),
                     )
                 except Exception as exc:
-                    st.session_state[f"{pref}_datos"] = limpios
-                    st.warning(f"Guardado en sesión; nube falló: {exc}")
+                    st.session_state[f"{pref}_datos"] = {
+                        k: v for k, v in limpios.items() if not str(k).startswith("_")
+                    }
+                    st.warning(f"Guardado parcial en memoria; persistencia falló: {exc}")
 
         if st.session_state.get(f"{pref}_datos") or docs_apoyo:
             st.caption(
@@ -3640,24 +3824,20 @@ Cada vez que guardas un borrador se guarda una **versión** (historial restaurab
     exp_act = str(datos.get("expediente") or ctx.get("expediente") or "sin-expediente")
     url_act = str(ctx.get("url") or "")
     if st.button(
-        "☁️ Guardar borrador en Sheets/Drive",
+        "☁️ Guardar borrador / sesión (recuperable)",
         key=f"{pref}_btn_persist_borrador",
+        type="primary",
     ):
         try:
-            asistente_store.save_bloque(
-                expediente=exp_act,
-                enlace=url_act,
-                titulo=str(datos.get("objeto") or ctx.get("titulo") or ""),
-                organo=str(datos.get("organo") or ctx.get("organo") or ""),
+            st.session_state[f"{pref}_datos"] = datos
+            _persistir_sesion_preparar(
                 bloque=bloque,
+                pref=pref,
+                ctx={**ctx, "url": url_act},
                 datos=datos,
-                formato=fmt,
-                exigencias=exigencias,
-                borrador=st.session_state.get(f"{pref}_borrador") or "",
-                verificacion=st.session_state.get(f"{pref}_verificacion") or "",
-            )
-            st.success(
-                "Borrador persistido (local + Sheets/Drive) y versión añadida al historial."
+                etiqueta_ok=(
+                    "Borrador y sesión guardados (recuperables en cualquier momento)."
+                ),
             )
         except Exception as exc:
             st.error(str(exc))

@@ -14,6 +14,8 @@ venv/
 data/cache/
 data/asistente/
 data/asistente/versions/
+data/asistente/docs/
+data/asistente/sesiones/
 data/perfil_grefa.json
 # Histórico consultable (sí versionable si es razonable de tamaño)
 !data/historico_grefa.parquet
