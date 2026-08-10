@@ -112,6 +112,7 @@ def _init_state_ayudas() -> None:
         "seguimiento_cache_ayudas": {},
         "mis_convocatorias_cache": None,
         "mis_convocatorias_local": [],
+        "mis_extraccion_cache": {},
         "nav_ayudas": NAV_AYUDAS[0],
         "catalogo_entidades": default_entidades(),
         "datos_web_entidades": None,
@@ -430,6 +431,141 @@ def _claves_interes() -> set[str]:
         _clave(f.get("expediente", ""), f.get("url", ""))
         for f in _cargar_mis_cache()
     }
+
+
+def _texto_desde_html(html: str, *, max_chars: int = 40_000) -> str:
+    import re
+
+    texto = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html or "")
+    texto = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", texto)
+    texto = re.sub(r"(?is)<[^>]+>", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto[:max_chars]
+
+
+def _contexto_para_extraccion(fila: dict) -> str:
+    """Monta el texto fuente: detalle BDNS, sesión o extracto web."""
+    import requests
+
+    from modules.ingestion_bdns import detalle_a_fila, fetch_detalle_codigo
+
+    expediente = str(fila.get("expediente") or "").strip()
+    url = str(fila.get("url") or "").strip()
+    titulo = str(fila.get("titulo") or "").strip()
+    partes: list[str] = []
+
+    if titulo:
+        partes.append(f"Título: {titulo}")
+    if fila.get("organo"):
+        partes.append(f"Órgano: {fila.get('organo')}")
+    if fila.get("estado"):
+        partes.append(f"Estado: {fila.get('estado')}")
+    if fila.get("presupuesto"):
+        partes.append(f"Presupuesto: {fila.get('presupuesto')}")
+    if fila.get("notas"):
+        partes.append(f"Notas: {fila.get('notas')}")
+
+    # 1) Si ya está en datos_ayudas de la sesión (enriquecida).
+    datos = st.session_state.get("datos_ayudas")
+    if (
+        isinstance(datos, pd.DataFrame)
+        and not datos.empty
+        and expediente
+        and not expediente.upper().startswith("WEB:")
+    ):
+        mask = datos["expediente"].astype(str) == expediente
+        if mask.any():
+            row = datos.loc[mask].iloc[0]
+            for col, label in (
+                ("descripcion", "Descripción"),
+                ("finalidad", "Finalidad"),
+                ("tipo_contrato", "Instrumento"),
+                ("fecha_limite", "Fin solicitud"),
+                ("sede_electronica", "Sede electrónica"),
+                ("organo_contratacion", "Órgano"),
+            ):
+                val = row.get(col)
+                if val is not None and str(val).strip() and str(val).lower() != "nan":
+                    partes.append(f"{label}: {val}")
+            docs = row.get("documentos") or []
+            if isinstance(docs, list) and docs:
+                nombres = []
+                for d in docs:
+                    if isinstance(d, dict):
+                        nombres.append(d.get("nombre") or d.get("descripcion") or "")
+                    else:
+                        nombres.append(str(d))
+                nombres = [n for n in nombres if n]
+                if nombres:
+                    partes.append("Documentos citados en BDNS: " + "; ".join(nombres))
+
+    # 2) Detalle fresco BDNS si es código BDNS.
+    codigo = "" if expediente.upper().startswith("WEB:") else expediente
+    if codigo:
+        try:
+            detalle = fetch_detalle_codigo(codigo)
+            if detalle:
+                enriquecida = detalle_a_fila(detalle)
+                for col, label in (
+                    ("descripcion", "Descripción / bases"),
+                    ("finalidad", "Finalidad"),
+                    ("tipo_contrato", "Instrumento"),
+                    ("fecha_limite", "Fin solicitud"),
+                    ("sede_electronica", "Sede electrónica"),
+                    ("organo_contratacion", "Órgano"),
+                    ("ubicacion", "Ámbito"),
+                ):
+                    val = enriquecida.get(col)
+                    if val is not None and str(val).strip():
+                        partes.append(f"{label}: {val}")
+                docs = enriquecida.get("documentos") or []
+                if docs:
+                    nombres = [
+                        (d.get("nombre") or d.get("descripcion") or "")
+                        for d in docs
+                        if isinstance(d, dict)
+                    ]
+                    nombres = [n for n in nombres if n]
+                    if nombres:
+                        partes.append(
+                            "Documentos de la ficha BDNS: " + "; ".join(nombres)
+                        )
+        except Exception as exc:
+            partes.append(f"(No se pudo refrescar detalle BDNS: {exc})")
+
+    # 3) Extracto de la URL (web o ficha) como refuerzo.
+    if url and url.startswith("http"):
+        try:
+            resp = requests.get(
+                url,
+                timeout=25,
+                headers={"User-Agent": "GREFA-Licitaciones/1.0"},
+            )
+            if resp.ok and resp.text:
+                extracto = _texto_desde_html(resp.text)
+                if len(extracto) > 120:
+                    partes.append(f"Extracto de la página ({url}):\n{extracto[:12000]}")
+        except Exception as exc:
+            partes.append(f"(No se pudo leer la URL: {exc})")
+
+    return "\n\n".join(partes).strip()
+
+
+def _extraer_requisitos_mis(fila: dict) -> str:
+    from modules import pdf_summary
+
+    if not pdf_summary.is_configured():
+        raise RuntimeError(
+            "Configura IA en Secrets ([gemini], [groq] y/o [openrouter]) "
+            "para extraer requisitos y documentación."
+        )
+    texto = _contexto_para_extraccion(fila)
+    return pdf_summary.extraer_requisitos_convocatoria(
+        texto,
+        expediente=str(fila.get("expediente") or ""),
+        titulo=str(fila.get("titulo") or ""),
+        url=str(fila.get("url") or ""),
+    )
 
 
 def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
@@ -1145,16 +1281,31 @@ def _pestana_buscador(df: pd.DataFrame) -> None:
 
 
 def _pestana_mis() -> None:
+    from modules import pdf_summary
+
     st.subheader("Mis Convocatorias")
     if st.button("🔄 Recargar", key="mis_ayu_reload"):
         st.session_state["mis_convocatorias_cache"] = None
         st.rerun()
     filas = _cargar_mis_cache()
     if not filas:
-        st.info("Aún no hay convocatorias guardadas. Usa ⭐ en Oportunidades, Web por entidad o Buscador.")
+        st.info(
+            "Aún no hay convocatorias guardadas. "
+            "Usa ⭐ en Oportunidades, Web por entidad o Buscador."
+        )
         return
     st.markdown(f"**{len(filas)}** de interés")
+    if not pdf_summary.is_configured():
+        st.caption(
+            "Para extraer requisitos/documentación configura IA en Secrets "
+            "([gemini], [groq] y/o [openrouter])."
+        )
+    pdf_summary.mostrar_avisos_ia()
+
+    cache_ext = st.session_state.setdefault("mis_extraccion_cache", {})
+
     for idx, fila in enumerate(filas):
+        clave = _clave(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
         with st.container(border=True):
             st.markdown(
                 f"**{fila.get('expediente') or '—'}** — {str(fila.get('titulo') or '')[:140]}"
@@ -1172,10 +1323,15 @@ def _pestana_mis() -> None:
                     if x
                 )
             )
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns([1, 1, 1.3, 1])
             with c1:
                 if fila.get("url"):
-                    st.link_button("BDNS ↗", fila["url"], width="stretch")
+                    etiqueta = (
+                        "Abrir ↗"
+                        if str(fila.get("expediente") or "").upper().startswith("WEB:")
+                        else "BDNS ↗"
+                    )
+                    st.link_button(etiqueta, fila["url"], width="stretch")
             with c2:
                 ui_compartir.render_compartir(
                     {
@@ -1187,12 +1343,48 @@ def _pestana_mis() -> None:
                     fuente_label="BDNS",
                 )
             with c3:
+                if st.button(
+                    "📋 Requisitos y docs",
+                    key=f"mis_ayu_ext_{idx}",
+                    width="stretch",
+                    type="primary",
+                    help="Extrae con IA los requisitos y la documentación a entregar",
+                ):
+                    with st.spinner("Extrayendo requisitos y documentación…"):
+                        try:
+                            informe = _extraer_requisitos_mis(fila)
+                            cache_ext[clave] = informe
+                            st.session_state["mis_extraccion_cache"] = cache_ext
+                            st.toast("Extracción lista", icon="✅")
+                        except Exception as exc:
+                            st.error(str(exc))
+            with c4:
                 if st.button("Quitar ⭐", key=f"mis_ayu_del_{idx}", width="stretch"):
                     try:
                         _marcar_interes(fila, interesa=False)
+                        cache_ext.pop(clave, None)
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+
+            informe = cache_ext.get(clave)
+            if informe:
+                with st.expander("Requisitos y documentación extraídos", expanded=True):
+                    st.markdown(informe)
+                    st.download_button(
+                        "⬇️ Descargar informe",
+                        data=informe.encode("utf-8"),
+                        file_name=f"requisitos_{(fila.get('expediente') or 'conv')[:40].replace('/', '-')}.md",
+                        mime="text/markdown",
+                        key=f"mis_ayu_dl_ext_{idx}",
+                    )
+                    if st.button(
+                        "🗑️ Ocultar extracción",
+                        key=f"mis_ayu_hide_ext_{idx}",
+                    ):
+                        cache_ext.pop(clave, None)
+                        st.session_state["mis_extraccion_cache"] = cache_ext
+                        st.rerun()
 
 
 def _pestana_seguimiento() -> None:

@@ -955,3 +955,61 @@ def sintetizar_informes_comprobador(
         contexto=contexto,
         prompt_base=PROMPT_SINTESIS_LOTES,
     )
+
+
+PROMPT_CONVOCATORIA_AYUDAS = """Eres analista de convocatorias de ayudas, subvenciones y premios
+públicos (BDNS / bases reguladoras) para el equipo GREFA
+(Grupo para la Recuperación de la Fauna Autóctona).
+
+A partir del texto de la convocatoria (ficha BDNS, bases, extracto web…),
+extrae en **español** un informe claro y accionable con estas secciones exactas
+(markdown):
+
+## Requisitos de participación / elegibilidad
+Lista numerada de quién puede presentarse, condiciones, exclusiones,
+ámbito territorial, tipología de beneficiario, etc. Si no consta, «No consta».
+
+## Documentación a entregar
+Lista numerada de documentos, formularios, anexos, memorias, certificados
+u otros materiales que haya que presentar. Si no consta, «No consta».
+
+## Plazos clave
+Presentación, resolución u otros plazos mencionados. Si no consta, «No consta».
+
+## Sede / enlaces útiles
+Sede electrónica u otros enlaces citados. Si no consta, «No consta».
+
+## Atención para GREFA
+2–5 puntos de riesgo u oportunidad (idoneidad, carga documental, plazos cortos…).
+
+No inventes datos que no estén en el texto. Sé conciso y práctico.
+"""
+
+
+def extraer_requisitos_convocatoria(
+    texto: str,
+    *,
+    expediente: str = "",
+    titulo: str = "",
+    url: str = "",
+) -> str:
+    """Extrae requisitos y documentación a entregar de una convocatoria (texto)."""
+    cuerpo = (texto or "").strip()
+    if len(cuerpo) < 80:
+        raise PdfSummaryError(
+            "No hay texto suficiente de la convocatoria para extraer requisitos. "
+            "Abre la ficha oficial o actualiza datos BDNS."
+        )
+    contexto_parts = []
+    if expediente or titulo:
+        contexto_parts.append(
+            f"Código / expediente: {expediente or '—'}\nTítulo: {titulo or '—'}"
+        )
+    if url:
+        contexto_parts.append(f"URL: {url}")
+    contexto = "\n".join(contexto_parts)
+    prompt = (
+        f"{PROMPT_CONVOCATORIA_AYUDAS}\n\n---\nTexto de la convocatoria:\n"
+        f"{cuerpo[:MAX_TEXTO_EXTRAIDO]}\n---"
+    )
+    return _generar_con_gemini([prompt], contexto=contexto, prompt_base=PROMPT_CONVOCATORIA_AYUDAS)

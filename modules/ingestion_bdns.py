@@ -371,6 +371,11 @@ def fetch_detalle(
     return None
 
 
+def fetch_detalle_codigo(codigo_bdns: str) -> dict[str, Any] | None:
+    """Detalle BDNS por código (abre sesión propia)."""
+    return fetch_detalle(_session(), codigo_bdns)
+
+
 def _terminos_busqueda(
     keywords: Sequence[str] | None,
     max_terms: int,
