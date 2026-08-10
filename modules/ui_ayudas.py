@@ -623,11 +623,17 @@ def _panel_entidades() -> None:
     catalogo = [normalizar_entidad(e) for e in catalogo]
     st.session_state["catalogo_entidades"] = catalogo
     activos = sum(1 for e in catalogo if e.get("activo"))
-    with st.container(border=True):
-        st.markdown(f"### Entidades vigiladas · {activos} activas")
+    st.caption(
+        f"**{activos}** entidades activas de {len(catalogo)} en la relación. "
+        "La búsqueda usa **todas las activas** por defecto."
+    )
+    with st.expander(
+        f"Gestionar entidades · {activos} activas",
+        expanded=False,
+    ):
         st.caption(
-            "Gestiona aquí las entidades. La búsqueda web usa las activas "
-            "(sitio propio → resto de internet si hace falta)."
+            "Añade, edita o activa/desactiva entidades. "
+            "La búsqueda web usa las activas (sitio propio → resto de internet si hace falta)."
         )
 
         nuevo = st.text_input(
@@ -877,14 +883,6 @@ def _asegurar_filtros_web() -> None:
 def _render_filtros_web() -> None:
     """Filtros solo para resultados web de entidades."""
     _asegurar_filtros_web()
-    nombres = [
-        e["nombre"]
-        for e in active_entidades_detalle(st.session_state.get("catalogo_entidades") or [])
-    ]
-    if "web_entidades_filtro_ready" not in st.session_state and nombres:
-        st.session_state["web_entidades_filtro"] = list(nombres)
-        st.session_state["web_entidades_filtro_ready"] = True
-
     c1, c2 = st.columns(2)
     with c1:
         st.text_input("Búsqueda libre", key="web_busqueda")
@@ -894,25 +892,25 @@ def _render_filtros_web() -> None:
         )
     with c2:
         st.multiselect(
-            "Entidades",
-            nombres,
-            key="web_entidades_filtro",
-            help="Elige las entidades cuyos resultados quieres ver.",
-        )
-        st.multiselect(
             "Fase",
             ["1. Web propia", "3. Web abierta"],
             key="web_fases",
         )
+        st.caption("Por defecto se buscan **todas** las entidades activas.")
 
 
 def _filtrar_web_viva(df: pd.DataFrame) -> pd.DataFrame:
-    """Filtros propios de la pestaña Web por entidad."""
+    """Filtros propios de la pestaña Web por entidad.
+
+    Sin selección de entidades (= vacío) se muestran resultados de **todas**.
+    """
     if df is None or df.empty:
         return df if df is not None else empty_web_dataframe()
     _asegurar_filtros_web()
     out = df
 
+    # Solo restringir si el usuario hubiera dejado un subconjunto (legado);
+    # por defecto web_entidades_filtro queda vacío → todas.
     entidades = list(st.session_state.get("web_entidades_filtro") or [])
     if entidades and "entidad" in out.columns:
         out = out[out["entidad"].astype(str).isin(entidades)]
@@ -1270,8 +1268,8 @@ def _pestana_web(puntuadas_bdns: pd.DataFrame | None = None) -> None:
     st.subheader("Web por entidad")
     st.markdown(
         """
-Busca **solo entre entidades vigiladas**: web propia y, si hace falta, resto de internet.
-Gestiona el listado aquí; las ayudas BDNS puntuadas están en **Oportunidades GREFA**.
+Busca en **todas las entidades activas** de la relación (web propia y, si hace falta, resto de internet).
+Despliega **Gestionar entidades** solo para añadir o editar. Las ayudas BDNS están en **Oportunidades GREFA**.
 """
     )
     st.caption(
@@ -1282,7 +1280,7 @@ Gestiona el listado aquí; las ayudas BDNS puntuadas están en **Oportunidades G
 
     detalle = active_entidades_detalle(st.session_state.get("catalogo_entidades") or [])
     if not detalle:
-        st.warning("Añade o activa al menos una entidad arriba para buscar en la web.")
+        st.warning("Despliega **Gestionar entidades** y añade o activa al menos una.")
         return
 
     with st.container(border=True):
