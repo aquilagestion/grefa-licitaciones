@@ -65,7 +65,18 @@ SECCIONES_FAQ: list[dict[str, str]] = [
         "respuesta": (
             "Con el mismo catálogo de términos GREFA que las licitaciones, pero **sin CPV** "
             "(las subvenciones no usan códigos CPV). Las palabras clave pesan hasta el 100 % "
-            "del Índice de Relevancia."
+            "del Índice de Relevancia. Si el título/órgano contiene una **entidad vigilada**, "
+            "se aplica un pequeño bonus."
+        ),
+    },
+    {
+        "categoria": "Ayudas y premios",
+        "pregunta": "¿Qué son las entidades vigiladas?",
+        "respuesta": (
+            "Nombres (p. ej. Fundación BBVA, SEO/BirdLife) que tú añades o activas. "
+            "Se buscan en la **BDNS** y también en la **web**. Solo se muestran resultados "
+            "cuyo título o resumen **contienen esa cadena**. Por defecto usa DuckDuckGo; "
+            "si configuras `[web_search] api_key` y `cx` en Secrets, usa Google CSE."
         ),
     },
     {

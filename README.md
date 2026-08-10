@@ -72,8 +72,11 @@ Si la red bloquea el dominio, descarga el `.atom` manualmente y súbelo desde
 ### Fuente BDNS (modo Ayudas y premios)
 
 API REST: `https://www.infosubvenciones.es/bdnstrans/api`. La app busca por
-términos GREFA, enriquece con el detalle de cada convocatoria y puntúa sin CPV.
-En Sheets se usan las pestañas `OportunidadesAyudas` y `MisConvocatorias`.
+términos GREFA y **entidades vigiladas**, enriquece con el detalle y puntúa sin CPV.
+Además, la pestaña **Web por entidad** busca en internet (DuckDuckGo, o Google CSE
+si configuras `[web_search]` en Secrets) y solo conserva resultados cuyo título o
+snippet **contienen la cadena** del nombre de la entidad.
+En Sheets: `OportunidadesAyudas`, `MisConvocatorias` y `EntidadesAyudas`.
 
 ---
 

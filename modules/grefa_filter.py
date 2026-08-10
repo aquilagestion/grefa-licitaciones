@@ -33,6 +33,37 @@ from config.default_criteria import (
     TITLE_HIT_WEIGHT,
 )
 
+# En ayudas/premios, saturación más exigente (hace falta más señal específica).
+AYUDAS_KEYWORD_SATURATION = 5.0
+
+# Términos demasiado genéricos en BDNS (Consejerías de Medio Ambiente, etc.).
+AYUDAS_TERMINOS_DEBILES: frozenset[str] = frozenset(
+    {
+        "ambiente",
+        "medio ambiente",
+        "medioambiente",
+        "medio ambiental",
+        "medioambiental",
+        "naturaleza",
+        "montaña",
+        "río",
+        "mar",
+        "asociaciones",
+        "educativas",
+        "cambio climático",
+        "desarrollo sostenible",
+        "economía circular",
+        "conservación",
+        "reciclaje",
+        "residuos",
+        "emisiones",
+        "energías renovables",
+    }
+)
+
+AYUDAS_PESO_DEBIL = 0.22
+AYUDAS_TOPE_SOLO_DEBILES = 48  # no llega a Alta solo con genéricos
+
 SCORING_COLUMNS: tuple[str, ...] = (
     "relevancia",
     "categoria",
@@ -280,8 +311,8 @@ def score_row_convocatoria(
 ) -> dict[str, object]:
     """Índice de Relevancia GREFA para ayudas/premios BDNS (sin CPV).
 
-    Keywords/conceptos pesan hasta 100. Un pequeño bonus (+5, tope 100) si el
-    instrumento menciona premio/subvención y ya hay match temático.
+    Los términos genéricos (medio ambiente, naturaleza…) pesan poco; sin al
+    menos un término específico no se alcanza categoría Alta.
     """
     texto_extra = " ".join(
         [
@@ -292,15 +323,31 @@ def score_row_convocatoria(
     descripcion_ampliada = f"{descripcion or ''} {texto_extra}".strip()
 
     if conceptos:
-        keywords_coincidentes, peso_keywords = matching_keyword_concepts(
+        keywords_coincidentes, _ = matching_keyword_concepts(
             titulo, descripcion_ampliada, conceptos
         )
     else:
-        keywords_coincidentes, peso_keywords = matching_keywords(
+        keywords_coincidentes, _ = matching_keywords(
             titulo, descripcion_ampliada, keywords
         )
-    saturacion = max(KEYWORD_SATURATION, 1e-9)
-    # En ayudas no hay CPV: el bloque de keywords ocupa el 100 %.
+
+    titulo_norm = normalize_text(titulo)
+    peso_keywords = 0.0
+    tiene_fuerte = False
+    for termino in keywords_coincidentes:
+        canon = str(termino).strip().lower()
+        debil = canon in AYUDAS_TERMINOS_DEBILES
+        if not debil:
+            tiene_fuerte = True
+        factor = AYUDAS_PESO_DEBIL if debil else 1.0
+        en_titulo = any(
+            patron.search(titulo_norm)
+            for _, patron in _compiled_keywords((str(termino),))
+        )
+        base = TITLE_HIT_WEIGHT if en_titulo else DESCRIPTION_HIT_WEIGHT
+        peso_keywords += base * factor
+
+    saturacion = max(AYUDAS_KEYWORD_SATURATION, 1e-9)
     peso_total_keywords = CPV_WEIGHT + KEYWORD_WEIGHT
     puntos_keywords = peso_total_keywords * min(peso_keywords / saturacion, 1.0)
 
@@ -314,6 +361,9 @@ def score_row_convocatoria(
         bonus = 5.0
 
     relevancia = int(round(min(puntos_keywords + bonus, 100.0)))
+    if keywords_coincidentes and not tiene_fuerte:
+        relevancia = min(relevancia, AYUDAS_TOPE_SOLO_DEBILES)
+
     categoria = classify(relevancia)
     nivel = RELEVANCE_LEVELS[categoria]
 
@@ -323,6 +373,10 @@ def score_row_convocatoria(
             f"{len(keywords_coincidentes)} palabra(s) clave: "
             f"{', '.join(keywords_coincidentes)} (+{int(round(puntos_keywords))}%)"
         )
+        if not tiene_fuerte:
+            motivos.append(
+                f"Solo términos genéricos (tope {AYUDAS_TOPE_SOLO_DEBILES}%)"
+            )
     else:
         motivos.append("Sin palabras clave (+0%)")
     if bonus:

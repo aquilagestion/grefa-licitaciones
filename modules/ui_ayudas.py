@@ -15,6 +15,7 @@ from config.default_criteria import (
     RELEVANCE_LEVELS,
     flatten_keywords,
 )
+from config.entidades_catalog import active_entidades, default_entidades
 from config.keyword_catalog import active_keywords_grouped, default_term_catalog
 from modules import ayuda_faq, grefa_filter, sheets_store, ui_compartir
 from modules.exporter import timestamped_filename, to_csv_bytes, to_excel_bytes
@@ -25,14 +26,25 @@ from modules.ingestion_bdns import (
     filter_by_nivel,
 )
 from modules.translator import complete_from_any
+from modules.web_search_entidades import (
+    WebSearchError,
+    buscar_entidades_en_web,
+    contiene_cadena,
+    empty_web_dataframe,
+    google_cse_configured,
+)
 
 NAV_AYUDAS = [
     "🎯 Oportunidades GREFA",
+    "🌐 Web por entidad",
     "🔎 Buscador General BDNS",
     "⭐ Mis Convocatorias",
     "📋 Seguimiento",
     "❓ Ayuda y FAQ",
 ]
+
+NAV_WEB = "🌐 Web por entidad"
+
 
 NIVELES_BDNS = ("ESTADO", "AUTONOMICA", "LOCAL", "OTROS")
 
@@ -66,9 +78,23 @@ def _init_state_ayudas() -> None:
         "nav_ayudas": NAV_AYUDAS[0],
         "estados_ayudas": ["Abierta", "Publicada"],
         "estados_ayudas_aplicados": ["Abierta", "Publicada"],
+        "catalogo_entidades": default_entidades(),
+        "datos_web_entidades": None,
+        "origen_web_entidades": "",
+        "error_web_entidades": "",
+        "web_max_por_entidad": 8,
+        "web_extra_query": "",
+        "cargando_web_entidades": False,
+        "refresh_token_web": 0,
+        "entidades_sheets_sync": False,
+        "excluir_convenios_ayudas": True,
+        "solo_con_entidad_ayudas": False,
     }
     for clave, valor in defaults.items():
         st.session_state.setdefault(clave, valor)
+    # Si la sesión guardó un menú antiguo (antes de «Web por entidad»), resetear.
+    if st.session_state.get("nav_ayudas") not in NAV_AYUDAS:
+        st.session_state["nav_ayudas"] = NAV_AYUDAS[0]
     if "catalogo_terminos" not in st.session_state:
         st.session_state["catalogo_terminos"] = default_term_catalog()
     if "keywords" not in st.session_state:
@@ -110,6 +136,7 @@ def _formato_fecha(valor: Any) -> str:
 def _cargar_bdns_cached(
     token: int,
     keywords_key: str,
+    entidades_key: str,
     max_terms: int,
     pages_per_term: int,
     page_size: int,
@@ -118,8 +145,10 @@ def _cargar_bdns_cached(
     pages_ultimas: int,
 ) -> tuple[pd.DataFrame, str]:
     keywords = [k for k in keywords_key.split("||") if k]
+    entidades = [e for e in entidades_key.split("||") if e]
     return fetch_convocatorias_bdns(
         keywords=keywords,
+        entidades=entidades,
         max_terms=max_terms,
         pages_per_term=pages_per_term,
         page_size=page_size,
@@ -130,13 +159,61 @@ def _cargar_bdns_cached(
     )
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cargar_web_cached(
+    token: int,
+    entidades_key: str,
+    max_por_entidad: int,
+    extra_query: str,
+) -> tuple[pd.DataFrame, str]:
+    entidades = [e for e in entidades_key.split("||") if e]
+    return buscar_entidades_en_web(
+        entidades,
+        max_por_entidad=max_por_entidad,
+        extra_query=extra_query,
+    )
+
+
+def _cargar_entidades_de_sheets(*, forzar: bool = False) -> None:
+    if not sheets_store.is_configured():
+        return
+    if st.session_state.get("entidades_sheets_sync") and not forzar:
+        return
+    try:
+        filas = sheets_store.load_entidades_ayudas()
+        if filas:
+            st.session_state["catalogo_entidades"] = filas
+        elif not st.session_state.get("catalogo_entidades"):
+            st.session_state["catalogo_entidades"] = default_entidades()
+            sheets_store.save_entidades_ayudas(st.session_state["catalogo_entidades"])
+        st.session_state["entidades_sheets_sync"] = True
+    except Exception as exc:
+        LOGGER = __import__("logging").getLogger(__name__)
+        LOGGER.debug("EntidadesAyudas no cargadas: %s", exc)
+        st.session_state["entidades_sheets_sync"] = True
+
+
+def _guardar_entidades_en_sheets() -> None:
+    if not sheets_store.is_configured():
+        return
+    try:
+        sheets_store.save_entidades_ayudas(
+            list(st.session_state.get("catalogo_entidades") or [])
+        )
+    except Exception as exc:
+        st.warning(f"No se pudieron guardar entidades en Sheets: {exc}")
+
+
 def _cargar_datos() -> None:
     keywords = flatten_keywords(st.session_state.get("keywords") or {})
     keywords_key = "||".join(sorted({k.strip().lower() for k in keywords if k.strip()}))
+    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
+    entidades_key = "||".join(entidades)
     try:
         df, origen = _cargar_bdns_cached(
             int(st.session_state.get("refresh_token_ayudas") or 0),
             keywords_key,
+            entidades_key,
             int(st.session_state.get("bdns_max_terms") or 8),
             int(st.session_state.get("bdns_pages_per_term") or 1),
             int(st.session_state.get("bdns_page_size") or 40),
@@ -160,6 +237,31 @@ def _cargar_datos() -> None:
         st.session_state["cargando_datos_ayudas"] = False
 
 
+def _cargar_web() -> None:
+    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
+    entidades_key = "||".join(entidades)
+    try:
+        df, origen = _cargar_web_cached(
+            int(st.session_state.get("refresh_token_web") or 0),
+            entidades_key,
+            int(st.session_state.get("web_max_por_entidad") or 8),
+            str(st.session_state.get("web_extra_query") or ""),
+        )
+        st.session_state["datos_web_entidades"] = df
+        st.session_state["origen_web_entidades"] = origen
+        st.session_state["error_web_entidades"] = ""
+    except WebSearchError as exc:
+        st.session_state["error_web_entidades"] = str(exc)
+        if st.session_state.get("datos_web_entidades") is None:
+            st.session_state["datos_web_entidades"] = empty_web_dataframe()
+    except Exception as exc:
+        st.session_state["error_web_entidades"] = f"Error inesperado: {exc}"
+        if st.session_state.get("datos_web_entidades") is None:
+            st.session_state["datos_web_entidades"] = empty_web_dataframe()
+    finally:
+        st.session_state["cargando_web_entidades"] = False
+
+
 def _sidebar() -> None:
     st.sidebar.header("🔄 Fuente BDNS")
     if st.session_state.get("origen_datos_ayudas"):
@@ -179,8 +281,35 @@ def _sidebar() -> None:
         st.checkbox("Incluir convocatorias últimas", key="bdns_incluir_ultimas")
         st.slider("Páginas de últimas", 1, 5, key="bdns_pages_ultimas")
 
+    with st.sidebar.expander("Búsqueda web por entidad", expanded=True):
+        motor = "Google CSE" if google_cse_configured() else "DuckDuckGo (sin API key)"
+        st.caption(f"Motor: {motor}")
+        st.slider("Máx. resultados / entidad", 3, 15, key="web_max_por_entidad")
+        st.text_input(
+            "Texto extra en la consulta web",
+            key="web_extra_query",
+            placeholder="ej. 2026 OR 2025",
+        )
+        if st.button(
+            "🌐 Ir a Web por entidad",
+            type="primary",
+            width="stretch",
+            key="btn_web_goto",
+        ):
+            st.session_state["nav_ayudas"] = NAV_WEB
+            st.rerun()
+        if st.button("🔎 Buscar en la web ahora", width="stretch", key="btn_web_now"):
+            st.session_state["refresh_token_web"] = int(
+                st.session_state.get("refresh_token_web") or 0
+            ) + 1
+            st.session_state["cargando_web_entidades"] = True
+            st.session_state["nav_ayudas"] = NAV_WEB
+            st.rerun()
+
     if st.session_state.get("cargando_datos_ayudas"):
         st.sidebar.info("⏳ Descargando convocatorias…")
+    if st.session_state.get("cargando_web_entidades"):
+        st.sidebar.info("⏳ Buscando en la web…")
 
     if st.sidebar.button("🔁 Actualizar datos ahora", type="primary", width="stretch"):
         st.session_state["refresh_token_ayudas"] = int(
@@ -195,7 +324,7 @@ def _sidebar() -> None:
             f"[Abrir hoja compartida ↗]({sheets_store.spreadsheet_url()})"
         )
         st.sidebar.caption(
-            "Pestañas: OportunidadesAyudas · MisConvocatorias · CatalogoTerminos"
+            "OportunidadesAyudas · MisConvocatorias · EntidadesAyudas · CatalogoTerminos"
         )
     else:
         st.sidebar.caption("Sheets no configurado (modo local).")
@@ -327,6 +456,7 @@ def _exportar(df: pd.DataFrame, sufijo: str, *, sheets: bool = False) -> None:
 def _tarjeta(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
+    entidades_txt = ", ".join(fila.get("entidades_match") or []) or "—"
     titulo = fila.get("titulo") or "(Sin título)"
     st.markdown(
         f"""
@@ -349,6 +479,7 @@ def _tarjeta(fila: pd.Series) -> None:
                 &nbsp;·&nbsp; <strong>Instrumento:</strong> {fila.get('tipo_contrato') or '—'}
             </p>
             <p class="meta"><strong>Palabras clave:</strong> {keywords}</p>
+            <p class="meta"><strong>Entidades:</strong> {entidades_txt}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -389,6 +520,124 @@ def _tarjeta(fila: pd.Series) -> None:
                 st.markdown(f"[Sede electrónica ↗]({fila['sede_electronica']})")
 
 
+def _panel_entidades() -> None:
+    catalogo = list(st.session_state.get("catalogo_entidades") or [])
+    activos = sum(1 for e in catalogo if e.get("activo"))
+    with st.container(border=True):
+        st.markdown(f"### Entidades vigiladas · {activos} activas")
+        st.caption(
+            "Se buscan en la **BDNS** y en la pestaña **Web por entidad**. "
+            "Solo cuentan resultados que **contienen la cadena** del nombre."
+        )
+        if st.button(
+            "🌐 Abrir pestaña Web por entidad",
+            key="ayu_goto_web_from_ent",
+            type="primary",
+            width="stretch",
+        ):
+            st.session_state["nav_ayudas"] = NAV_WEB
+            st.rerun()
+        c_new, c_btn, c_save = st.columns([3, 1, 1])
+        with c_new:
+            nuevo = st.text_input(
+                "Añadir entidad",
+                key="ayu_nueva_entidad",
+                placeholder="Ej. Fundación BBVA, SEO/BirdLife…",
+            )
+        with c_btn:
+            st.write("")
+            if st.button("Añadir", key="ayu_add_ent", width="stretch") and nuevo.strip():
+                nombre = nuevo.strip()
+                if not any(
+                    str(e.get("nombre", "")).strip().lower() == nombre.lower()
+                    for e in catalogo
+                ):
+                    catalogo.append({"nombre": nombre, "notas": "", "activo": True})
+                    st.session_state["catalogo_entidades"] = catalogo
+                    _guardar_entidades_en_sheets()
+                st.rerun()
+        with c_save:
+            st.write("")
+            if st.button("💾 Sheets", key="ayu_save_ent", width="stretch"):
+                _guardar_entidades_en_sheets()
+                st.toast("Entidades guardadas en Sheets", icon="✅")
+
+        if not catalogo:
+            st.info("No hay entidades. Añade al menos una para vigilar premios/convocatorias.")
+            return
+
+        for i, ent in enumerate(catalogo):
+            nombre = str(ent.get("nombre") or f"entidad {i}")
+            c1, c2, c3 = st.columns([0.12, 0.7, 0.18])
+            with c1:
+                activo = st.checkbox(
+                    "On",
+                    value=bool(ent.get("activo")),
+                    key=f"ayu_ent_on_{i}",
+                    label_visibility="collapsed",
+                )
+            with c2:
+                st.markdown(f"**{nombre}**")
+                if ent.get("notas"):
+                    st.caption(str(ent["notas"]))
+            with c3:
+                if st.button("✕", key=f"ayu_ent_del_{i}", help="Eliminar"):
+                    catalogo.pop(i)
+                    st.session_state["catalogo_entidades"] = catalogo
+                    _guardar_entidades_en_sheets()
+                    st.rerun()
+            if activo != bool(ent.get("activo")):
+                catalogo[i]["activo"] = activo
+                st.session_state["catalogo_entidades"] = catalogo
+                _guardar_entidades_en_sheets()
+                st.rerun()
+
+
+def _anotar_entidades_bdns(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade columna entidades_match si el título/órgano/descripción contiene la cadena."""
+    if df is None or df.empty:
+        return df
+    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
+    if not entidades:
+        out = df.copy()
+        out["entidades_match"] = [[] for _ in range(len(out))]
+        return out
+
+    matches: list[list[str]] = []
+    for fila in df.to_dict("records"):
+        blob = " ".join(
+            str(fila.get(c) or "")
+            for c in (
+                "titulo",
+                "organo_contratacion",
+                "descripcion",
+                "finalidad",
+                "nivel_admin",
+            )
+        )
+        halladas = [e for e in entidades if contiene_cadena(blob, e)]
+        matches.append(halladas)
+    out = df.copy()
+    out["entidades_match"] = matches
+    # Bonus si hay entidad vigilada (permite Alta aunque los términos sean genéricos).
+    if "relevancia" in out.columns:
+        bonus = out["entidades_match"].map(lambda xs: 25 if xs else 0)
+        out["relevancia"] = (out["relevancia"].astype(int) + bonus).clip(upper=100)
+        out["categoria"] = out["relevancia"].map(grefa_filter.classify)
+        out["badge"] = out["categoria"].map(
+            lambda c: RELEVANCE_LEVELS.get(c, RELEVANCE_LEVELS["Baja"])["badge"]
+        )
+        out["color"] = out["categoria"].map(
+            lambda c: RELEVANCE_LEVELS.get(c, RELEVANCE_LEVELS["Baja"])["color"]
+        )
+        out = out.sort_values(
+            by=["relevancia", "fecha_actualizacion"],
+            ascending=[False, False],
+            na_position="last",
+        ).reset_index(drop=True)
+    return out
+
+
 def _panel_terminos() -> None:
     catalogo = st.session_state.get("catalogo_terminos") or []
     activos = sum(1 for t in catalogo if t.get("activo"))
@@ -426,16 +675,21 @@ def _panel_control(puntuadas: pd.DataFrame, resumen: dict) -> tuple[pd.DataFrame
             '<span class="cabecera-titulo">🦅 GREFA · Ayudas y premios (BDNS)</span>',
             unsafe_allow_html=True,
         )
+        st.caption(
+            "Menú: Oportunidades · **Web por entidad** · Buscador · Mis Convocatorias · … "
+            "| Si no ves entidades ni Web, reinicia Streamlit (Ctrl+C y `streamlit run app.py`)."
+        )
         s1, s2, s3, s4, s5 = st.columns(5, gap="small")
         s1.metric("Descargadas", resumen.get("total", 0))
         s2.metric("Alta", resumen.get("alta", 0))
         s3.metric("Media", resumen.get("media", 0))
         s4.metric("Baja", resumen.get("baja", 0))
         s5.metric(
-            "Términos",
-            sum(1 for t in st.session_state.get("catalogo_terminos", []) if t.get("activo")),
+            "Entidades",
+            sum(1 for e in st.session_state.get("catalogo_entidades", []) if e.get("activo")),
         )
 
+        _panel_entidades()
         _panel_terminos()
 
         c1, c2, c3 = st.columns(3)
@@ -471,6 +725,19 @@ def _panel_control(puntuadas: pd.DataFrame, resumen: dict) -> tuple[pd.DataFrame
         with c6:
             st.text_input("Búsqueda libre", key="busqueda_ayudas")
 
+        f1, f2 = st.columns(2)
+        with f1:
+            st.checkbox(
+                "Excluir convenios (nominativos ya firmados)",
+                key="excluir_convenios_ayudas",
+                help="Los convenios no son convocatorias abiertas a las que presentar.",
+            )
+        with f2:
+            st.checkbox(
+                "Solo con entidad vigilada en título/órgano",
+                key="solo_con_entidad_ayudas",
+            )
+
         if st.button("🔍 Aplicar filtros", type="primary", key="ayu_aplicar"):
             st.session_state["bdns_niveles_aplicados"] = list(
                 st.session_state.get("bdns_niveles") or []
@@ -489,9 +756,19 @@ def _panel_control(puntuadas: pd.DataFrame, resumen: dict) -> tuple[pd.DataFrame
             )
             st.rerun()
 
+    filtrado = puntuadas
+    if st.session_state.get("excluir_convenios_ayudas", True) and not filtrado.empty:
+        titulos = filtrado["titulo"].fillna("").astype(str).str.lower()
+        filtrado = filtrado[~titulos.str.contains(r"\bconvenio\b", regex=True, na=False)]
+    if st.session_state.get("solo_con_entidad_ayudas") and not filtrado.empty:
+        if "entidades_match" in filtrado.columns:
+            filtrado = filtrado[
+                filtrado["entidades_match"].map(lambda xs: bool(xs))
+            ]
+
     minimo = int(st.session_state.get("opp_min_relevancia_ayudas_aplicado", 40))
     cats = list(st.session_state.get("opp_categorias_ayudas_aplicadas") or [])
-    oportunidades = grefa_filter.filter_opportunities(puntuadas, minimo, cats)
+    oportunidades = grefa_filter.filter_opportunities(filtrado, minimo, cats)
     vista = str(st.session_state.get("opp_vista_ayudas") or "Tarjetas")
     return oportunidades, vista
 
@@ -688,22 +965,88 @@ def _pestana_seguimiento() -> None:
                     st.error(str(exc))
 
 
+def _pestana_web() -> None:
+    st.subheader("Web por entidad")
+    st.caption(
+        "Resultados de internet cuyo título o resumen **contienen la cadena** "
+        "de cada entidad activa (premio/convocatoria/ayudas). "
+        f"Motor: {'Google CSE' if google_cse_configured() else 'DuckDuckGo'}."
+    )
+    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
+    if not entidades:
+        st.warning("Activa o añade al menos una entidad en el panel de Oportunidades.")
+        return
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("🌐 Buscar ahora", type="primary", key="web_tab_buscar"):
+            st.session_state["refresh_token_web"] = int(
+                st.session_state.get("refresh_token_web") or 0
+            ) + 1
+            st.session_state["cargando_web_entidades"] = True
+            st.rerun()
+
+    if st.session_state.get("cargando_web_entidades"):
+        with st.spinner("Buscando en la web…"):
+            _cargar_web()
+
+    if st.session_state.get("error_web_entidades"):
+        st.error(st.session_state["error_web_entidades"])
+
+    df = st.session_state.get("datos_web_entidades")
+    if df is None:
+        st.info("Pulsa **Buscar ahora** para consultar la web con las entidades activas.")
+        return
+    if st.session_state.get("origen_web_entidades"):
+        st.caption(st.session_state["origen_web_entidades"])
+    if df.empty:
+        st.warning(
+            "Sin resultados que contengan el nombre de las entidades. "
+            "Prueba nombres más cortos o un texto extra en la barra lateral."
+        )
+        return
+
+    _exportar(df, "web_entidades")
+    for entidad in entidades:
+        bloque = df[df["entidad"].astype(str) == entidad] if "entidad" in df.columns else df
+        if bloque.empty:
+            continue
+        st.markdown(f"#### {entidad} · {len(bloque)}")
+        for idx, fila in bloque.iterrows():
+            with st.container(border=True):
+                st.markdown(f"**{fila.get('titulo') or '—'}**")
+                st.caption(str(fila.get("snippet") or "")[:320])
+                c_a, c_b = st.columns([1, 1])
+                with c_a:
+                    if fila.get("url"):
+                        st.link_button("Abrir ↗", fila["url"], width="stretch")
+                with c_b:
+                    ui_compartir.render_compartir(
+                        {
+                            "titulo": fila.get("titulo") or "",
+                            "expediente": fila.get("entidad") or "",
+                            "url": fila.get("url") or "",
+                        },
+                        key=f"web_share_{entidad[:20]}_{idx}",
+                        fuente_label="Web",
+                    )
+
+
 def _pestana_faq() -> None:
     st.subheader("Ayuda · Ayudas y premios")
     st.markdown(
         """
 ### Flujo recomendado
-1. Actualiza datos BDNS en la barra lateral.
-2. Revisa **Oportunidades GREFA** (relevancia Alta/Media).
-3. Guarda con **⭐ A Mis Convocatorias**.
-4. Exporta o envía a **OportunidadesAyudas** en Sheets.
-5. Gestiona el estado en **Seguimiento**.
+1. Añade/activa **entidades** (Fundación BBVA, SEO/BirdLife…).
+2. Actualiza datos **BDNS** (incluye búsqueda por entidad).
+3. En **Web por entidad**, busca en internet páginas que contengan el nombre.
+4. Guarda con **⭐ A Mis Convocatorias** y envía a Sheets.
 
-Los **premios y ayudas privadas** (fundaciones sin publicar en BDNS) no aparecen aquí.
-Usa el hub para volver a **Licitaciones** cuando lo necesites.
+La búsqueda web solo conserva resultados donde el título o el resumen
+**contienen la cadena** del nombre de la entidad.
 """
     )
-    for item in ayuda_faq.SECCIONES_FAQ[:4]:
+    for item in ayuda_faq.SECCIONES_FAQ[:6]:
         with st.expander(item["pregunta"]):
             st.write(item["respuesta"])
 
@@ -741,8 +1084,8 @@ def render_hub_selector() -> None:
         with st.container(border=True):
             st.markdown("### 🏆 Ayudas y premios")
             st.write(
-                "Convocatorias de la BDNS (infosubvenciones.es): subvenciones, "
-                "premios y ayudas públicas puntuadas con el Índice GREFA."
+                "Convocatorias BDNS + búsqueda web por entidades "
+                "(fundaciones, premios) con el Índice GREFA."
             )
             if st.button(
                 "Entrar a Ayudas y premios",
@@ -757,6 +1100,7 @@ def render_hub_selector() -> None:
 def main_ayudas(usuario: Any = None) -> None:
     """Punto de entrada del modo ayudas/premios."""
     _init_state_ayudas()
+    _cargar_entidades_de_sheets()
     _sidebar()
     if usuario is not None:
         try:
@@ -774,6 +1118,10 @@ def main_ayudas(usuario: Any = None) -> None:
         with st.spinner("Descargando convocatorias de la BDNS…"):
             st.session_state["cargando_datos_ayudas"] = True
             _cargar_datos()
+
+    if st.session_state.get("cargando_web_entidades"):
+        with st.spinner("Buscando en la web…"):
+            _cargar_web()
 
     if st.session_state.get("error_descarga_ayudas"):
         st.error(st.session_state["error_descarga_ayudas"])
@@ -794,6 +1142,7 @@ def main_ayudas(usuario: Any = None) -> None:
     puntuadas_todas = grefa_filter.score_convocatorias(
         datos, keywords, conceptos=conceptos
     )
+    puntuadas_todas = _anotar_entidades_bdns(puntuadas_todas)
     estados = st.session_state.get("estados_ayudas_aplicados") or None
     puntuadas = grefa_filter.filter_by_estado(puntuadas_todas, estados)
     texto = str(st.session_state.get("busqueda_ayudas_aplicada") or "")
@@ -804,8 +1153,9 @@ def main_ayudas(usuario: Any = None) -> None:
 
     with st.container():
         st.markdown('<span class="nav-principal-flag"></span>', unsafe_allow_html=True)
+        st.caption("Menú del modo Ayudas y premios")
         pagina = st.radio(
-            "Menú",
+            "Menú ayudas",
             NAV_AYUDAS,
             horizontal=True,
             key="nav_ayudas",
@@ -818,14 +1168,16 @@ def main_ayudas(usuario: Any = None) -> None:
             st.info("Pulsa «Actualizar datos ahora» en la barra lateral.")
         else:
             _pestana_oportunidades(oportunidades, vista)
-    elif pagina == NAV_AYUDAS[1]:
+    elif pagina == NAV_WEB or pagina == NAV_AYUDAS[1]:
+        _pestana_web()
+    elif pagina == NAV_AYUDAS[2]:
         if puntuadas_todas.empty:
             st.info("Carga convocatorias para usar el buscador.")
         else:
             _pestana_buscador(puntuadas_todas)
-    elif pagina == NAV_AYUDAS[2]:
-        _pestana_mis()
     elif pagina == NAV_AYUDAS[3]:
+        _pestana_mis()
+    elif pagina == NAV_AYUDAS[4]:
         _pestana_seguimiento()
     else:
         _pestana_faq()
@@ -833,6 +1185,6 @@ def main_ayudas(usuario: Any = None) -> None:
     st.divider()
     st.caption(
         "Datos públicos de la Base de Datos Nacional de Subvenciones "
-        "(infosubvenciones.es). El Índice de Relevancia GREFA es orientativo: "
-        "revisa siempre la convocatoria oficial."
+        "(infosubvenciones.es) y búsqueda web por entidades. "
+        "El Índice de Relevancia GREFA es orientativo: revisa siempre la convocatoria oficial."
     )

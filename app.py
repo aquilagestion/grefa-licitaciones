@@ -413,7 +413,14 @@ init_state()
 
 def _recargar_modulos_criticos() -> None:
     """Fuerza la recarga de módulos (Streamlit Cloud puede cachear código antiguo)."""
-    for nombre in ("modules.grefa_filter", "modules.sheets_historico", "modules.admin_ambito"):
+    for nombre in (
+        "modules.grefa_filter",
+        "modules.sheets_historico",
+        "modules.admin_ambito",
+        "modules.ui_ayudas",
+        "modules.web_search_entidades",
+        "modules.ingestion_bdns",
+    ):
         try:
             modulo = importlib.import_module(nombre)
             modulo = importlib.reload(modulo)

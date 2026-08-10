@@ -374,10 +374,12 @@ def fetch_detalle(
 def _terminos_busqueda(
     keywords: Sequence[str] | None,
     max_terms: int,
+    entidades: Sequence[str] | None = None,
 ) -> list[str]:
+    """Prioriza entidades vigiladas, luego semillas GREFA y keywords."""
     vistos: set[str] = set()
     out: list[str] = []
-    for termino in list(DEFAULT_SEARCH_TERMS) + list(keywords or []):
+    for termino in list(entidades or []) + list(DEFAULT_SEARCH_TERMS) + list(keywords or []):
         clave = _texto(termino).lower()
         if not clave or clave in vistos:
             continue
@@ -391,6 +393,7 @@ def _terminos_busqueda(
 def fetch_convocatorias_bdns(
     *,
     keywords: Sequence[str] | None = None,
+    entidades: Sequence[str] | None = None,
     max_terms: int = 8,
     pages_per_term: int = 1,
     page_size: int = 40,
@@ -408,7 +411,10 @@ def fetch_convocatorias_bdns(
     por_codigo: dict[str, dict[str, Any]] = {}
     origenes: list[str] = []
 
-    terminos = _terminos_busqueda(keywords, max_terms)
+    # Las entidades cuentan aparte del tope de keywords temáticos.
+    n_ent = len([e for e in (entidades or []) if _texto(e)])
+    tope = max(max_terms, n_ent + max(3, max_terms // 2))
+    terminos = _terminos_busqueda(keywords, tope, entidades=entidades)
     for termino in terminos:
         for page in range(max(1, pages_per_term)):
             try:

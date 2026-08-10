@@ -44,6 +44,7 @@ ASISTENTE_SHEET = "AsistenteDocs"
 README_SHEET = "Instrucciones"
 OPPORTUNITIES_AYUDAS_SHEET = "OportunidadesAyudas"
 MIS_CONVOCATORIAS_SHEET = "MisConvocatorias"
+ENTIDADES_SHEET = "EntidadesAyudas"
 
 # Cabeceras en español (las lee el equipo en Drive y el código por nombre).
 CPV_HEADERS = ["Código CPV", "Descripción", "Activo"]
@@ -125,6 +126,7 @@ MIS_CONVOCATORIAS_HEADERS = [
     "Fecha interés",
     "Notas",
 ]
+ENTIDADES_HEADERS = ["Nombre", "Notas", "Activo"]
 ASISTENTE_HEADERS = [
     "ID Expediente",
     "Enlace",
@@ -1243,6 +1245,59 @@ def upsert_mi_convocatoria(
     except Exception as exc:
         raise SheetsError(
             f"Error guardando MisConvocatorias: {_mensaje_api_sheets(exc)}"
+        ) from exc
+
+
+def load_entidades_ayudas(hoja_id: str | None = None) -> list[dict[str, Any]]:
+    """Lee el catálogo de entidades vigiladas (BDNS + web)."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, ENTIDADES_SHEET, ENTIDADES_HEADERS)
+        filas: list[dict[str, Any]] = []
+        for registro in pestana.get_all_records():
+            nombre = str(_campo(registro, "Nombre", "nombre")).strip()
+            if not nombre:
+                continue
+            filas.append(
+                {
+                    "nombre": nombre,
+                    "notas": str(_campo(registro, "Notas", "notas")).strip(),
+                    "activo": _es_activo(_campo(registro, "Activo", "activo", default="sí")),
+                }
+            )
+        return filas
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"No se pudo leer EntidadesAyudas: {_mensaje_api_sheets(exc)}"
+        ) from exc
+
+
+def save_entidades_ayudas(
+    entidades: list[dict[str, Any]],
+    hoja_id: str | None = None,
+) -> None:
+    """Sobrescribe la pestaña EntidadesAyudas."""
+    hoja = get_spreadsheet(hoja_id)
+    try:
+        pestana = _worksheet(hoja, ENTIDADES_SHEET, ENTIDADES_HEADERS)
+        filas = [
+            [
+                str(e.get("nombre") or "").strip(),
+                str(e.get("notas") or "").strip(),
+                "sí" if e.get("activo", True) else "no",
+            ]
+            for e in entidades
+            if str(e.get("nombre") or "").strip()
+        ]
+        pestana.clear()
+        pestana.update([ENTIDADES_HEADERS] + filas, "A1")
+    except SheetsError:
+        raise
+    except Exception as exc:
+        raise SheetsError(
+            f"Error guardando EntidadesAyudas: {_mensaje_api_sheets(exc)}"
         ) from exc
 
 
