@@ -469,7 +469,26 @@ def save_criteria(
 # Oportunidades detectadas
 # ---------------------------------------------------------------------------
 def _clave(expediente: str, enlace: str) -> str:
-    return f"{str(expediente).strip().lower()}|{str(enlace).strip().lower()}"
+    """Identificador estable de una convocatoria/licitación en Sheets."""
+    import re
+
+    def _norm(valor: Any) -> str:
+        if valor is None:
+            return ""
+        try:
+            if isinstance(valor, float) and pd.isna(valor):
+                return ""
+        except Exception:
+            pass
+        texto = str(valor).strip()
+        if not texto or texto.lower() in {"nan", "none", "null", "nat"}:
+            return ""
+        # Códigos numéricos que Excel guarda como 12345.0
+        if re.fullmatch(r"\d+\.0+", texto):
+            texto = texto.split(".", 1)[0]
+        return texto.lower()
+
+    return f"{_norm(expediente)}|{_norm(enlace)}"
 
 
 def _fila_oportunidad(fila: pd.Series, momento: str) -> list[str]:
@@ -1184,14 +1203,20 @@ def upsert_mi_convocatoria(
     hoja = get_spreadsheet(hoja_id)
     pestana = _worksheet(hoja, MIS_CONVOCATORIAS_SHEET, MIS_CONVOCATORIAS_HEADERS)
     clave_objetivo = _clave(expediente, enlace)
+    if clave_objetivo == "|":
+        raise SheetsError(
+            "No se puede guardar en Mis Convocatorias: faltan código BDNS y enlace."
+        )
     momento = datetime.now().strftime("%d/%m/%Y %H:%M")
     try:
         registros = pestana.get_all_records()
         for indice, registro in enumerate(registros, start=2):
-            if _clave(
-                _campo(registro, "Código BDNS", "ID Expediente", "expediente"),
-                _campo(registro, "Enlace", "enlace", "url"),
-            ) != clave_objetivo:
+            exp_r = _campo(registro, "Código BDNS", "ID Expediente", "expediente")
+            url_r = _campo(registro, "Enlace", "enlace", "url")
+            # No reutilizar filas en blanco (provocaba pisar la misma entrada).
+            if not str(exp_r or "").strip() and not str(url_r or "").strip():
+                continue
+            if _clave(exp_r, url_r) != clave_objetivo:
                 continue
             presento_actual = str(_campo(registro, "Me presento", "me_presento")).strip()
             notas_actual = str(_campo(registro, "Notas", "notas"))

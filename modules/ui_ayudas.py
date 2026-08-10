@@ -139,7 +139,21 @@ def _init_state_ayudas() -> None:
 
 
 def _clave(expediente: str, url: str) -> str:
-    return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
+    """Misma normalización que sheets_store (nan, 12345.0, etc.)."""
+    try:
+        from modules.sheets_store import _clave as clave_sheets
+
+        return clave_sheets(expediente, url)
+    except Exception:
+        return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
+
+
+def _widget_key(prefix: str, clave: str) -> str:
+    """Key Streamlit corta y única (evita colisiones por truncar la URL)."""
+    import hashlib
+
+    digest = hashlib.md5(clave.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{digest}"
 
 
 def _formato_importe(valor: Any) -> str:
@@ -579,14 +593,35 @@ def _extraer_requisitos_mis(fila: dict) -> str:
 
 def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
     get = fila.get if hasattr(fila, "get") else lambda k, d="": d
-    expediente = str(get("expediente", "") or "")
-    url = str(get("url", "") or "")
+
+    def _limpio(valor: Any) -> str:
+        if valor is None:
+            return ""
+        try:
+            if isinstance(valor, float) and pd.isna(valor):
+                return ""
+        except Exception:
+            pass
+        texto = str(valor).strip()
+        if texto.lower() in {"nan", "none", "null", "nat"}:
+            return ""
+        return texto
+
+    expediente = _limpio(get("expediente", ""))
+    url = _limpio(get("url", ""))
+    if not expediente and not url:
+        raise ValueError(
+            "Esta convocatoria no tiene código BDNS ni enlace; no se puede guardar."
+        )
     presupuesto = get("presupuesto_sin_iva", "")
     if presupuesto is not None and str(presupuesto) not in {"", "nan", "None"}:
         try:
-            presupuesto = (
-                f"{float(presupuesto):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            )
+            if isinstance(presupuesto, float) and pd.isna(presupuesto):
+                presupuesto = ""
+            else:
+                presupuesto = (
+                    f"{float(presupuesto):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                )
         except Exception:
             presupuesto = str(presupuesto)
     else:
@@ -596,11 +631,11 @@ def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
         sheets_store.upsert_mi_convocatoria(
             expediente,
             url,
-            titulo=str(get("titulo", "") or ""),
-            organo=str(get("organo_contratacion", "") or ""),
+            titulo=_limpio(get("titulo", "")),
+            organo=_limpio(get("organo_contratacion", "")) or _limpio(get("organo", "")),
             presupuesto=presupuesto,
-            estado=str(get("estado", "") or ""),
-            relevancia=str(get("relevancia", "") or ""),
+            estado=_limpio(get("estado", "")),
+            relevancia=_limpio(get("relevancia", "")),
             me_interesa=interesa,
         )
         st.session_state["mis_convocatorias_cache"] = None
@@ -613,11 +648,12 @@ def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
                     {
                         "expediente": expediente,
                         "url": url,
-                        "titulo": str(get("titulo", "") or ""),
-                        "organo": str(get("organo_contratacion", "") or ""),
+                        "titulo": _limpio(get("titulo", "")),
+                        "organo": _limpio(get("organo_contratacion", ""))
+                        or _limpio(get("organo", "")),
                         "presupuesto": presupuesto,
-                        "estado": str(get("estado", "") or ""),
-                        "relevancia": str(get("relevancia", "") or ""),
+                        "estado": _limpio(get("estado", "")),
+                        "relevancia": _limpio(get("relevancia", "")),
                         "me_interesa": "sí",
                         "me_presento": "no",
                         "fecha_interes": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -716,7 +752,7 @@ def _tarjeta(fila: pd.Series, *, key_prefix: str = "opp") -> None:
         etiqueta = "⭐ Ya en Mis Conv." if en_mis else "⭐ Mis Convocatorias"
         if st.button(
             etiqueta,
-            key=f"{key_prefix}_mis_{clave[:40]}",
+            key=_widget_key(f"{key_prefix}_mis", clave),
             width="stretch",
             type="primary" if not en_mis else "secondary",
         ):
@@ -752,7 +788,7 @@ def _tarjeta(fila: pd.Series, *, key_prefix: str = "opp") -> None:
             st.caption("Sin enlace")
     with c4:
         ui_compartir.render_compartir(
-            fila, key=f"{key_prefix}_share_{clave[:40]}", fuente_label="BDNS"
+            fila, key=_widget_key(f"{key_prefix}_share", clave), fuente_label="BDNS"
         )
     with st.expander("¿Por qué esta puntuación?", expanded=False):
         st.write(fila.get("justificacion", ""))
@@ -1296,7 +1332,8 @@ def _pestana_mis() -> None:
     if st.button("🔄 Recargar", key="mis_ayu_reload"):
         st.session_state["mis_convocatorias_cache"] = None
         st.rerun()
-    filas = _cargar_mis_cache()
+    # Siempre refrescar al entrar para no quedarse con una sola fila en caché.
+    filas = _cargar_mis_cache(forzar=True)
     if not filas:
         st.info(
             "Aún no hay convocatorias guardadas. "
