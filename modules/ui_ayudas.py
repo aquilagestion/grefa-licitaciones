@@ -749,6 +749,130 @@ def _anotar_entidades_bdns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _asegurar_filtros_defaults() -> None:
+    """Evita multiselects vacíos («Choose options») que dejan sin resultados."""
+    if not st.session_state.get("bdns_niveles"):
+        st.session_state["bdns_niveles"] = list(NIVELES_BDNS)
+    if not st.session_state.get("estados_ayudas"):
+        st.session_state["estados_ayudas"] = ["Abierta", "Publicada"]
+    if not st.session_state.get("opp_categorias_ayudas"):
+        st.session_state["opp_categorias_ayudas"] = ["Alta", "Media"]
+    if st.session_state.get("opp_min_relevancia_ayudas") is None:
+        st.session_state["opp_min_relevancia_ayudas"] = MEDIUM_RELEVANCE_THRESHOLD
+    if not st.session_state.get("opp_vista_ayudas"):
+        st.session_state["opp_vista_ayudas"] = "Tarjetas"
+
+
+def _render_filtros_comunes(*, key_suffix: str = "") -> None:
+    """Mismos filtros en Oportunidades y en Web por entidad (keys compartidas)."""
+    _asegurar_filtros_defaults()
+    # key_suffix vacío = mismas keys en todas las pestañas (filtros globales del modo).
+    s = key_suffix  # reserved if someday we need isolated keys
+    _ = s
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.multiselect(
+            "Nivel administrativo",
+            list(NIVELES_BDNS),
+            key="bdns_niveles",
+        )
+    with c2:
+        st.multiselect(
+            "Estado",
+            ["Abierta", "Publicada", "Cerrada"],
+            key="estados_ayudas",
+        )
+    with c3:
+        st.slider(
+            "Relevancia mínima (%)",
+            0,
+            100,
+            key="opp_min_relevancia_ayudas",
+        )
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        st.multiselect(
+            "Categorías",
+            ["Alta", "Media", "Baja"],
+            key="opp_categorias_ayudas",
+        )
+    with c5:
+        st.radio(
+            "Vista",
+            ["Tarjetas", "Tabla"],
+            horizontal=True,
+            key="opp_vista_ayudas",
+        )
+    with c6:
+        st.text_input("Búsqueda libre", key="busqueda_ayudas")
+
+    f1, f2 = st.columns(2)
+    with f1:
+        st.checkbox(
+            "Excluir convenios (nominativos ya firmados)",
+            key="excluir_convenios_ayudas",
+            help="Los convenios no son convocatorias abiertas a las que presentar.",
+        )
+    with f2:
+        st.checkbox(
+            "Solo con entidad vigilada en título/órgano",
+            key="solo_con_entidad_ayudas",
+        )
+
+
+def _filtrar_puntuadas_vivas(puntuadas: pd.DataFrame) -> pd.DataFrame:
+    """Aplica en vivo los filtros del panel (sin botón Aplicar)."""
+    if puntuadas is None or puntuadas.empty:
+        return puntuadas if puntuadas is not None else empty_dataframe()
+
+    _asegurar_filtros_defaults()
+    filtrado = filter_by_nivel(puntuadas, st.session_state.get("bdns_niveles"))
+    filtrado = grefa_filter.filter_by_estado(
+        filtrado, st.session_state.get("estados_ayudas") or None
+    )
+    texto = str(st.session_state.get("busqueda_ayudas") or "").strip()
+    if texto:
+        filtrado = grefa_filter.filter_by_texto_libre(filtrado, texto)
+
+    if st.session_state.get("excluir_convenios_ayudas", True) and not filtrado.empty:
+        titulos = filtrado["titulo"].fillna("").astype(str).str.lower()
+        filtrado = filtrado[~titulos.str.contains(r"\bconvenio\b", regex=True, na=False)]
+
+    if st.session_state.get("solo_con_entidad_ayudas") and not filtrado.empty:
+        if "entidades_match" in filtrado.columns:
+            filtrado = filtrado[filtrado["entidades_match"].map(lambda xs: bool(xs))]
+
+    minimo = int(st.session_state.get("opp_min_relevancia_ayudas") or 0)
+    cats = list(st.session_state.get("opp_categorias_ayudas") or [])
+    return grefa_filter.filter_opportunities(filtrado, minimo, cats)
+
+
+def _filtrar_web_viva(df: pd.DataFrame) -> pd.DataFrame:
+    """Filtros aplicables a resultados web (texto libre + convenios)."""
+    if df is None or df.empty:
+        return df if df is not None else empty_web_dataframe()
+    out = df
+    texto = str(st.session_state.get("busqueda_ayudas") or "").strip().lower()
+    if texto:
+        mask = pd.Series(False, index=out.index)
+        for col in ("titulo", "snippet", "entidad", "url"):
+            if col in out.columns:
+                mask = mask | (
+                    out[col]
+                    .fillna("")
+                    .astype(str)
+                    .str.lower()
+                    .str.contains(texto, regex=False)
+                )
+        out = out[mask]
+    if st.session_state.get("excluir_convenios_ayudas", True) and not out.empty:
+        if "titulo" in out.columns:
+            titulos = out["titulo"].fillna("").astype(str).str.lower()
+            out = out[~titulos.str.contains(r"\bconvenio\b", regex=True, na=False)]
+    return out.reset_index(drop=True)
+
+
 def _panel_terminos() -> None:
     catalogo = st.session_state.get("catalogo_terminos") or []
     activos = sum(1 for t in catalogo if t.get("activo"))
@@ -781,6 +905,7 @@ def _panel_terminos() -> None:
 
 
 def _panel_control(puntuadas: pd.DataFrame, resumen: dict) -> tuple[pd.DataFrame, str]:
+    _ = resumen  # compat; las métricas se calculan tras el filtro vivo
     with st.container(border=True):
         st.markdown(
             '<span class="cabecera-titulo">🦅 GREFA · Ayudas y premios (BDNS)</span>',
@@ -788,98 +913,27 @@ def _panel_control(puntuadas: pd.DataFrame, resumen: dict) -> tuple[pd.DataFrame
         )
         st.caption(
             "Menú: Oportunidades · **Web por entidad** · Buscador · Mis Convocatorias · … "
-            "| Si no ves entidades ni Web, reinicia Streamlit (Ctrl+C y `streamlit run app.py`)."
-        )
-        s1, s2, s3, s4, s5 = st.columns(5, gap="small")
-        s1.metric("Descargadas", resumen.get("total", 0))
-        s2.metric("Alta", resumen.get("alta", 0))
-        s3.metric("Media", resumen.get("media", 0))
-        s4.metric("Baja", resumen.get("baja", 0))
-        s5.metric(
-            "Entidades",
-            sum(1 for e in st.session_state.get("catalogo_entidades", []) if e.get("activo")),
+            "| Los filtros se aplican al instante."
         )
 
         _panel_entidades()
         _panel_terminos()
+        st.markdown("#### Filtros")
+        st.caption("Se aplican al instante (sin botón Aplicar).")
+        _render_filtros_comunes()
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.multiselect(
-                "Nivel administrativo",
-                list(NIVELES_BDNS),
-                key="bdns_niveles",
-            )
-        with c2:
-            st.multiselect(
-                "Estado",
-                ["Abierta", "Publicada", "Cerrada"],
-                key="estados_ayudas",
-            )
-        with c3:
-            st.slider(
-                "Relevancia mínima (%)",
-                0,
-                100,
-                key="opp_min_relevancia_ayudas",
-            )
+        oportunidades = _filtrar_puntuadas_vivas(puntuadas)
+        met = grefa_filter.summarize(oportunidades)
+        m1, m2, m3, m4, m5 = st.columns(5, gap="small")
+        m1.metric("Filtradas", met.get("total", 0))
+        m2.metric("Alta", met.get("alta", 0))
+        m3.metric("Media", met.get("media", 0))
+        m4.metric("Baja", met.get("baja", 0))
+        m5.metric(
+            "Entidades",
+            sum(1 for e in st.session_state.get("catalogo_entidades", []) if e.get("activo")),
+        )
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            st.multiselect(
-                "Categorías",
-                ["Alta", "Media", "Baja"],
-                key="opp_categorias_ayudas",
-            )
-        with c5:
-            st.radio("Vista", ["Tarjetas", "Tabla"], horizontal=True, key="opp_vista_ayudas")
-        with c6:
-            st.text_input("Búsqueda libre", key="busqueda_ayudas")
-
-        f1, f2 = st.columns(2)
-        with f1:
-            st.checkbox(
-                "Excluir convenios (nominativos ya firmados)",
-                key="excluir_convenios_ayudas",
-                help="Los convenios no son convocatorias abiertas a las que presentar.",
-            )
-        with f2:
-            st.checkbox(
-                "Solo con entidad vigilada en título/órgano",
-                key="solo_con_entidad_ayudas",
-            )
-
-        if st.button("🔍 Aplicar filtros", type="primary", key="ayu_aplicar"):
-            st.session_state["bdns_niveles_aplicados"] = list(
-                st.session_state.get("bdns_niveles") or []
-            )
-            st.session_state["estados_ayudas_aplicados"] = list(
-                st.session_state.get("estados_ayudas") or []
-            )
-            st.session_state["opp_min_relevancia_ayudas_aplicado"] = int(
-                st.session_state.get("opp_min_relevancia_ayudas") or 0
-            )
-            st.session_state["opp_categorias_ayudas_aplicadas"] = list(
-                st.session_state.get("opp_categorias_ayudas") or []
-            )
-            st.session_state["busqueda_ayudas_aplicada"] = str(
-                st.session_state.get("busqueda_ayudas") or ""
-            )
-            st.rerun()
-
-    filtrado = puntuadas
-    if st.session_state.get("excluir_convenios_ayudas", True) and not filtrado.empty:
-        titulos = filtrado["titulo"].fillna("").astype(str).str.lower()
-        filtrado = filtrado[~titulos.str.contains(r"\bconvenio\b", regex=True, na=False)]
-    if st.session_state.get("solo_con_entidad_ayudas") and not filtrado.empty:
-        if "entidades_match" in filtrado.columns:
-            filtrado = filtrado[
-                filtrado["entidades_match"].map(lambda xs: bool(xs))
-            ]
-
-    minimo = int(st.session_state.get("opp_min_relevancia_ayudas_aplicado", 40))
-    cats = list(st.session_state.get("opp_categorias_ayudas_aplicadas") or [])
-    oportunidades = grefa_filter.filter_opportunities(filtrado, minimo, cats)
     vista = str(st.session_state.get("opp_vista_ayudas") or "Tarjetas")
     return oportunidades, vista
 
@@ -946,9 +1000,14 @@ def _pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
 
 def _pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador General BDNS")
-    st.caption("Todas las convocatorias descargadas en esta sesión, puntuadas.")
-    texto = st.text_input("Filtrar", key="ayu_buscador_texto")
-    filtrado = grefa_filter.filter_by_texto_libre(df, texto) if texto else df
+    st.caption("Convocatorias de la sesión con los mismos filtros que Oportunidades.")
+    with st.container(border=True):
+        st.markdown("#### Filtros")
+        _render_filtros_comunes()
+    filtrado = _filtrar_puntuadas_vivas(df)
+    texto = st.text_input("Filtrar adicional", key="ayu_buscador_texto")
+    if texto:
+        filtrado = grefa_filter.filter_by_texto_libre(filtrado, texto)
     st.caption(f"{len(filtrado):,} resultados")
     _exportar(filtrado, "buscador")
     for _, fila in filtrado.head(30).iterrows():
@@ -1076,19 +1135,25 @@ def _pestana_seguimiento() -> None:
                     st.error(str(exc))
 
 
-def _pestana_web() -> None:
+def _pestana_web(puntuadas_bdns: pd.DataFrame | None = None) -> None:
     st.subheader("Web por entidad")
     st.markdown(
         """
 **Cascada de búsqueda**
 1. **Web propia** de cada entidad (`site:dominio` premio/convocatoria…)
-2. **BDNS** (pestaña Oportunidades; se actualiza al lanzar la cascada)
+2. **BDNS** (abajo, con los mismos filtros)
 3. **Resto de internet** solo si el sitio propio no devolvió premios/concursos
 """
     )
     st.caption(
         f"Motor: {'Google CSE' if google_cse_configured() else 'DuckDuckGo'}."
     )
+
+    with st.container(border=True):
+        st.markdown("#### Filtros (BDNS + web)")
+        st.caption("Mismos filtros que en Oportunidades. Se aplican al instante.")
+        _render_filtros_comunes()
+
     detalle = active_entidades_detalle(st.session_state.get("catalogo_entidades") or [])
     if not detalle:
         st.warning("Activa o añade al menos una entidad en el panel de Oportunidades.")
@@ -1123,25 +1188,37 @@ def _pestana_web() -> None:
     if st.session_state.get("error_descarga_ayudas"):
         st.warning(f"BDNS: {st.session_state['error_descarga_ayudas']}")
 
-    # Resumen fase 2 BDNS
-    datos_bdns = st.session_state.get("datos_ayudas")
-    n_bdns = len(datos_bdns) if isinstance(datos_bdns, pd.DataFrame) else 0
-    st.info(
-        f"**Fase 2 · BDNS:** {n_bdns} convocatorias en sesión. "
-        "Revisa coincidencias en **Oportunidades GREFA** "
-        "(filtro «Solo con entidad vigilada»)."
-    )
+    # --- Fase 2 BDNS filtrada ---
+    st.markdown("### 2. BDNS (filtrado)")
+    bdns = puntuadas_bdns if isinstance(puntuadas_bdns, pd.DataFrame) else empty_dataframe()
+    if bdns.empty:
+        st.info("Sin datos BDNS en sesión. Lanza la cascada o actualiza en la barra lateral.")
+    else:
+        opp_bdns = _filtrar_puntuadas_vivas(bdns)
+        st.caption(
+            f"{len(opp_bdns):,} convocatorias BDNS con los filtros actuales "
+            f"(de {len(bdns):,} puntuadas)."
+        )
+        if opp_bdns.empty:
+            st.warning("Ninguna convocatoria BDNS cumple los filtros.")
+        else:
+            vista = str(st.session_state.get("opp_vista_ayudas") or "Tarjetas")
+            _pestana_oportunidades(opp_bdns, vista)
 
+    # --- Fases web 1 y 3 ---
+    st.markdown("### 1 y 3. Resultados web")
     df = st.session_state.get("datos_web_entidades")
     if df is None:
-        st.info("Pulsa **Cascada sitio → BDNS → web** para lanzar la búsqueda.")
+        st.info("Pulsa **Cascada sitio → BDNS → web** para lanzar la búsqueda web.")
         return
     if st.session_state.get("origen_web_entidades"):
         st.caption(st.session_state["origen_web_entidades"])
+
+    df = _filtrar_web_viva(df)
     if df.empty:
         st.warning(
-            "Sin resultados web de premios/concursos. "
-            "Revisa las URLs de las entidades o el texto extra de búsqueda."
+            "Sin resultados web con los filtros actuales. "
+            "Revisa URLs, búsqueda libre o lanza de nuevo la cascada."
         )
         return
 
@@ -1149,7 +1226,11 @@ def _pestana_web() -> None:
 
     fases = []
     if "fase" in df.columns:
-        fases = [f for f in ["1. Web propia", "3. Web abierta"] if f in set(df["fase"].astype(str))]
+        fases = [
+            f
+            for f in ["1. Web propia", "3. Web abierta"]
+            if f in set(df["fase"].astype(str))
+        ]
     if not fases:
         fases = ["Resultados"]
 
@@ -1159,7 +1240,7 @@ def _pestana_web() -> None:
         )
         if bloque_fase.empty:
             continue
-        st.markdown(f"### {fase} · {len(bloque_fase)}")
+        st.markdown(f"#### {fase} · {len(bloque_fase)}")
         for entidad in [e["nombre"] for e in detalle]:
             bloque = (
                 bloque_fase[bloque_fase["entidad"].astype(str) == entidad]
@@ -1168,7 +1249,7 @@ def _pestana_web() -> None:
             )
             if bloque.empty:
                 continue
-            st.markdown(f"#### {entidad} · {len(bloque)}")
+            st.markdown(f"**{entidad}** · {len(bloque)}")
             for idx, fila in bloque.iterrows():
                 with st.container(border=True):
                     st.markdown(f"**{fila.get('titulo') or '—'}**")
@@ -1295,17 +1376,13 @@ def main_ayudas(usuario: Any = None) -> None:
         t for t in st.session_state.get("catalogo_terminos", []) if t.get("activo")
     ]
 
-    datos = filter_by_nivel(datos, st.session_state.get("bdns_niveles_aplicados"))
+    _asegurar_filtros_defaults()
+    # Puntuar todo el corpus; los filtros se aplican en vivo en cada pestaña.
     puntuadas_todas = grefa_filter.score_convocatorias(
         datos, keywords, conceptos=conceptos
     )
     puntuadas_todas = _anotar_entidades_bdns(puntuadas_todas)
-    estados = st.session_state.get("estados_ayudas_aplicados") or None
-    puntuadas = grefa_filter.filter_by_estado(puntuadas_todas, estados)
-    texto = str(st.session_state.get("busqueda_ayudas_aplicada") or "")
-    if texto:
-        puntuadas = grefa_filter.filter_by_texto_libre(puntuadas, texto)
-
+    puntuadas = _filtrar_puntuadas_vivas(puntuadas_todas)
     resumen = grefa_filter.summarize(puntuadas)
 
     with st.container():
@@ -1320,13 +1397,13 @@ def main_ayudas(usuario: Any = None) -> None:
         )
 
     if pagina == NAV_AYUDAS[0]:
-        oportunidades, vista = _panel_control(puntuadas, resumen)
-        if puntuadas.empty:
+        oportunidades, vista = _panel_control(puntuadas_todas, resumen)
+        if puntuadas_todas.empty:
             st.info("Pulsa «Actualizar datos ahora» en la barra lateral.")
         else:
             _pestana_oportunidades(oportunidades, vista)
     elif pagina == NAV_WEB or pagina == NAV_AYUDAS[1]:
-        _pestana_web()
+        _pestana_web(puntuadas_todas)
     elif pagina == NAV_AYUDAS[2]:
         if puntuadas_todas.empty:
             st.info("Carga convocatorias para usar el buscador.")
