@@ -32,7 +32,14 @@ WEB_COLUMNS: tuple[str, ...] = (
     "url",
     "snippet",
     "fuente",
+    "fase",
     "consulta",
+)
+
+PREMIO_RE = re.compile(
+    r"\b(premio|premios|convocatoria|convocatorias|concurso|concursos|"
+    r"ayuda|ayudas|subvencion|subvenciones|beca|becas)\b",
+    re.I,
 )
 
 _last_request_at = 0.0
@@ -112,6 +119,69 @@ def build_queries(entidad: str, *, extra: str = "") -> list[str]:
     if extra:
         variantes = [f"{q} {extra}" for q in variantes]
     return variantes
+
+
+def dominio_de_web(web: str) -> str:
+    """Extrae el dominio (sin www) de una URL o host suelto."""
+    texto = str(web or "").strip()
+    if not texto:
+        return ""
+    if "://" not in texto:
+        texto = "https://" + texto
+    try:
+        host = urlparse(texto).netloc or urlparse(texto).path
+    except Exception:
+        return ""
+    host = host.split("/")[0].strip().lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def build_site_queries(web: str, *, extra: str = "") -> list[str]:
+    """Consultas restringidas al dominio de la entidad."""
+    dominio = dominio_de_web(web)
+    if not dominio:
+        return []
+    extra = (extra or "").strip()
+    variantes = [
+        f"site:{dominio} premio convocatoria",
+        f"site:{dominio} ayudas subvenciones",
+        f"site:{dominio} concurso premios",
+        f"site:{dominio} becas",
+    ]
+    if extra:
+        variantes = [f"{q} {extra}" for q in variantes]
+    return variantes
+
+
+def parece_premio_o_concurso(texto: str) -> bool:
+    """True si el texto habla de premio/convocatoria/ayuda/concurso."""
+    return bool(PREMIO_RE.search(_normalize(texto)))
+
+
+def filtrar_premios_en_sitio(
+    resultados: list[dict[str, str]],
+    entidad: str,
+    *,
+    dominio: str = "",
+) -> list[dict[str, str]]:
+    """En web propia: prioriza páginas de premios/convocatorias del dominio."""
+    filtrados: list[dict[str, str]] = []
+    for item in resultados:
+        url = str(item.get("url") or "")
+        blob = f"{item.get('titulo', '')} {item.get('snippet', '')}"
+        if dominio and dominio not in url.lower() and dominio not in _normalize(url):
+            # Aún así aceptamos si el buscador devolvió redirect raro pero habla de premios
+            if not parece_premio_o_concurso(blob):
+                continue
+        elif not parece_premio_o_concurso(blob):
+            continue
+        fila = dict(item)
+        fila["entidad"] = entidad
+        fila["fase"] = "1. Web propia"
+        filtrados.append(fila)
+    return filtrados
 
 
 def _unwrap_ddg_url(href: str) -> str:
@@ -232,6 +302,8 @@ def search_web(
 def filtrar_contiene_entidad(
     resultados: list[dict[str, str]],
     entidad: str,
+    *,
+    fase: str = "3. Web abierta",
 ) -> list[dict[str, str]]:
     """Conserva solo filas cuyo título o snippet contienen la cadena de entidad."""
     filtrados: list[dict[str, str]] = []
@@ -240,22 +312,63 @@ def filtrar_contiene_entidad(
         if contiene_cadena(blob, entidad):
             fila = dict(item)
             fila["entidad"] = entidad
+            fila["fase"] = fase
             filtrados.append(fila)
     return filtrados
 
 
+def _buscar_consultas(
+    consultas: list[str],
+    *,
+    max_results: int,
+) -> list[dict[str, str]]:
+    crudos: list[dict[str, str]] = []
+    vistos: set[str] = set()
+    for consulta in consultas:
+        try:
+            lote = search_web(consulta, max_results=max_results)
+        except WebSearchError as exc:
+            LOGGER.warning("Consulta web fallida «%s»: %s", consulta, exc)
+            continue
+        for item in lote:
+            u = (item.get("url") or "").strip().lower()
+            if not u or u in vistos:
+                continue
+            vistos.add(u)
+            crudos.append(item)
+    return crudos
+
+
 def buscar_entidades_en_web(
-    entidades: list[str],
+    entidades: list[str] | list[dict],
     *,
     max_por_entidad: int = 8,
     extra_query: str = "",
+    solo_abierta_si_sin_sitio: bool = True,
 ) -> tuple[pd.DataFrame, str]:
-    """Busca en la web cada entidad activa y filtra por contención de cadena.
+    """Cascada: 1) web propia (si hay URL) → 3) resto de la web.
 
-    Returns:
-        (dataframe, origen legible)
+    La fase 2 (BDNS) la gestiona la app aparte. Si ``solo_abierta_si_sin_sitio``
+    es True, la web abierta solo se consulta cuando la propia no dio premios.
+
+    ``entidades`` acepta nombres (str) o dicts ``{nombre, web}``.
     """
-    if not entidades:
+    detalle: list[dict[str, str]] = []
+    for item in entidades or []:
+        if isinstance(item, str):
+            if item.strip():
+                detalle.append({"nombre": item.strip(), "web": ""})
+        elif isinstance(item, dict):
+            nombre = str(item.get("nombre") or "").strip()
+            if nombre:
+                detalle.append(
+                    {
+                        "nombre": nombre,
+                        "web": str(item.get("web") or item.get("url") or "").strip(),
+                    }
+                )
+
+    if not detalle:
         return empty_web_dataframe(), "Sin entidades activas"
 
     filas: list[dict[str, str]] = []
@@ -263,39 +376,50 @@ def buscar_entidades_en_web(
     origenes: list[str] = []
     motor = "Google CSE" if google_cse_configured() else "DuckDuckGo"
 
-    for entidad in entidades:
-        consultas = build_queries(entidad, extra=extra_query)
-        crudos_ent: list[dict[str, str]] = []
-        error_ent = False
-        for consulta in consultas:
-            try:
-                crudos_ent.extend(
-                    search_web(consulta, max_results=max(max_por_entidad, 6))
-                )
-            except WebSearchError as exc:
-                LOGGER.warning("Búsqueda web «%s»: %s", entidad, exc)
-                error_ent = True
-                break
-        if error_ent and not crudos_ent:
-            origenes.append(f"«{entidad}» error")
-            continue
-        # Deduplicar crudos por URL antes de filtrar
-        vistos_local: set[str] = set()
-        unicos: list[dict[str, str]] = []
-        for item in crudos_ent:
-            u = (item.get("url") or "").strip().lower()
-            if not u or u in vistos_local:
-                continue
-            vistos_local.add(u)
-            unicos.append(item)
-        filtrados = filtrar_contiene_entidad(unicos, entidad)[:max_por_entidad]
-        origenes.append(f"«{entidad}» ({len(filtrados)})")
-        for item in filtrados:
-            url = (item.get("url") or "").strip().lower()
-            if not url or url in vistos_url:
-                continue
-            vistos_url.add(url)
-            filas.append(item)
+    for ent in detalle:
+        entidad = ent["nombre"]
+        web = ent.get("web") or ""
+        dominio = dominio_de_web(web)
+        hallados_sitio = 0
+
+        # --- Fase 1: web propia ---
+        if dominio:
+            site_q = build_site_queries(web, extra=extra_query)
+            crudos_sitio = _buscar_consultas(
+                site_q, max_results=max(max_por_entidad, 6)
+            )
+            filtrados_sitio = filtrar_premios_en_sitio(
+                crudos_sitio, entidad, dominio=dominio
+            )[:max_por_entidad]
+            hallados_sitio = len(filtrados_sitio)
+            origenes.append(f"«{entidad}» sitio:{dominio} ({hallados_sitio})")
+            for item in filtrados_sitio:
+                url = (item.get("url") or "").strip().lower()
+                if not url or url in vistos_url:
+                    continue
+                vistos_url.add(url)
+                filas.append(item)
+
+        # --- Fase 3: web abierta (si no hay sitio o no hubo premios) ---
+        buscar_abierta = True
+        if solo_abierta_si_sin_sitio and dominio and hallados_sitio > 0:
+            buscar_abierta = False
+
+        if buscar_abierta:
+            consultas = build_queries(entidad, extra=extra_query)
+            crudos = _buscar_consultas(consultas, max_results=max(max_por_entidad, 6))
+            filtrados = filtrar_contiene_entidad(
+                crudos, entidad, fase="3. Web abierta"
+            )[:max_por_entidad]
+            origenes.append(f"«{entidad}» abierta ({len(filtrados)})")
+            for item in filtrados:
+                url = (item.get("url") or "").strip().lower()
+                if not url or url in vistos_url:
+                    continue
+                vistos_url.add(url)
+                filas.append(item)
+        elif dominio:
+            origenes.append(f"«{entidad}» abierta omitida (ya hay sitio)")
 
     df = pd.DataFrame(filas) if filas else empty_web_dataframe()
     for col in WEB_COLUMNS:
@@ -303,7 +427,10 @@ def buscar_entidades_en_web(
             df[col] = ""
     if not df.empty:
         df = df[list(WEB_COLUMNS)].reset_index(drop=True)
-    origen = f"Web · {motor} · {len(df)} resultados · " + ", ".join(origenes[:8])
-    if len(origenes) > 8:
+    origen = (
+        f"Cascada web · {motor} · {len(df)} resultados · "
+        + ", ".join(origenes[:10])
+    )
+    if len(origenes) > 10:
         origen += "…"
     return df, origen

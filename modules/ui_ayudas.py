@@ -15,7 +15,12 @@ from config.default_criteria import (
     RELEVANCE_LEVELS,
     flatten_keywords,
 )
-from config.entidades_catalog import active_entidades, default_entidades
+from config.entidades_catalog import (
+    active_entidades,
+    active_entidades_detalle,
+    default_entidades,
+    normalizar_entidad,
+)
 from config.keyword_catalog import active_keywords_grouped, default_term_catalog
 from modules import ayuda_faq, grefa_filter, sheets_store, ui_compartir
 from modules.exporter import timestamped_filename, to_csv_bytes, to_excel_bytes
@@ -56,6 +61,11 @@ def _ir_a_web_y_buscar() -> None:
         st.session_state.get("refresh_token_web") or 0
     ) + 1
     st.session_state["cargando_web_entidades"] = True
+    # También refresca BDNS (fase 2 de la cascada).
+    st.session_state["refresh_token_ayudas"] = int(
+        st.session_state.get("refresh_token_ayudas") or 0
+    ) + 1
+    st.session_state["cargando_datos_ayudas"] = True
     st.session_state["nav_ayudas"] = NAV_WEB
 
 
@@ -102,6 +112,7 @@ def _init_state_ayudas() -> None:
         "entidades_sheets_sync": False,
         "excluir_convenios_ayudas": True,
         "solo_con_entidad_ayudas": False,
+        "web_solo_abierta_si_sin_sitio": True,
     }
     for clave, valor in defaults.items():
         st.session_state.setdefault(clave, valor)
@@ -189,16 +200,37 @@ def _cargar_bdns_cached(
 @st.cache_data(ttl=1800, show_spinner=False)
 def _cargar_web_cached(
     token: int,
-    entidades_key: str,
+    entidades_payload: str,
     max_por_entidad: int,
     extra_query: str,
+    solo_abierta_si_sin_sitio: bool,
+    _cache_ver: str = "cascada-v1",
 ) -> tuple[pd.DataFrame, str]:
-    entidades = [e for e in entidades_key.split("||") if e]
+    """``entidades_payload``: lineas ``nombre||web`` separadas por ``\\n``."""
+    detalle: list[dict[str, str]] = []
+    for linea in entidades_payload.split("\n"):
+        if not linea.strip():
+            continue
+        partes = linea.split("||", 1)
+        detalle.append(
+            {
+                "nombre": partes[0].strip(),
+                "web": partes[1].strip() if len(partes) > 1 else "",
+            }
+        )
     return buscar_entidades_en_web(
-        entidades,
+        detalle,
         max_por_entidad=max_por_entidad,
         extra_query=extra_query,
+        solo_abierta_si_sin_sitio=solo_abierta_si_sin_sitio,
     )
+
+
+def _payload_entidades_web() -> str:
+    lineas = []
+    for e in active_entidades_detalle(st.session_state.get("catalogo_entidades") or []):
+        lineas.append(f"{e['nombre']}||{e.get('web') or ''}")
+    return "\n".join(lineas)
 
 
 def _cargar_entidades_de_sheets(*, forzar: bool = False) -> None:
@@ -209,7 +241,9 @@ def _cargar_entidades_de_sheets(*, forzar: bool = False) -> None:
     try:
         filas = sheets_store.load_entidades_ayudas()
         if filas:
-            st.session_state["catalogo_entidades"] = filas
+            st.session_state["catalogo_entidades"] = [
+                normalizar_entidad(f) for f in filas
+            ]
         elif not st.session_state.get("catalogo_entidades"):
             st.session_state["catalogo_entidades"] = default_entidades()
             sheets_store.save_entidades_ayudas(st.session_state["catalogo_entidades"])
@@ -265,14 +299,13 @@ def _cargar_datos() -> None:
 
 
 def _cargar_web() -> None:
-    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
-    entidades_key = "||".join(entidades)
     try:
         df, origen = _cargar_web_cached(
             int(st.session_state.get("refresh_token_web") or 0),
-            entidades_key,
+            _payload_entidades_web(),
             int(st.session_state.get("web_max_por_entidad") or 8),
             str(st.session_state.get("web_extra_query") or ""),
+            bool(st.session_state.get("web_solo_abierta_si_sin_sitio", True)),
         )
         st.session_state["datos_web_entidades"] = df
         st.session_state["origen_web_entidades"] = origen
@@ -310,12 +343,19 @@ def _sidebar() -> None:
 
     with st.sidebar.expander("Búsqueda web por entidad", expanded=True):
         motor = "Google CSE" if google_cse_configured() else "DuckDuckGo (sin API key)"
-        st.caption(f"Motor: {motor}")
+        st.caption(
+            f"Motor: {motor}. Orden: **1) web propia** → **2) BDNS** → **3) resto de internet**."
+        )
         st.slider("Máx. resultados / entidad", 3, 15, key="web_max_por_entidad")
         st.text_input(
             "Texto extra en la consulta web",
             key="web_extra_query",
             placeholder="ej. 2026 OR 2025",
+        )
+        st.checkbox(
+            "Web abierta solo si el sitio propio no da premios",
+            key="web_solo_abierta_si_sin_sitio",
+            help="Si la web de la entidad ya devolvió convocatorias, no rastrea toda la red.",
         )
         if st.button(
             "🌐 Ir a Web por entidad",
@@ -326,7 +366,7 @@ def _sidebar() -> None:
         ):
             pass
         if st.button(
-            "🔎 Buscar en la web ahora",
+            "🔎 Cascada sitio → BDNS → web",
             width="stretch",
             key="btn_web_now",
             on_click=_ir_a_web_y_buscar,
@@ -549,12 +589,15 @@ def _tarjeta(fila: pd.Series) -> None:
 
 def _panel_entidades() -> None:
     catalogo = list(st.session_state.get("catalogo_entidades") or [])
+    # Migrar entradas antiguas sin campo web
+    catalogo = [normalizar_entidad(e) for e in catalogo]
+    st.session_state["catalogo_entidades"] = catalogo
     activos = sum(1 for e in catalogo if e.get("activo"))
     with st.container(border=True):
         st.markdown(f"### Entidades vigiladas · {activos} activas")
         st.caption(
-            "Se buscan en la **BDNS** y en la pestaña **Web por entidad**. "
-            "Solo cuentan resultados que **contienen la cadena** del nombre."
+            "Orden de búsqueda: **1) web propia** (si hay URL) → **2) BDNS** → "
+            "**3) resto de internet** (solo si el sitio no aporta premios/concursos)."
         )
         if st.button(
             "🌐 Abrir pestaña Web por entidad",
@@ -564,28 +607,45 @@ def _panel_entidades() -> None:
             on_click=_ir_a_web_por_entidad,
         ):
             pass
-        c_new, c_btn, c_save = st.columns([3, 1, 1])
-        with c_new:
-            nuevo = st.text_input(
-                "Añadir entidad",
-                key="ayu_nueva_entidad",
-                placeholder="Ej. Fundación BBVA, SEO/BirdLife…",
-            )
+
+        nuevo = st.text_input(
+            "Nombre de la entidad",
+            key="ayu_nueva_entidad",
+            placeholder="Ej. Fundación BBVA, SEO/BirdLife…",
+        )
+        nueva_web = st.text_input(
+            "Página web de la entidad (opcional)",
+            key="ayu_nueva_entidad_web",
+            placeholder="https://www.ejemplo.org/",
+        )
+        nuevas_notas = st.text_input(
+            "Notas (opcional)",
+            key="ayu_nueva_entidad_notas",
+            placeholder="Premios, área temática…",
+        )
+        c_btn, c_save = st.columns(2)
         with c_btn:
-            st.write("")
-            if st.button("Añadir", key="ayu_add_ent", width="stretch") and nuevo.strip():
+            if st.button("➕ Añadir entidad", key="ayu_add_ent", width="stretch") and nuevo.strip():
                 nombre = nuevo.strip()
                 if not any(
                     str(e.get("nombre", "")).strip().lower() == nombre.lower()
                     for e in catalogo
                 ):
-                    catalogo.append({"nombre": nombre, "notas": "", "activo": True})
+                    catalogo.append(
+                        normalizar_entidad(
+                            {
+                                "nombre": nombre,
+                                "web": nueva_web.strip(),
+                                "notas": nuevas_notas.strip(),
+                                "activo": True,
+                            }
+                        )
+                    )
                     st.session_state["catalogo_entidades"] = catalogo
                     _guardar_entidades_en_sheets()
                 st.rerun()
         with c_save:
-            st.write("")
-            if st.button("💾 Sheets", key="ayu_save_ent", width="stretch"):
+            if st.button("💾 Guardar en Sheets", key="ayu_save_ent", width="stretch"):
                 _guardar_entidades_en_sheets()
                 st.toast("Entidades guardadas en Sheets", icon="✅")
 
@@ -595,29 +655,53 @@ def _panel_entidades() -> None:
 
         for i, ent in enumerate(catalogo):
             nombre = str(ent.get("nombre") or f"entidad {i}")
-            c1, c2, c3 = st.columns([0.12, 0.7, 0.18])
-            with c1:
-                activo = st.checkbox(
-                    "On",
-                    value=bool(ent.get("activo")),
-                    key=f"ayu_ent_on_{i}",
-                    label_visibility="collapsed",
-                )
-            with c2:
-                st.markdown(f"**{nombre}**")
-                if ent.get("notas"):
-                    st.caption(str(ent["notas"]))
-            with c3:
-                if st.button("✕", key=f"ayu_ent_del_{i}", help="Eliminar"):
-                    catalogo.pop(i)
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([0.1, 0.72, 0.18])
+                with c1:
+                    activo = st.checkbox(
+                        "On",
+                        value=bool(ent.get("activo")),
+                        key=f"ayu_ent_on_{i}",
+                        label_visibility="collapsed",
+                    )
+                with c2:
+                    st.markdown(f"**{nombre}**")
+                    if ent.get("notas"):
+                        st.caption(str(ent["notas"]))
+                with c3:
+                    if st.button("✕", key=f"ayu_ent_del_{i}", help="Eliminar"):
+                        catalogo.pop(i)
+                        st.session_state["catalogo_entidades"] = catalogo
+                        _guardar_entidades_en_sheets()
+                        st.rerun()
+
+                web_key = f"ayu_ent_web_{i}"
+                if web_key not in st.session_state:
+                    st.session_state[web_key] = str(ent.get("web") or "")
+                c_web, c_ok = st.columns([0.82, 0.18])
+                with c_web:
+                    st.text_input(
+                        "Web oficial",
+                        key=web_key,
+                        placeholder="https://…",
+                    )
+                with c_ok:
+                    st.write("")
+                    if st.button("OK", key=f"ayu_ent_web_ok_{i}", help="Guardar URL"):
+                        catalogo[i]["web"] = normalizar_entidad(
+                            {"web": st.session_state.get(web_key) or ""}
+                        )["web"]
+                        st.session_state["catalogo_entidades"] = catalogo
+                        _guardar_entidades_en_sheets()
+                        st.rerun()
+                if ent.get("web"):
+                    st.markdown(f"[Abrir web ↗]({ent['web']})")
+
+                if activo != bool(ent.get("activo")):
+                    catalogo[i]["activo"] = activo
                     st.session_state["catalogo_entidades"] = catalogo
                     _guardar_entidades_en_sheets()
                     st.rerun()
-            if activo != bool(ent.get("activo")):
-                catalogo[i]["activo"] = activo
-                st.session_state["catalogo_entidades"] = catalogo
-                _guardar_entidades_en_sheets()
-                st.rerun()
 
 
 def _anotar_entidades_bdns(df: pd.DataFrame) -> pd.DataFrame:
@@ -994,69 +1078,118 @@ def _pestana_seguimiento() -> None:
 
 def _pestana_web() -> None:
     st.subheader("Web por entidad")
+    st.markdown(
+        """
+**Cascada de búsqueda**
+1. **Web propia** de cada entidad (`site:dominio` premio/convocatoria…)
+2. **BDNS** (pestaña Oportunidades; se actualiza al lanzar la cascada)
+3. **Resto de internet** solo si el sitio propio no devolvió premios/concursos
+"""
+    )
     st.caption(
-        "Resultados de internet cuyo título o resumen **contienen la cadena** "
-        "de cada entidad activa (premio/convocatoria/ayudas). "
         f"Motor: {'Google CSE' if google_cse_configured() else 'DuckDuckGo'}."
     )
-    entidades = active_entidades(st.session_state.get("catalogo_entidades") or [])
-    if not entidades:
+    detalle = active_entidades_detalle(st.session_state.get("catalogo_entidades") or [])
+    if not detalle:
         st.warning("Activa o añade al menos una entidad en el panel de Oportunidades.")
         return
 
+    with st.expander("Entidades en esta búsqueda", expanded=False):
+        for e in detalle:
+            web = e.get("web") or "— sin web propia —"
+            st.markdown(f"- **{e['nombre']}** · {web}")
+
     c1, c2 = st.columns([1, 3])
     with c1:
-        if st.button("🌐 Buscar ahora", type="primary", key="web_tab_buscar"):
-            st.session_state["refresh_token_web"] = int(
-                st.session_state.get("refresh_token_web") or 0
-            ) + 1
-            st.session_state["cargando_web_entidades"] = True
-            st.rerun()
+        if st.button(
+            "🔎 Cascada sitio → BDNS → web",
+            type="primary",
+            key="web_tab_buscar",
+            on_click=_ir_a_web_y_buscar,
+        ):
+            pass
 
-    if st.session_state.get("cargando_web_entidades"):
-        with st.spinner("Buscando en la web…"):
-            _cargar_web()
+    if st.session_state.get("cargando_web_entidades") or st.session_state.get(
+        "cargando_datos_ayudas"
+    ):
+        with st.spinner("Cascada: sitio propio → BDNS → web abierta…"):
+            if st.session_state.get("cargando_datos_ayudas"):
+                _cargar_datos()
+            if st.session_state.get("cargando_web_entidades"):
+                _cargar_web()
 
     if st.session_state.get("error_web_entidades"):
         st.error(st.session_state["error_web_entidades"])
+    if st.session_state.get("error_descarga_ayudas"):
+        st.warning(f"BDNS: {st.session_state['error_descarga_ayudas']}")
+
+    # Resumen fase 2 BDNS
+    datos_bdns = st.session_state.get("datos_ayudas")
+    n_bdns = len(datos_bdns) if isinstance(datos_bdns, pd.DataFrame) else 0
+    st.info(
+        f"**Fase 2 · BDNS:** {n_bdns} convocatorias en sesión. "
+        "Revisa coincidencias en **Oportunidades GREFA** "
+        "(filtro «Solo con entidad vigilada»)."
+    )
 
     df = st.session_state.get("datos_web_entidades")
     if df is None:
-        st.info("Pulsa **Buscar ahora** para consultar la web con las entidades activas.")
+        st.info("Pulsa **Cascada sitio → BDNS → web** para lanzar la búsqueda.")
         return
     if st.session_state.get("origen_web_entidades"):
         st.caption(st.session_state["origen_web_entidades"])
     if df.empty:
         st.warning(
-            "Sin resultados que contengan el nombre de las entidades. "
-            "Prueba nombres más cortos o un texto extra en la barra lateral."
+            "Sin resultados web de premios/concursos. "
+            "Revisa las URLs de las entidades o el texto extra de búsqueda."
         )
         return
 
     _exportar(df, "web_entidades")
-    for entidad in entidades:
-        bloque = df[df["entidad"].astype(str) == entidad] if "entidad" in df.columns else df
-        if bloque.empty:
+
+    fases = []
+    if "fase" in df.columns:
+        fases = [f for f in ["1. Web propia", "3. Web abierta"] if f in set(df["fase"].astype(str))]
+    if not fases:
+        fases = ["Resultados"]
+
+    for fase in fases:
+        bloque_fase = (
+            df[df["fase"].astype(str) == fase] if "fase" in df.columns else df
+        )
+        if bloque_fase.empty:
             continue
-        st.markdown(f"#### {entidad} · {len(bloque)}")
-        for idx, fila in bloque.iterrows():
-            with st.container(border=True):
-                st.markdown(f"**{fila.get('titulo') or '—'}**")
-                st.caption(str(fila.get("snippet") or "")[:320])
-                c_a, c_b = st.columns([1, 1])
-                with c_a:
-                    if fila.get("url"):
-                        st.link_button("Abrir ↗", fila["url"], width="stretch")
-                with c_b:
-                    ui_compartir.render_compartir(
-                        {
-                            "titulo": fila.get("titulo") or "",
-                            "expediente": fila.get("entidad") or "",
-                            "url": fila.get("url") or "",
-                        },
-                        key=f"web_share_{entidad[:20]}_{idx}",
-                        fuente_label="Web",
+        st.markdown(f"### {fase} · {len(bloque_fase)}")
+        for entidad in [e["nombre"] for e in detalle]:
+            bloque = (
+                bloque_fase[bloque_fase["entidad"].astype(str) == entidad]
+                if "entidad" in bloque_fase.columns
+                else bloque_fase
+            )
+            if bloque.empty:
+                continue
+            st.markdown(f"#### {entidad} · {len(bloque)}")
+            for idx, fila in bloque.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"**{fila.get('titulo') or '—'}**")
+                    st.caption(str(fila.get("snippet") or "")[:320])
+                    st.caption(
+                        f"{fila.get('fuente') or ''} · {fila.get('consulta') or ''}"
                     )
+                    c_a, c_b = st.columns([1, 1])
+                    with c_a:
+                        if fila.get("url"):
+                            st.link_button("Abrir ↗", fila["url"], width="stretch")
+                    with c_b:
+                        ui_compartir.render_compartir(
+                            {
+                                "titulo": fila.get("titulo") or "",
+                                "expediente": fila.get("entidad") or "",
+                                "url": fila.get("url") or "",
+                            },
+                            key=f"web_share_{fase[:8]}_{entidad[:20]}_{idx}",
+                            fuente_label="Web",
+                        )
 
 
 def _pestana_faq() -> None:
@@ -1064,13 +1197,10 @@ def _pestana_faq() -> None:
     st.markdown(
         """
 ### Flujo recomendado
-1. Añade/activa **entidades** (Fundación BBVA, SEO/BirdLife…).
-2. Actualiza datos **BDNS** (incluye búsqueda por entidad).
-3. En **Web por entidad**, busca en internet páginas que contengan el nombre.
-4. Guarda con **⭐ A Mis Convocatorias** y envía a Sheets.
-
-La búsqueda web solo conserva resultados donde el título o el resumen
-**contienen la cadena** del nombre de la entidad.
+1. Añade/activa **entidades** (con **web propia** si la conoces).
+2. Lanza **Cascada sitio → BDNS → web**.
+3. Revisa resultados por fase y **Oportunidades GREFA** (BDNS).
+4. Guarda con **⭐ A Mis Convocatorias**.
 """
     )
     for item in ayuda_faq.SECCIONES_FAQ[:6]:

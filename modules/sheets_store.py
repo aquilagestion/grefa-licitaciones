@@ -126,7 +126,8 @@ MIS_CONVOCATORIAS_HEADERS = [
     "Fecha interés",
     "Notas",
 ]
-ENTIDADES_HEADERS = ["Nombre", "Notas", "Activo"]
+ENTIDADES_HEADERS = ["Nombre", "Web", "Notas", "Activo"]
+
 ASISTENTE_HEADERS = [
     "ID Expediente",
     "Enlace",
@@ -1249,7 +1250,7 @@ def upsert_mi_convocatoria(
 
 
 def load_entidades_ayudas(hoja_id: str | None = None) -> list[dict[str, Any]]:
-    """Lee el catálogo de entidades vigiladas (BDNS + web)."""
+    """Lee el catálogo de entidades vigiladas (sitio + BDNS + web)."""
     hoja = get_spreadsheet(hoja_id)
     try:
         pestana = _worksheet(hoja, ENTIDADES_SHEET, ENTIDADES_HEADERS)
@@ -1261,6 +1262,7 @@ def load_entidades_ayudas(hoja_id: str | None = None) -> list[dict[str, Any]]:
             filas.append(
                 {
                     "nombre": nombre,
+                    "web": str(_campo(registro, "Web", "web", "url")).strip(),
                     "notas": str(_campo(registro, "Notas", "notas")).strip(),
                     "activo": _es_activo(_campo(registro, "Activo", "activo", default="sí")),
                 }
@@ -1285,6 +1287,7 @@ def save_entidades_ayudas(
         filas = [
             [
                 str(e.get("nombre") or "").strip(),
+                str(e.get("web") or e.get("url") or "").strip(),
                 str(e.get("notas") or "").strip(),
                 "sí" if e.get("activo", True) else "no",
             ]
