@@ -418,6 +418,7 @@ def _recargar_modulos_criticos() -> None:
         "modules.grefa_filter",
         "modules.sheets_historico",
         "modules.admin_ambito",
+        "modules.pdf_summary",
         "modules.ingestion_bdns",
         "modules.web_search_entidades",
         "config.entidades_catalog",

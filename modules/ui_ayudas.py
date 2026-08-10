@@ -552,15 +552,24 @@ def _contexto_para_extraccion(fila: dict) -> str:
 
 
 def _extraer_requisitos_mis(fila: dict) -> str:
-    from modules import pdf_summary
+    import importlib
 
-    if not pdf_summary.is_configured():
+    from modules import pdf_summary as _pdf
+
+    _pdf = importlib.reload(_pdf)
+    if not _pdf.is_configured():
         raise RuntimeError(
             "Configura IA en Secrets ([gemini], [groq] y/o [openrouter]) "
             "para extraer requisitos y documentación."
         )
     texto = _contexto_para_extraccion(fila)
-    return pdf_summary.extraer_requisitos_convocatoria(
+    fn = getattr(_pdf, "extraer_requisitos_convocatoria", None)
+    if fn is None:
+        raise RuntimeError(
+            "La función de extracción no está disponible en este despliegue. "
+            "Reinicia el Space o espera a que termine el redeploy."
+        )
+    return fn(
         texto,
         expediente=str(fila.get("expediente") or ""),
         titulo=str(fila.get("titulo") or ""),
