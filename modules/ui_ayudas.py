@@ -46,6 +46,19 @@ NAV_AYUDAS = [
 NAV_WEB = "🌐 Web por entidad"
 
 
+def _ir_a_web_por_entidad() -> None:
+    """Callback Streamlit: debe ejecutarse ANTES del radio ``nav_ayudas``."""
+    st.session_state["nav_ayudas"] = NAV_WEB
+
+
+def _ir_a_web_y_buscar() -> None:
+    st.session_state["refresh_token_web"] = int(
+        st.session_state.get("refresh_token_web") or 0
+    ) + 1
+    st.session_state["cargando_web_entidades"] = True
+    st.session_state["nav_ayudas"] = NAV_WEB
+
+
 NIVELES_BDNS = ("ESTADO", "AUTONOMICA", "LOCAL", "OTROS")
 
 
@@ -309,16 +322,16 @@ def _sidebar() -> None:
             type="primary",
             width="stretch",
             key="btn_web_goto",
+            on_click=_ir_a_web_por_entidad,
         ):
-            st.session_state["nav_ayudas"] = NAV_WEB
-            st.rerun()
-        if st.button("🔎 Buscar en la web ahora", width="stretch", key="btn_web_now"):
-            st.session_state["refresh_token_web"] = int(
-                st.session_state.get("refresh_token_web") or 0
-            ) + 1
-            st.session_state["cargando_web_entidades"] = True
-            st.session_state["nav_ayudas"] = NAV_WEB
-            st.rerun()
+            pass
+        if st.button(
+            "🔎 Buscar en la web ahora",
+            width="stretch",
+            key="btn_web_now",
+            on_click=_ir_a_web_y_buscar,
+        ):
+            pass
 
     if st.session_state.get("cargando_datos_ayudas"):
         st.sidebar.info("⏳ Descargando convocatorias…")
@@ -548,9 +561,9 @@ def _panel_entidades() -> None:
             key="ayu_goto_web_from_ent",
             type="primary",
             width="stretch",
+            on_click=_ir_a_web_por_entidad,
         ):
-            st.session_state["nav_ayudas"] = NAV_WEB
-            st.rerun()
+            pass
         c_new, c_btn, c_save = st.columns([3, 1, 1])
         with c_new:
             nuevo = st.text_input(
