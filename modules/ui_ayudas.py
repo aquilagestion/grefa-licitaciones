@@ -143,20 +143,34 @@ def _cargar_bdns_cached(
     max_enrich: int,
     incluir_ultimas: bool,
     pages_ultimas: int,
+    _cache_ver: str = "entidades-v2",
 ) -> tuple[pd.DataFrame, str]:
+    """Descarga BDNS. ``_cache_ver`` invalida cachés de firmas antiguas."""
+    import importlib
+    import inspect
+
+    from modules import ingestion_bdns as _ing
+
+    _ing = importlib.reload(_ing)
     keywords = [k for k in keywords_key.split("||") if k]
     entidades = [e for e in entidades_key.split("||") if e]
-    return fetch_convocatorias_bdns(
-        keywords=keywords,
-        entidades=entidades,
-        max_terms=max_terms,
-        pages_per_term=pages_per_term,
-        page_size=page_size,
-        enrich=True,
-        max_enrich=max_enrich,
-        incluir_ultimas=incluir_ultimas,
-        pages_ultimas=pages_ultimas,
-    )
+    fn = _ing.fetch_convocatorias_bdns
+    kwargs: dict[str, Any] = {
+        "keywords": keywords,
+        "max_terms": max_terms,
+        "pages_per_term": pages_per_term,
+        "page_size": page_size,
+        "enrich": True,
+        "max_enrich": max_enrich,
+        "incluir_ultimas": incluir_ultimas,
+        "pages_ultimas": pages_ultimas,
+    }
+    if "entidades" in inspect.signature(fn).parameters:
+        kwargs["entidades"] = entidades
+    elif entidades:
+        # Compatibilidad con Space/caché que aún no tiene el kwarg.
+        kwargs["keywords"] = list(entidades) + list(keywords)
+    return fn(**kwargs)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
