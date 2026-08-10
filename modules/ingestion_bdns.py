@@ -376,6 +376,36 @@ def fetch_detalle_codigo(codigo_bdns: str) -> dict[str, Any] | None:
     return fetch_detalle(_session(), codigo_bdns)
 
 
+def listar_documentos_convocatoria(codigo_bdns: str) -> list[dict[str, str]]:
+    """Documentos adjuntos de una convocatoria (id, nombre, descripción)."""
+    detalle = fetch_detalle_codigo(codigo_bdns)
+    if not detalle:
+        return []
+    return _documentos(detalle)
+
+
+def fetch_documento_pdf(id_documento: str | int) -> bytes:
+    """Descarga un PDF/adjunto de la BDNS por ``idDocumento``."""
+    doc_id = _texto(id_documento)
+    if not doc_id:
+        raise IngestionError("Falta el id del documento BDNS.")
+    sesion = _session()
+    _throttle()
+    url = f"{API_BASE}/convocatorias/documentos"
+    try:
+        respuesta = sesion.get(
+            url,
+            params={"idDocumento": doc_id},
+            timeout=REQUEST_TIMEOUT,
+        )
+        respuesta.raise_for_status()
+    except requests.RequestException as exc:
+        raise IngestionError(f"Error descargando documento BDNS {doc_id}: {exc}") from exc
+    if not respuesta.content or len(respuesta.content) < 50:
+        raise IngestionError(f"Documento BDNS {doc_id} vacío o no disponible.")
+    return respuesta.content
+
+
 def _terminos_busqueda(
     keywords: Sequence[str] | None,
     max_terms: int,

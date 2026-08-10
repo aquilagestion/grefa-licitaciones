@@ -113,6 +113,7 @@ def _init_state_ayudas() -> None:
         "mis_convocatorias_cache": None,
         "mis_convocatorias_local": [],
         "mis_extraccion_cache": {},
+        "mis_docs_cache": {},
         "nav_ayudas": NAV_AYUDAS[0],
         "catalogo_entidades": default_entidades(),
         "datos_web_entidades": None,
@@ -138,6 +139,61 @@ def _init_state_ayudas() -> None:
         )
 
 
+def _celda_texto(valor: Any) -> str:
+    """Texto limpio desde celdas pandas (NaN, 12345.0, listas…)."""
+    if valor is None:
+        return ""
+    try:
+        if isinstance(valor, float) and pd.isna(valor):
+            return ""
+        # pd.NA / NaT
+        if pd.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(valor, (list, tuple, set)):
+        return ", ".join(_celda_texto(v) for v in valor if _celda_texto(v))
+    texto = str(valor).strip()
+    if not texto or texto.lower() in {"nan", "none", "null", "nat", "<na>"}:
+        return ""
+    import re
+
+    if re.fullmatch(r"\d+\.0+", texto):
+        texto = texto.split(".", 1)[0]
+    return texto
+
+
+def _fila_a_payload_interes(fila: pd.Series | dict) -> dict[str, str]:
+    """Payload estable (solo str) para Mis Convocatorias; evita NaN de pandas."""
+    get = fila.get if hasattr(fila, "get") else lambda k, d=None: (
+        fila[k] if k in fila else d
+    )
+    expediente = _celda_texto(get("expediente"))
+    url = _celda_texto(get("url"))
+    presupuesto_raw = get("presupuesto_sin_iva", get("presupuesto", ""))
+    presupuesto = ""
+    if _celda_texto(presupuesto_raw):
+        try:
+            presupuesto = (
+                f"{float(presupuesto_raw):,.2f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            )
+        except Exception:
+            presupuesto = _celda_texto(presupuesto_raw)
+    return {
+        "expediente": expediente,
+        "url": url,
+        "titulo": _celda_texto(get("titulo")),
+        "organo_contratacion": _celda_texto(get("organo_contratacion"))
+        or _celda_texto(get("organo")),
+        "presupuesto_sin_iva": presupuesto,
+        "estado": _celda_texto(get("estado")),
+        "relevancia": _celda_texto(get("relevancia")),
+    }
+
+
 def _clave(expediente: str, url: str) -> str:
     """Misma normalización que sheets_store (nan, 12345.0, etc.)."""
     try:
@@ -145,7 +201,7 @@ def _clave(expediente: str, url: str) -> str:
 
         return clave_sheets(expediente, url)
     except Exception:
-        return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
+        return f"{_celda_texto(expediente).lower()}|{_celda_texto(url).lower()}"
 
 
 def _widget_key(prefix: str, clave: str) -> str:
@@ -154,6 +210,30 @@ def _widget_key(prefix: str, clave: str) -> str:
 
     digest = hashlib.md5(clave.encode("utf-8")).hexdigest()[:12]
     return f"{prefix}_{digest}"
+
+
+def _pendiente_marcar_interes(payload: dict, interesa: bool) -> None:
+    """Callback on_click: encola el alta/baja antes del rerun de Streamlit."""
+    st.session_state["_pending_mis_conv"] = {
+        "payload": dict(payload),
+        "interesa": bool(interesa),
+    }
+
+
+def _procesar_pendiente_mis_conv() -> None:
+    pendiente = st.session_state.pop("_pending_mis_conv", None)
+    if not pendiente:
+        return
+    try:
+        _marcar_interes(pendiente["payload"], interesa=bool(pendiente["interesa"]))
+        st.toast(
+            "Añadida a Mis Convocatorias."
+            if pendiente["interesa"]
+            else "Quitada de Mis Convocatorias.",
+            icon="⭐" if pendiente["interesa"] else "🗑️",
+        )
+    except Exception as exc:
+        st.session_state["_pending_mis_conv_error"] = str(exc)
 
 
 def _formato_importe(valor: Any) -> str:
@@ -592,50 +672,24 @@ def _extraer_requisitos_mis(fila: dict) -> str:
 
 
 def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
-    get = fila.get if hasattr(fila, "get") else lambda k, d="": d
-
-    def _limpio(valor: Any) -> str:
-        if valor is None:
-            return ""
-        try:
-            if isinstance(valor, float) and pd.isna(valor):
-                return ""
-        except Exception:
-            pass
-        texto = str(valor).strip()
-        if texto.lower() in {"nan", "none", "null", "nat"}:
-            return ""
-        return texto
-
-    expediente = _limpio(get("expediente", ""))
-    url = _limpio(get("url", ""))
+    payload = _fila_a_payload_interes(fila)
+    expediente = payload["expediente"]
+    url = payload["url"]
     if not expediente and not url:
         raise ValueError(
             "Esta convocatoria no tiene código BDNS ni enlace; no se puede guardar."
         )
-    presupuesto = get("presupuesto_sin_iva", "")
-    if presupuesto is not None and str(presupuesto) not in {"", "nan", "None"}:
-        try:
-            if isinstance(presupuesto, float) and pd.isna(presupuesto):
-                presupuesto = ""
-            else:
-                presupuesto = (
-                    f"{float(presupuesto):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                )
-        except Exception:
-            presupuesto = str(presupuesto)
-    else:
-        presupuesto = ""
+    presupuesto = payload["presupuesto_sin_iva"]
 
     if sheets_store.is_configured():
         sheets_store.upsert_mi_convocatoria(
             expediente,
             url,
-            titulo=_limpio(get("titulo", "")),
-            organo=_limpio(get("organo_contratacion", "")) or _limpio(get("organo", "")),
+            titulo=payload["titulo"],
+            organo=payload["organo_contratacion"],
             presupuesto=presupuesto,
-            estado=_limpio(get("estado", "")),
-            relevancia=_limpio(get("relevancia", "")),
+            estado=payload["estado"],
+            relevancia=payload["relevancia"],
             me_interesa=interesa,
         )
         st.session_state["mis_convocatorias_cache"] = None
@@ -648,12 +702,11 @@ def _marcar_interes(fila: pd.Series | dict, *, interesa: bool) -> None:
                     {
                         "expediente": expediente,
                         "url": url,
-                        "titulo": _limpio(get("titulo", "")),
-                        "organo": _limpio(get("organo_contratacion", ""))
-                        or _limpio(get("organo", "")),
+                        "titulo": payload["titulo"],
+                        "organo": payload["organo_contratacion"],
                         "presupuesto": presupuesto,
-                        "estado": _limpio(get("estado", "")),
-                        "relevancia": _limpio(get("relevancia", "")),
+                        "estado": payload["estado"],
+                        "relevancia": payload["relevancia"],
                         "me_interesa": "sí",
                         "me_presento": "no",
                         "fecha_interes": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -742,40 +795,38 @@ def _tarjeta(fila: pd.Series, *, key_prefix: str = "opp") -> None:
         """,
         unsafe_allow_html=True,
     )
-    clave = _clave(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
+    clave = _clave(
+        _celda_texto(fila.get("expediente")),
+        _celda_texto(fila.get("url")),
+    )
+    payload = _fila_a_payload_interes(fila)
+    clave = _clave(payload["expediente"], payload["url"])
     en_mis = clave in _claves_interes()
     c1, c2, c3, c4 = st.columns([1, 1.2, 1.2, 1.2])
     with c1:
-        if fila.get("url"):
-            st.link_button("Ver BDNS ↗", fila["url"], width="stretch")
+        if payload["url"]:
+            st.link_button("Ver BDNS ↗", payload["url"], width="stretch")
     with c2:
         etiqueta = "⭐ Ya en Mis Conv." if en_mis else "⭐ Mis Convocatorias"
-        if st.button(
+        st.button(
             etiqueta,
             key=_widget_key(f"{key_prefix}_mis", clave),
             width="stretch",
             type="primary" if not en_mis else "secondary",
-        ):
-            try:
-                _marcar_interes(fila, interesa=not en_mis)
-                st.toast(
-                    "Añadida a Mis Convocatorias." if not en_mis else "Quitada.",
-                    icon="⭐" if not en_mis else "🗑️",
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+            on_click=_pendiente_marcar_interes,
+            args=(payload, not en_mis),
+        )
     with c3:
-        url = str(fila.get("url") or "")
+        url = payload["url"]
         if url:
-            titulo_mail = str(fila.get("titulo") or "")
-            exp = str(fila.get("expediente") or "")
+            titulo_mail = payload["titulo"]
+            exp = payload["expediente"]
             asunto = f"GREFA · BDNS · {exp or titulo_mail[:50]}"
             cuerpo = (
                 f"{titulo_mail}\n\n"
                 f"Expediente BDNS: {exp or '—'}\n"
-                f"Órgano: {fila.get('organo_contratacion') or '—'}\n"
-                f"Relevancia: {fila.get('relevancia', '—')}%\n\n"
+                f"Órgano: {payload['organo_contratacion'] or '—'}\n"
+                f"Relevancia: {payload['relevancia'] or '—'}%\n\n"
                 f"Enlace: {url}"
             )
             st.link_button(
@@ -788,7 +839,7 @@ def _tarjeta(fila: pd.Series, *, key_prefix: str = "opp") -> None:
             st.caption("Sin enlace")
     with c4:
         ui_compartir.render_compartir(
-            fila, key=_widget_key(f"{key_prefix}_share", clave), fuente_label="BDNS"
+            payload, key=_widget_key(f"{key_prefix}_share", clave), fuente_label="BDNS"
         )
     with st.expander("¿Por qué esta puntuación?", expanded=False):
         st.write(fila.get("justificacion", ""))
@@ -1325,6 +1376,90 @@ def _pestana_buscador(df: pd.DataFrame) -> None:
     _pestana_oportunidades(filtrado, vista, key_prefix="bus")
 
 
+def _docs_oficiales_bdns(fila: dict) -> list[dict[str, str]]:
+    """Lista documentos oficiales BDNS para una fila de Mis Convocatorias."""
+    from modules.ingestion_bdns import listar_documentos_convocatoria
+
+    expediente = _celda_texto(fila.get("expediente"))
+    if not expediente or expediente.upper().startswith("WEB:"):
+        return []
+    try:
+        return listar_documentos_convocatoria(expediente)
+    except Exception:
+        return []
+
+
+def _render_docs_bdns(fila: dict, *, key_prefix: str) -> None:
+    """Botones para visualizar/descargar PDFs oficiales de la BDNS."""
+    from modules.ingestion_bdns import IngestionError, fetch_documento_pdf
+
+    url = _celda_texto(fila.get("url"))
+    docs = st.session_state.get("mis_docs_cache", {}).get(key_prefix)
+    if docs is None:
+        docs = _docs_oficiales_bdns(fila)
+        cache = st.session_state.setdefault("mis_docs_cache", {})
+        cache[key_prefix] = docs
+        st.session_state["mis_docs_cache"] = cache
+
+    st.markdown("#### Documentos oficiales BDNS")
+    st.caption(
+        "Revisa el PDF de la resolución/convocatoria: plazos, aceptación, "
+        "ejecución y requisitos de justificación."
+    )
+    if url:
+        st.link_button("🔗 Abrir ficha BDNS ↗", url, width="stretch")
+
+    if not docs:
+        st.info(
+            "No hay documentos adjuntos en la ficha BDNS. "
+            "Ábrela con el botón de arriba por si el PDF está enlazado allí."
+        )
+        return
+
+    for i, doc in enumerate(docs):
+        doc_id = str(doc.get("id") or "").strip()
+        nombre = (doc.get("nombre") or doc.get("descripcion") or f"documento_{i}.pdf").strip()
+        if not nombre.lower().endswith((".pdf", ".doc", ".docx", ".odt", ".xlsx")):
+            nombre_dl = f"{nombre}.pdf"
+        else:
+            nombre_dl = nombre
+        etiqueta = nombre[:70] + ("…" if len(nombre) > 70 else "")
+        cache_key = f"mis_pdf_bytes_{key_prefix}_{doc_id or i}"
+
+        c_a, c_b = st.columns([2, 1])
+        with c_a:
+            st.caption(doc.get("descripcion") or etiqueta)
+        with c_b:
+            if not doc_id:
+                st.caption("Sin id")
+                continue
+            if st.button(
+                "📄 Ver PDF",
+                key=f"{key_prefix}_verpdf_{doc_id}",
+                width="stretch",
+                help="Descarga el adjunto oficial desde la API BDNS",
+            ):
+                with st.spinner(f"Descargando «{etiqueta}»…"):
+                    try:
+                        st.session_state[cache_key] = fetch_documento_pdf(doc_id)
+                        st.toast("PDF listo para descargar", icon="📄")
+                    except IngestionError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:
+                        st.error(f"No se pudo descargar el documento: {exc}")
+
+        pdf_bytes = st.session_state.get(cache_key)
+        if pdf_bytes:
+            st.download_button(
+                f"⬇️ Descargar «{etiqueta}»",
+                data=pdf_bytes,
+                file_name=nombre_dl.replace("/", "-")[:120],
+                mime="application/pdf",
+                key=f"{key_prefix}_dlpdf_{doc_id}",
+                width="stretch",
+            )
+
+
 def _pestana_mis() -> None:
     from modules import pdf_summary
 
@@ -1349,9 +1484,14 @@ def _pestana_mis() -> None:
     pdf_summary.mostrar_avisos_ia()
 
     cache_ext = st.session_state.setdefault("mis_extraccion_cache", {})
+    if st.session_state.get("_pending_mis_conv_error"):
+        st.error(st.session_state.pop("_pending_mis_conv_error"))
 
     for idx, fila in enumerate(filas):
-        clave = _clave(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
+        clave = _clave(
+            _celda_texto(fila.get("expediente")),
+            _celda_texto(fila.get("url")),
+        )
         with st.container(border=True):
             st.markdown(
                 f"**{fila.get('expediente') or '—'}** — {str(fila.get('titulo') or '')[:140]}"
@@ -1401,13 +1541,17 @@ def _pestana_mis() -> None:
                             informe = _extraer_requisitos_mis(fila)
                             cache_ext[clave] = informe
                             st.session_state["mis_extraccion_cache"] = cache_ext
+                            # Precargar listado de PDFs oficiales.
+                            docs_cache = st.session_state.setdefault("mis_docs_cache", {})
+                            docs_cache[f"mis_{idx}"] = _docs_oficiales_bdns(fila)
+                            st.session_state["mis_docs_cache"] = docs_cache
                             st.toast("Extracción lista", icon="✅")
                         except Exception as exc:
                             st.error(str(exc))
             with c4:
                 if st.button("Quitar ⭐", key=f"mis_ayu_del_{idx}", width="stretch"):
                     try:
-                        _marcar_interes(fila, interesa=False)
+                        _marcar_interes(_fila_a_payload_interes(fila), interesa=False)
                         cache_ext.pop(clave, None)
                         st.rerun()
                     except Exception as exc:
@@ -1417,6 +1561,7 @@ def _pestana_mis() -> None:
             if informe:
                 with st.expander("Requisitos y documentación extraídos", expanded=True):
                     st.markdown(informe)
+                    _render_docs_bdns(fila, key_prefix=f"mis_{idx}")
                     st.download_button(
                         "⬇️ Descargar informe",
                         data=informe.encode("utf-8"),
@@ -1676,6 +1821,7 @@ def render_hub_selector() -> None:
 def main_ayudas(usuario: Any = None) -> None:
     """Punto de entrada del modo ayudas/premios."""
     _init_state_ayudas()
+    _procesar_pendiente_mis_conv()
     _cargar_entidades_de_sheets()
     _sidebar()
     if usuario is not None:
