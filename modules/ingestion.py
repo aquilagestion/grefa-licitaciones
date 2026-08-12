@@ -26,18 +26,65 @@ import requests
 from bs4 import BeautifulSoup
 from lxml import etree
 
-from config.ccaa_sources import (
-    FUENTE_PLACSP,
-    FUENTE_PLACSP_1044,
-    FUENTE_PLACSP_643,
-    FUENTE_PLACSP_LOCAL,
-    enrich_comunidad_autonoma,
-    enrich_fuente,
-    fuente_desde_url_feed,
-    infer_comunidad_autonoma,
-)
-
 LOGGER = logging.getLogger(__name__)
+
+# Constantes locales (evitan fallo duro si config.ccaa_sources no carga aún).
+FUENTE_PLACSP = "placsp"
+FUENTE_PLACSP_643 = "placsp_643"
+FUENTE_PLACSP_1044 = "placsp_1044"
+FUENTE_PLACSP_LOCAL = "placsp_local"
+
+try:
+    from config.ccaa_sources import (  # noqa: E402
+        FUENTE_PLACSP as _F_PLACSP,
+        FUENTE_PLACSP_1044 as _F_1044,
+        FUENTE_PLACSP_643 as _F_643,
+        FUENTE_PLACSP_LOCAL as _F_LOCAL,
+        enrich_comunidad_autonoma,
+        enrich_fuente,
+        fuente_desde_url_feed,
+        infer_comunidad_autonoma,
+    )
+
+    FUENTE_PLACSP = _F_PLACSP
+    FUENTE_PLACSP_643 = _F_643
+    FUENTE_PLACSP_1044 = _F_1044
+    FUENTE_PLACSP_LOCAL = _F_LOCAL
+except Exception as exc:  # pragma: no cover - arranque degradado
+    LOGGER.warning("config.ccaa_sources no disponible (%s); se usan fallbacks.", exc)
+
+    def fuente_desde_url_feed(url: str) -> str:
+        u = (url or "").lower()
+        if "sindicacion_643" in u or "perfilescontratante" in u:
+            return FUENTE_PLACSP_643
+        if "sindicacion_1044" in u or "plataformasagregadas" in u:
+            return FUENTE_PLACSP_1044
+        if not u:
+            return FUENTE_PLACSP_LOCAL
+        return FUENTE_PLACSP
+
+    def infer_comunidad_autonoma(ubicacion: str = "", organo: str = "", **_kw) -> str:
+        return ""
+
+    def enrich_comunidad_autonoma(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return df
+        out = df.copy()
+        if "comunidad_autonoma" not in out.columns:
+            out["comunidad_autonoma"] = ""
+        return out
+
+    def enrich_fuente(df: pd.DataFrame, fuente_default: str = FUENTE_PLACSP) -> pd.DataFrame:
+        if df is None:
+            return df
+        out = df.copy()
+        if "fuente" not in out.columns:
+            out["fuente"] = fuente_default
+        else:
+            vacios = out["fuente"].fillna("").astype(str).str.strip() == ""
+            if vacios.any():
+                out.loc[vacios, "fuente"] = fuente_default
+        return out
 
 ATOM_NS = "http://www.w3.org/2005/Atom"
 

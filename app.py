@@ -66,15 +66,24 @@ from modules.exporter import (  # noqa: E402
     to_csv_bytes,
     to_excel_bytes,
 )
-from modules.ingestion import (  # noqa: E402
-    COLUMN_LABELS,
-    PLACSP_FEED_643,
-    PLACSP_FEEDS_1044,
-    PRIMARY_FEED_URL,
-    IngestionError,
-    empty_dataframe,
-    fetch_placsp_licitaciones,
-    parse_atom_bytes,
+from modules import ingestion as _ingestion  # noqa: E402
+
+COLUMN_LABELS = _ingestion.COLUMN_LABELS
+PRIMARY_FEED_URL = _ingestion.PRIMARY_FEED_URL
+IngestionError = _ingestion.IngestionError
+empty_dataframe = _ingestion.empty_dataframe
+fetch_placsp_licitaciones = _ingestion.fetch_placsp_licitaciones
+parse_atom_bytes = _ingestion.parse_atom_bytes
+# Compatibilidad si un redeploy parcial aún no expone los símbolos nuevos.
+PLACSP_FEED_643 = getattr(
+    _ingestion,
+    "PLACSP_FEED_643",
+    _ingestion.FALLBACK_FEED_URLS[0],
+)
+PLACSP_FEEDS_1044 = getattr(
+    _ingestion,
+    "PLACSP_FEEDS_1044",
+    tuple(_ingestion.FALLBACK_FEED_URLS[1:]),
 )
 
 st.set_page_config(
