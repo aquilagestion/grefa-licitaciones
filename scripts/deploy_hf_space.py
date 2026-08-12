@@ -46,18 +46,28 @@ def main() -> int:
     print(f"Conectado como: {who.get('name', who)}")
 
     try:
+        # HF ya no admite space_sdk="streamlit"; Streamlit va como plantilla Docker.
         api.create_repo(
             repo_id=SPACE_ID,
             repo_type="space",
-            space_sdk="streamlit",
+            space_sdk="docker",
+            space_template="Streamlit",
             exist_ok=True,
             private=False,
         )
         print(f"Space listo: https://huggingface.co/spaces/{SPACE_ID}")
     except Exception as exc:
+        texto = str(exc)
         print(f"Aviso create_repo: {exc}")
+        if "402" in texto or "PRO subscription" in texto:
+            print(
+                "Hugging Face ya no hospeda Spaces Docker/Streamlit en el plan gratis.\n"
+                "Opciones: suscribirse a HF PRO, o desplegar en Streamlit Community Cloud\n"
+                "(https://grefa-licitaciones.streamlit.app) conectado al repo de GitHub."
+            )
+            return 1
 
-    # README con metadatos Streamlit para HF (puerto 8501)
+    # README con metadatos Docker/Streamlit (puerto del Dockerfile: 8080)
     readme = ROOT / "README_HF.md"
     readme.write_text(
         """---
@@ -65,9 +75,8 @@ title: GREFA Licitaciones PLACSP
 emoji: 🦅
 colorFrom: green
 colorTo: blue
-sdk: streamlit
-sdk_version: 1.50.0
-app_file: app.py
+sdk: docker
+app_port: 8080
 pinned: false
 ---
 
