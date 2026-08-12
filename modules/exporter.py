@@ -20,6 +20,8 @@ EXPORT_COLUMNS: tuple[str, ...] = (
     "expediente",
     "titulo",
     "organo_contratacion",
+    "comunidad_autonoma",
+    "fuente",
     "presupuesto_sin_iva",
     "presupuesto_con_iva",
     "ubicacion",

@@ -73,7 +73,14 @@ def load() -> pd.DataFrame:
                     df[columna] = None
                 else:
                     df[columna] = ""
-        return df[list(COLUMNS)]
+        from config.ccaa_sources import (
+            FUENTE_PLACSP_643,
+            enrich_comunidad_autonoma,
+            enrich_fuente,
+        )
+
+        df = enrich_fuente(df[list(COLUMNS)], FUENTE_PLACSP_643)
+        return enrich_comunidad_autonoma(df)
     except Exception as exc:
         LOGGER.warning("No se pudo leer el histórico Parquet: %s", exc)
         return empty_dataframe()

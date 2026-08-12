@@ -5,6 +5,13 @@ documento CODICE/UBL (`ContractFolderStatus`) con el detalle del expediente.
 Los prefijos de namespace varían entre versiones de CODICE (cbc, cac,
 cac-place-ext, ...), por lo que todo el parseo se hace por *local-name* y es
 inmune a esos cambios.
+
+Fuentes PLACSP (no mezclar conceptualmente):
+
+* **sindicacion_643** — perfiles de contratante *alojados* en la propia PLACSP
+  (AGE, locales y CCAA sin plataforma propia).
+* **sindicacion_1044** — plataformas autonómicas *agregadas* (art. 347.3 LCSP),
+  sin contratos menores.
 """
 
 from __future__ import annotations
@@ -19,23 +26,42 @@ import requests
 from bs4 import BeautifulSoup
 from lxml import etree
 
+from config.ccaa_sources import (
+    FUENTE_PLACSP,
+    FUENTE_PLACSP_1044,
+    FUENTE_PLACSP_643,
+    FUENTE_PLACSP_LOCAL,
+    enrich_comunidad_autonoma,
+    enrich_fuente,
+    fuente_desde_url_feed,
+    infer_comunidad_autonoma,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 ATOM_NS = "http://www.w3.org/2005/Atom"
 
-#: Feed indicado como fuente principal del proyecto.
+#: Feed histórico de la especificación del proyecto (hoy suele devolver 404).
 PRIMARY_FEED_URL = (
     "https://contrataciondelestado.es/sourcing/licitaciones/ATOM/licitaciones.atom"
 )
 
-#: Sindicaciones oficiales alternativas (se prueban si la principal no responde
-#: o no contiene entradas). Cubren licitaciones del sector público estatal y de
-#: las plataformas autonómicas agregadas.
-FALLBACK_FEED_URLS: tuple[str, ...] = (
-    "https://contrataciondelestado.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom",
-    "https://contrataciondelestado.es/sindicacion/sindicacion_1044/PlataformasAgregadasSinMenores_3.atom",
-    "https://contrataciondelestado.es/sindicacion/sindicacion_1044/PlataformasAgregadasSinMenores.atom",
+#: Perfiles de contratante alojados en la propia PLACSP.
+PLACSP_FEED_643 = (
+    "https://contrataciondelestado.es/sindicacion/sindicacion_643/"
+    "licitacionesPerfilesContratanteCompleto3.atom"
 )
+
+#: Plataformas autonómicas agregadas (sin menores). Se prueba la `_3` primero.
+PLACSP_FEEDS_1044: tuple[str, ...] = (
+    "https://contrataciondelestado.es/sindicacion/sindicacion_1044/"
+    "PlataformasAgregadasSinMenores_3.atom",
+    "https://contrataciondelestado.es/sindicacion/sindicacion_1044/"
+    "PlataformasAgregadasSinMenores.atom",
+)
+
+#: Alias de compatibilidad: orden de prueba si se pide un único feed.
+FALLBACK_FEED_URLS: tuple[str, ...] = (PLACSP_FEED_643, *PLACSP_FEEDS_1044)
 
 USER_AGENT = "GREFA-Licitaciones/1.0 (monitorizacion de licitaciones publicas)"
 REQUEST_TIMEOUT = 60
@@ -60,6 +86,8 @@ COLUMNS: tuple[str, ...] = (
     "nif_adjudicatario",
     "adjudicatario",
     "documentos",
+    "fuente",
+    "comunidad_autonoma",
 )
 
 #: Etiquetas legibles para la interfaz y las exportaciones.
@@ -80,6 +108,8 @@ COLUMN_LABELS: dict[str, str] = {
     "nif_organo": "NIF órgano",
     "nif_adjudicatario": "NIF adjudicatario",
     "adjudicatario": "Adjudicatario",
+    "fuente": "Fuente",
+    "comunidad_autonoma": "Comunidad Autónoma",
     "relevancia": "Relevancia GREFA (%)",
     "categoria": "Categoría",
     "badge": "Etiqueta",
@@ -376,10 +406,11 @@ def _parse_entry(entry) -> dict[str, Any]:
 
     from modules.pliegos_placsp import extract_documentos_from_carpeta
 
+    organo_limpio = _clean_html(organo)
     return {
         "expediente": expediente,
         "titulo": _clean_html(titulo),
-        "organo_contratacion": _clean_html(organo),
+        "organo_contratacion": organo_limpio,
         "presupuesto_sin_iva": presupuesto_sin_iva,
         "presupuesto_con_iva": presupuesto_con_iva,
         "url": _entry_link(entry),
@@ -395,6 +426,8 @@ def _parse_entry(entry) -> dict[str, Any]:
         "nif_adjudicatario": nif_adjudicatario,
         "adjudicatario": adjudicatario,
         "documentos": extract_documentos_from_carpeta(carpeta),
+        "fuente": "",
+        "comunidad_autonoma": infer_comunidad_autonoma(ubicacion, organo_limpio),
     }
 
 
@@ -408,11 +441,12 @@ def _parse_with_feedparser(raw: bytes) -> tuple[list[dict[str, Any]], str]:
             clave: (patron.search(resumen).group(1).strip() if patron.search(resumen) else "")
             for clave, patron in _SUMMARY_PATTERNS.items()
         }
+        organo = coincidencias["organo"]
         registros.append(
             {
                 "expediente": coincidencias["expediente"],
                 "titulo": _clean_html(getattr(entrada, "title", "")),
-                "organo_contratacion": coincidencias["organo"],
+                "organo_contratacion": organo,
                 "presupuesto_sin_iva": _to_float(coincidencias["importe"]),
                 "presupuesto_con_iva": None,
                 "url": getattr(entrada, "link", ""),
@@ -428,6 +462,8 @@ def _parse_with_feedparser(raw: bytes) -> tuple[list[dict[str, Any]], str]:
                 "nif_adjudicatario": "",
                 "adjudicatario": "",
                 "documentos": [],
+                "fuente": "",
+                "comunidad_autonoma": infer_comunidad_autonoma("", organo),
             }
         )
 
@@ -472,8 +508,16 @@ def empty_dataframe() -> pd.DataFrame:
     return build_dataframe([])
 
 
-def build_dataframe(registros: Sequence[dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(list(registros), columns=list(COLUMNS))
+def build_dataframe(
+    registros: Sequence[dict[str, Any]],
+    *,
+    fuente_default: str = "",
+) -> pd.DataFrame:
+    filas = [dict(r) for r in registros]
+    for fila in filas:
+        for col in COLUMNS:
+            fila.setdefault(col, [] if col in {"cpvs", "documentos"} else None if col.startswith("presupuesto") else "")
+    df = pd.DataFrame(filas, columns=list(COLUMNS)) if filas else pd.DataFrame(columns=list(COLUMNS))
 
     df["presupuesto_sin_iva"] = pd.to_numeric(df["presupuesto_sin_iva"], errors="coerce")
     df["presupuesto_con_iva"] = pd.to_numeric(df["presupuesto_con_iva"], errors="coerce")
@@ -493,10 +537,27 @@ def build_dataframe(registros: Sequence[dict[str, Any]]) -> pd.DataFrame:
     df["documentos"] = df["documentos"].apply(
         lambda valor: list(valor) if isinstance(valor, (list, tuple)) else []
     )
-    for columna in ("expediente", "titulo", "organo_contratacion", "url", "ubicacion",
-                    "cpvs_texto", "estado", "tipo_contrato", "descripcion",
-                    "nif_organo", "nif_adjudicatario", "adjudicatario"):
+    for columna in (
+        "expediente",
+        "titulo",
+        "organo_contratacion",
+        "url",
+        "ubicacion",
+        "cpvs_texto",
+        "estado",
+        "tipo_contrato",
+        "descripcion",
+        "nif_organo",
+        "nif_adjudicatario",
+        "adjudicatario",
+        "fuente",
+        "comunidad_autonoma",
+    ):
         df[columna] = df[columna].fillna("").astype(str).str.strip()
+
+    if fuente_default:
+        df = enrich_fuente(df, fuente_default)
+    df = enrich_comunidad_autonoma(df)
 
     if not df.empty:
         df = df.drop_duplicates(subset=["expediente", "url"], keep="first")
@@ -520,10 +581,44 @@ def _download(url: str, session: requests.Session) -> bytes:
     return respuesta.content
 
 
-def parse_atom_bytes(raw: bytes) -> pd.DataFrame:
+def parse_atom_bytes(raw: bytes, *, fuente: str = FUENTE_PLACSP_LOCAL) -> pd.DataFrame:
     """Parsea un fichero ATOM ya descargado (útil para trabajar sin conexión)."""
     registros, _ = _parse_feed_bytes(raw)
-    return build_dataframe(registros)
+    return build_dataframe(registros, fuente_default=fuente)
+
+
+def _fetch_feed_registros(
+    url: str,
+    *,
+    session: requests.Session,
+    max_pages: int,
+    max_entries: int | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Descarga páginas de un feed y devuelve (registros, páginas leídas)."""
+    registros: list[dict[str, Any]] = []
+    siguiente = url
+    paginas = 0
+    while siguiente and paginas < max(1, max_pages):
+        contenido = _download(siguiente, session)
+        nuevos, siguiente = _parse_feed_bytes(contenido)
+        registros.extend(nuevos)
+        paginas += 1
+        if max_entries and len(registros) >= int(max_entries):
+            break
+    return registros, paginas
+
+
+def _es_feed_oficial_o_vacio(url: str | None) -> bool:
+    """True si conviene fusionar las sindicaciones 643+1044 (URL por defecto/rota)."""
+    if not url or not str(url).strip():
+        return True
+    candidata = str(url).strip()
+    if candidata == PRIMARY_FEED_URL:
+        return True
+    # Ya es una sindicación concreta: no fusionar otras.
+    if "sindicacion_643" in candidata or "sindicacion_1044" in candidata:
+        return False
+    return False
 
 
 def fetch_placsp_licitaciones(
@@ -532,60 +627,172 @@ def fetch_placsp_licitaciones(
     max_entries: int | None = None,
     session: requests.Session | None = None,
     extra_urls: Iterable[str] | None = None,
+    *,
+    merge_syndications: bool | None = None,
 ) -> pd.DataFrame:
     """Descarga y normaliza las licitaciones publicadas en la PLACSP.
 
+    Por defecto fusiona las dos sindicaciones oficiales:
+
+    * ``placsp_643`` — perfiles alojados en PLACSP
+    * ``placsp_1044`` — plataformas autonómicas agregadas
+
+    Si ``feed_url`` apunta a una sindicación concreta (o a una URL propia),
+    solo se consume esa fuente. ``PRIMARY_FEED_URL`` (histórico, suele 404)
+    se trata como “usar sindicaciones oficiales”.
+
     Args:
-        feed_url: URL del feed ATOM a consumir. Si es ``None`` se usa el feed
-            principal y, si falla, las sindicaciones oficiales alternativas.
+        feed_url: URL del feed ATOM. ``None`` / principal → sindicaciones 643+1044.
         max_pages: nº máximo de páginas del feed a recorrer (paginación `rel=next`).
-        max_entries: corta al nº de expedientes más recientes (por fecha de
-            actualización) tras ordenar el lote descargado.
+        max_entries: corta al nº de expedientes más recientes tras ordenar el lote.
         session: sesión `requests` reutilizable.
-        extra_urls: URLs adicionales a probar tras las predeterminadas.
+        extra_urls: URLs adicionales a probar (modo feed único).
+        merge_syndications: fuerza fusionar 643+1044 (``None`` = auto).
 
     Returns:
-        DataFrame con el esquema de :data:`COLUMNS`.
+        DataFrame con el esquema de :data:`COLUMNS` (incl. ``fuente`` y
+        ``comunidad_autonoma``).
 
     Raises:
         IngestionError: si ninguna de las URLs candidatas devuelve entradas.
     """
     sesion = _http_session(session)
-
-    # La URL solicitada siempre se prueba primero; las sindicaciones oficiales
-    # quedan como red de seguridad porque el feed principal cambia de ruta con
-    # cierta frecuencia (y actualmente responde 404).
-    candidatas: list[str] = [(feed_url or PRIMARY_FEED_URL).strip()]
-    candidatas.extend(FALLBACK_FEED_URLS)
-    if extra_urls:
-        candidatas.extend(url.strip() for url in extra_urls if url)
-    candidatas = [url for url in dict.fromkeys(candidatas) if url]
+    fusionar = (
+        bool(merge_syndications)
+        if merge_syndications is not None
+        else _es_feed_oficial_o_vacio(feed_url)
+    )
 
     errores: list[str] = []
-    for url in candidatas:
-        registros: list[dict[str, Any]] = []
-        siguiente = url
-        paginas = 0
+
+    if fusionar:
+        # 643 y 1044 por separado; si una falla, la otra sigue.
+        partes: list[pd.DataFrame] = []
+        urls_ok: list[str] = []
+        paginas_total = 0
+
         try:
-            while siguiente and paginas < max(1, max_pages):
-                contenido = _download(siguiente, sesion)
-                nuevos, siguiente = _parse_feed_bytes(contenido)
-                registros.extend(nuevos)
-                paginas += 1
-                if max_entries and len(registros) >= int(max_entries):
+            regs_643, pags_643 = _fetch_feed_registros(
+                PLACSP_FEED_643,
+                session=sesion,
+                max_pages=max_pages,
+                max_entries=max_entries,
+            )
+            if regs_643:
+                df_643 = build_dataframe(regs_643, fuente_default=FUENTE_PLACSP_643)
+                partes.append(df_643)
+                urls_ok.append(PLACSP_FEED_643)
+                paginas_total += pags_643
+                LOGGER.info(
+                    "Descargados %s expedientes desde sindicación 643 (%s páginas)",
+                    len(df_643),
+                    pags_643,
+                )
+            else:
+                errores.append(f"{PLACSP_FEED_643} -> el feed no contiene entradas")
+        except (requests.RequestException, IngestionError) as exc:
+            errores.append(f"{PLACSP_FEED_643} -> {exc}")
+            LOGGER.warning("Feed 643 no disponible: %s", exc)
+
+        feed_1044_ok = False
+        for url_1044 in PLACSP_FEEDS_1044:
+            try:
+                regs_1044, pags_1044 = _fetch_feed_registros(
+                    url_1044,
+                    session=sesion,
+                    max_pages=max_pages,
+                    max_entries=max_entries,
+                )
+                if regs_1044:
+                    df_1044 = build_dataframe(regs_1044, fuente_default=FUENTE_PLACSP_1044)
+                    partes.append(df_1044)
+                    urls_ok.append(url_1044)
+                    paginas_total += pags_1044
+                    feed_1044_ok = True
+                    LOGGER.info(
+                        "Descargados %s expedientes desde sindicación 1044 (%s páginas)",
+                        len(df_1044),
+                        pags_1044,
+                    )
                     break
+                errores.append(f"{url_1044} -> el feed no contiene entradas")
+            except (requests.RequestException, IngestionError) as exc:
+                errores.append(f"{url_1044} -> {exc}")
+                LOGGER.warning("Feed 1044 no disponible (%s): %s", url_1044, exc)
+
+        if not feed_1044_ok and not any("sindicacion_1044" in e for e in errores):
+            errores.append("sindicacion_1044 -> ninguna URL candidata respondió")
+
+        if partes:
+            df = pd.concat(partes, ignore_index=True, sort=False)
+            for col in COLUMNS:
+                if col not in df.columns:
+                    if col in {"cpvs", "documentos"}:
+                        df[col] = [[] for _ in range(len(df))]
+                    elif col in {"presupuesto_sin_iva", "presupuesto_con_iva"}:
+                        df[col] = pd.NA
+                    else:
+                        df[col] = ""
+            df = df[list(COLUMNS)]
+            df = enrich_comunidad_autonoma(df)
+            if not df.empty:
+                df = df.drop_duplicates(subset=["expediente", "url"], keep="first")
+                df = df.sort_values(
+                    "fecha_actualizacion", ascending=False, na_position="last"
+                )
+                df = df.reset_index(drop=True)
+            if max_entries is not None and len(df) > int(max_entries):
+                df = df.head(int(max_entries)).reset_index(drop=True)
+            df.attrs["feed_url"] = " + ".join(urls_ok)
+            df.attrs["feed_urls"] = list(urls_ok)
+            df.attrs["paginas"] = paginas_total
+            df.attrs["fuentes"] = sorted(
+                {str(f) for f in df["fuente"].unique() if str(f).strip()}
+            )
+            return df
+
+        detalle = "\n".join(f"  · {mensaje}" for mensaje in errores)
+        raise IngestionError(
+            "No se pudo obtener ninguna licitación de la PLACSP.\n"
+            f"Sindicaciones 643/1044 probadas:\n{detalle}"
+        )
+
+    # Modo feed único (URL explícita de sindicación o personalizada).
+    candidatas: list[str] = [(feed_url or PRIMARY_FEED_URL).strip()]
+    if extra_urls:
+        candidatas.extend(url.strip() for url in extra_urls if url)
+    # Red de seguridad: si la URL custom falla, probar sindicaciones oficiales.
+    candidatas.extend(FALLBACK_FEED_URLS)
+    candidatas = [url for url in dict.fromkeys(candidatas) if url]
+
+    for url in candidatas:
+        try:
+            registros, paginas = _fetch_feed_registros(
+                url,
+                session=sesion,
+                max_pages=max_pages,
+                max_entries=max_entries,
+            )
         except (requests.RequestException, IngestionError) as exc:
             errores.append(f"{url} -> {exc}")
             LOGGER.warning("Feed no disponible (%s): %s", url, exc)
             continue
 
         if registros:
-            LOGGER.info("Descargados %s expedientes desde %s (%s páginas)", len(registros), url, paginas)
-            df = build_dataframe(registros)
+            fuente = fuente_desde_url_feed(url) or FUENTE_PLACSP
+            LOGGER.info(
+                "Descargados %s expedientes desde %s (%s páginas)",
+                len(registros),
+                url,
+                paginas,
+            )
+            df = build_dataframe(registros, fuente_default=fuente)
             if max_entries is not None and len(df) > int(max_entries):
                 df = df.head(int(max_entries)).reset_index(drop=True)
             df.attrs["feed_url"] = url
+            df.attrs["feed_urls"] = [url]
             df.attrs["paginas"] = paginas
+            df.attrs["fuentes"] = [fuente]
             return df
         errores.append(f"{url} -> el feed no contiene entradas")
 

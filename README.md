@@ -58,13 +58,20 @@ después queda cacheada 30 minutos.
 
 ### Sobre la fuente de datos
 
-El feed principal configurado es el indicado en la especificación del proyecto,
-`https://contrataciondelestado.es/sourcing/licitaciones/ATOM/licitaciones.atom`,
-que **actualmente devuelve 404**. La aplicación lo intenta primero y, si falla,
-recurre automáticamente a las sindicaciones oficiales alternativas; la que sirve
-los datos hoy es `sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom`.
-En la barra lateral se muestra siempre el origen realmente utilizado y puedes
-cambiar la URL a mano.
+La PLACSP expone dos sindicaciones ATOM distintas (no son el mismo dataset):
+
+- **`sindicacion_643`** — perfiles de contratante alojados en la propia PLACSP.
+- **`sindicacion_1044`** — plataformas autonómicas agregadas (sin menores).
+
+Por defecto la app **fusiona ambas**, etiqueta cada fila con `fuente`
+(`placsp_643` / `placsp_1044`) e infiere `comunidad_autonoma` a partir de la
+ubicación/órgano. El feed histórico de la especificación
+(`…/sourcing/licitaciones/ATOM/licitaciones.atom`) suele devolver 404 y se
+trata como “usar sindicaciones oficiales”. En la barra lateral se muestra el
+origen realmente utilizado y puedes forzar una URL concreta.
+
+En el **Buscador** puedes filtrar por las 17 CCAA (+ Estatal) sin consultar
+nada hasta pulsar **Buscar**.
 
 Si la red bloquea el dominio, descarga el `.atom` manualmente y súbelo desde
 «Cargar fichero ATOM local».

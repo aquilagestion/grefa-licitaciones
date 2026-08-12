@@ -624,6 +624,46 @@ def filter_by_nivel_administracion(
     ].reset_index(drop=True)
 
 
+def with_comunidad_autonoma(df: pd.DataFrame) -> pd.DataFrame:
+    """Asegura la columna ``comunidad_autonoma`` (inferida si falta)."""
+    if df is None or df.empty:
+        return df
+    from config.ccaa_sources import enrich_comunidad_autonoma
+
+    return enrich_comunidad_autonoma(df)
+
+
+def filter_by_comunidad_autonoma(
+    df: pd.DataFrame,
+    comunidades: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Filtra por comunidad autónoma (o Estatal / Sin clasificar)."""
+    if df.empty or not comunidades:
+        return df
+    seleccion = {str(c).strip() for c in comunidades if str(c).strip()}
+    if not seleccion:
+        return df
+    enriquecido = with_comunidad_autonoma(df)
+    if "comunidad_autonoma" not in enriquecido.columns:
+        return enriquecido.iloc[0:0].copy()
+    return enriquecido[
+        enriquecido["comunidad_autonoma"].astype(str).isin(seleccion)
+    ].reset_index(drop=True)
+
+
+def filter_by_fuente(
+    df: pd.DataFrame,
+    fuentes: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Filtra por código de fuente (``placsp_643``, ``placsp_1044``, …)."""
+    if df.empty or not fuentes:
+        return df
+    seleccion = {str(f).strip() for f in fuentes if str(f).strip()}
+    if not seleccion or "fuente" not in df.columns:
+        return df
+    return df[df["fuente"].astype(str).isin(seleccion)].reset_index(drop=True)
+
+
 def _normalizar_expediente(valor: str) -> str:
     """Minúsculas y solo alfanuméricos, para comparar IDs con distintos separadores."""
     return re.sub(r"[^0-9a-z]+", "", str(valor or "").strip().lower())
@@ -717,6 +757,8 @@ def search_dataframe(
     nif_ambito: str = "ambos",
     expediente: str = "",
     niveles_admin: Sequence[str] | None = None,
+    comunidades: Sequence[str] | None = None,
+    fuentes: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """Búsqueda libre y filtros del buscador general."""
     if df.empty:
@@ -737,6 +779,10 @@ def search_dataframe(
     if not busqueda_directa:
         if niveles_admin:
             filtrado = filter_by_nivel_administracion(filtrado, niveles_admin)
+        if comunidades:
+            filtrado = filter_by_comunidad_autonoma(filtrado, comunidades)
+        if fuentes:
+            filtrado = filter_by_fuente(filtrado, fuentes)
 
         if presupuesto_min is not None or presupuesto_max is not None:
             importes = filtrado["presupuesto_sin_iva"]
@@ -762,6 +808,8 @@ def search_dataframe(
 
     if "organo_contratacion" in filtrado.columns:
         filtrado = with_nivel_administracion(filtrado)
+    if "ubicacion" in filtrado.columns or "organo_contratacion" in filtrado.columns:
+        filtrado = with_comunidad_autonoma(filtrado)
     return filtrado.reset_index(drop=True)
 
 
