@@ -9,6 +9,7 @@ Ejecución:  streamlit run app.py
 
 from __future__ import annotations
 
+import html
 import importlib
 import re
 import sys
@@ -115,7 +116,26 @@ CUSTOM_CSS = """
         background: #ffffff;
         box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
     }
-    .tarjeta h4 { margin: 0 0 0.45rem 0; font-size: 1.02rem; line-height: 1.35; color: #10241a; }
+    .tarjeta h4 {
+        margin: 0 0 0.45rem 0;
+        font-size: 1.02rem;
+        line-height: 1.4;
+        color: #10241a;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: unset;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    .tarjeta-titulo-completo {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.4;
+        margin: 0 0 0.25rem 0;
+    }
     .badge {
         display: inline-block;
         padding: 0.15rem 0.6rem;
@@ -802,7 +822,7 @@ def _render_resultados_con_interes(
         clave = _clave_expediente(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
         marcado = clave in interes
         exp = fila.get("expediente") or "—"
-        tit = str(fila.get("titulo") or "")[:120]
+        tit = str(fila.get("titulo") or "").strip()
         organo = str(fila.get("organo_contratacion") or "")[:80]
         meta = " · ".join(
             x
@@ -813,7 +833,11 @@ def _render_resultados_con_interes(
             )
             if x
         )
-        st.markdown(f"**{exp}** — {tit}")
+        st.markdown(
+            f"<p class='tarjeta-titulo-completo'><strong>{html.escape(str(exp))}</strong> — "
+            f"{html.escape(tit)}</p>",
+            unsafe_allow_html=True,
+        )
         if meta:
             st.caption(meta)
         if fila.get("url"):
@@ -1390,7 +1414,15 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     cpvs = " ".join(f"<span class='chip'>{codigo}</span>" for codigo in (fila.get("cpvs") or [])[:8])
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
-    titulo = fila["titulo"] or "(Sin título en el expediente)"
+    titulo = html.escape(str(fila["titulo"] or "(Sin título en el expediente)"))
+    organo = html.escape(str(fila.get("organo_contratacion") or "—"))
+    ubicacion = html.escape(str(fila.get("ubicacion") or "—"))
+    estado = html.escape(str(fila.get("estado") or "—"))
+    expediente = html.escape(str(fila.get("expediente") or "—"))
+    keywords_html = html.escape(keywords)
+    nif_organo = html.escape(str(fila.get("nif_organo") or "—"))
+    adjudicatario = html.escape(str(fila.get("adjudicatario") or "—"))
+    nif_adj = html.escape(str(fila.get("nif_adjudicatario") or ""))
 
     st.markdown(
         f"""
@@ -1401,18 +1433,18 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
                 </span>
                 <span class="meta">{formato_fecha(fila.get('fecha_actualizacion'))}</span>
             </div>
-            <h4>{titulo}</h4>
-            <p class="meta"><strong>Órgano:</strong> {fila.get('organo_contratacion') or '—'}</p>
+            <h4 class="tarjeta-titulo-completo">{titulo}</h4>
+            <p class="meta"><strong>Órgano:</strong> {organo}</p>
             <p class="meta">
                 <strong>Presupuesto (sin IVA):</strong> {formato_importe(fila.get('presupuesto_sin_iva'))}
-                &nbsp;·&nbsp; <strong>Ubicación:</strong> {fila.get('ubicacion') or '—'}
-                &nbsp;·&nbsp; <strong>Estado:</strong> {fila.get('estado') or '—'}
+                &nbsp;·&nbsp; <strong>Ubicación:</strong> {ubicacion}
+                &nbsp;·&nbsp; <strong>Estado:</strong> {estado}
             </p>
-            <p class="meta"><strong>Expediente:</strong> {fila.get('expediente') or '—'}
-                &nbsp;·&nbsp; <strong>Palabras clave:</strong> {keywords}</p>
-            <p class="meta"><strong>NIF órgano:</strong> {fila.get('nif_organo') or '—'}
-                &nbsp;·&nbsp; <strong>Adjudicatario:</strong> {fila.get('adjudicatario') or '—'}
-                {f" ({fila.get('nif_adjudicatario')})" if fila.get('nif_adjudicatario') else ""}</p>
+            <p class="meta"><strong>Expediente:</strong> {expediente}
+                &nbsp;·&nbsp; <strong>Palabras clave:</strong> {keywords_html}</p>
+            <p class="meta"><strong>NIF órgano:</strong> {nif_organo}
+                &nbsp;·&nbsp; <strong>Adjudicatario:</strong> {adjudicatario}
+                {f" ({nif_adj})" if nif_adj else ""}</p>
             <p class="meta">{cpvs}</p>
         </div>
         """,
@@ -4695,8 +4727,10 @@ def pestana_mis_licitaciones() -> None:
                 )
             with c_body:
                 st.markdown(
-                    f"**{fila.get('expediente') or '—'}** — "
-                    f"{str(fila.get('titulo') or '')[:120]}"
+                    f"<p class='tarjeta-titulo-completo'><strong>"
+                    f"{html.escape(str(fila.get('expediente') or '—'))}</strong> — "
+                    f"{html.escape(str(fila.get('titulo') or ''))}</p>",
+                    unsafe_allow_html=True,
                 )
                 st.caption(
                     " · ".join(

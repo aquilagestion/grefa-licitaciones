@@ -51,7 +51,7 @@ def _fila(item: dict[str, Any]) -> dict[str, Any]:
     organo = texto(item.get("nom_organ")) or texto(item.get("nom_departament_ens"))
     return {
         "expediente": texto(item.get("codi_expedient")),
-        "titulo": texto(item.get("denominacio") or item.get("objecte_contracte")),
+        "titulo": texto(item.get("objecte_contracte") or item.get("denominacio")),
         "organo_contratacion": organo,
         "presupuesto_sin_iva": to_float_eu(
             item.get("pressupost_licitacio_sense") or item.get("valor_estimat_contracte")

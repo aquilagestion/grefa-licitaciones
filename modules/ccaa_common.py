@@ -15,6 +15,21 @@ def texto(valor: Any) -> str:
     return " ".join(str(valor).split())
 
 
+def pick_field(row: dict[str, Any], *candidatos: str) -> str:
+    """Devuelve el primer campo no vacío (comparación sin tildes / mayúsculas)."""
+    if not row:
+        return ""
+    indice = {sin_tildes(str(k)): k for k in row.keys()}
+    for cand in candidatos:
+        clave = indice.get(sin_tildes(cand))
+        if clave is None:
+            continue
+        valor = texto(row.get(clave))
+        if valor:
+            return valor
+    return ""
+
+
 def sin_tildes(valor: str) -> str:
     des = unicodedata.normalize("NFKD", str(valor or "").lower())
     return "".join(c for c in des if not unicodedata.combining(c))

@@ -29,8 +29,10 @@ Fetcher = Callable[..., pd.DataFrame]
 
 def _fetchers() -> list[tuple[str, Fetcher, dict[str, Any]]]:
     from modules import (
+        ingestion_andalucia,
         ingestion_catalunya,
         ingestion_euskadi,
+        ingestion_galicia,
         ingestion_madrid,
         ingestion_navarra,
     )
@@ -55,6 +57,16 @@ def _fetchers() -> list[tuple[str, Fetcher, dict[str, Any]]]:
             "Comunidad Foral de Navarra",
             ingestion_navarra.fetch_navarra_notices,
             {"limit": 250},
+        ),
+        (
+            "Galicia",
+            ingestion_galicia.fetch_galicia_notices,
+            {"incluir_plazos": True},
+        ),
+        (
+            "Andalucía",
+            ingestion_andalucia.fetch_andalucia_notices,
+            {"limit": 300},
         ),
     ]
 

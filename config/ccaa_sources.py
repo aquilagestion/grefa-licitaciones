@@ -22,8 +22,10 @@ FUENTE_EUSKADI = "euskadi"
 FUENTE_CATALUNYA = "catalunya"
 FUENTE_MADRID = "madrid"
 FUENTE_NAVARRA = "navarra"
+FUENTE_GALICIA = "galicia"
+FUENTE_ANDALUCIA = "andalucia"
 # Versión de catálogo CCAA (fuerza recarga en Streamlit Cloud si cachea .py antiguos).
-CCAA_SOURCES_VERSION = "2026-08-12-nativas-v2"
+CCAA_SOURCES_VERSION = "2026-08-12-nativas-v3"
 
 FUENTES_PLACSP: frozenset[str] = frozenset(
     {FUENTE_PLACSP_643, FUENTE_PLACSP_1044, FUENTE_PLACSP_LOCAL, FUENTE_PLACSP}
@@ -296,11 +298,11 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
     {
         "id": "andalucia",
         "nombre": "Andalucía",
-        "portal": "Junta de Andalucía / PLACSP agregación",
-        "tipo": "placsp_1044",
-        "estado": "placsp_1044",
-        "url_base": "https://www.juntadeandalucia.es/temas/contratacion-publica.html",
-        "notas": "Plataforma propia + agregación a PLACSP 1044; open data de menores en fase 2.",
+        "portal": "Junta de Andalucía · open data menores + PLACSP 1044",
+        "tipo": "nativa",
+        "estado": "nativa",
+        "url_base": "https://www.juntadeandalucia.es/datosabiertos/portal/dataset/contratacion-menor-plataforma-de-contratacion-andalucia-2025",
+        "notas": "Conector open data de menores (modules.ingestion_andalucia); licitaciones abiertas también vía PLACSP 1044.",
     },
     {
         "id": "aragon",
@@ -395,11 +397,11 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
     {
         "id": "galicia",
         "nombre": "Galicia",
-        "portal": "Contratos de Galicia / PLACSP 1044",
-        "tipo": "parcial",
-        "estado": "parcial",
+        "portal": "Contratos de Galicia (RSS) / PLACSP 1044",
+        "tipo": "nativa",
+        "estado": "nativa",
         "url_base": "https://www.contratosdegalicia.gal",
-        "notas": "RSS corto + PLACSP 1044 (fase 2).",
+        "notas": "Conector RSS activo (modules.ingestion_galicia); también en PLACSP 1044.",
     },
     {
         "id": "madrid",
@@ -469,6 +471,8 @@ def etiqueta_fuente(fuente: str) -> str:
         FUENTE_CATALUNYA: "Cataluña · PSCP/Socrata",
         FUENTE_MADRID: "Madrid · ATOM",
         FUENTE_NAVARRA: "Navarra · open data CSV",
+        FUENTE_GALICIA: "Galicia · RSS Contratos",
+        FUENTE_ANDALUCIA: "Andalucía · open data menores",
     }
     return mapa.get(str(fuente or "").strip(), str(fuente or "").strip() or "—")
 
