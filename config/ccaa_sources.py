@@ -24,7 +24,7 @@ FUENTE_NAVARRA = "navarra"
 FUENTE_GALICIA = "galicia"
 FUENTE_ANDALUCIA = "andalucia"
 # Versión de catálogo CCAA (fuerza recarga en Streamlit Cloud si cachea .py antiguos).
-CCAA_SOURCES_VERSION = "2026-08-12-fase3-cierre"
+CCAA_SOURCES_VERSION = "2026-08-12-fase3-fix-import"
 
 FUENTES_PLACSP: frozenset[str] = frozenset(
     {FUENTE_PLACSP_643, FUENTE_PLACSP_1044, FUENTE_PLACSP_LOCAL, FUENTE_PLACSP}
