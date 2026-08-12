@@ -1,4 +1,4 @@
-"""GREFA · Monitor de licitaciones públicas (PLACSP).
+﻿"""GREFA · Monitor de licitaciones públicas (PLACSP).
 
 Interfaz Streamlit para descargar el feed ATOM de la Plataforma de Contratación
 del Sector Público, puntuar cada expediente con el Índice de Relevancia GREFA y
@@ -677,9 +677,9 @@ def actualizar_datos() -> None:
             )
             st.session_state["ultima_actualizacion"] = datetime.now()
             st.session_state["error_descarga"] = (
-                f"Feed PLACSP en vivo no disponible ({exc}). "
+                "Feed PLACSP en vivo no disponible (bloqueo anti-bot desde Cloud). "
                 f"Se cargaron **{len(fallback):,}** filas del histórico de Sheets "
-                "(sync diaria). Puedes seguir trabajando; para datos vivos sube un ATOM/ZIP."
+                "(sync diaria). Puedes seguir trabajando."
             )
         else:
             st.session_state["error_descarga"] = str(exc)
@@ -692,7 +692,7 @@ def actualizar_datos() -> None:
             )
             st.session_state["ultima_actualizacion"] = datetime.now()
             st.session_state["error_descarga"] = (
-                f"Error de red al descargar PLACSP ({exc}). "
+                f"Error de red al descargar PLACSP. "
                 f"Usando histórico Sheets ({len(fallback):,} filas)."
             )
         else:
@@ -1616,54 +1616,43 @@ def _titulos_para_mostrar(titulo: str, *, traducir: bool) -> tuple[str, str]:
 
 def tarjeta_licitacion(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
-    cpvs = " ".join(f"<span class='chip'>{codigo}</span>" for codigo in (fila.get("cpvs") or [])[:8])
+    cpvs = list(fila.get("cpvs") or [])[:8]
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
     traducir = bool(st.session_state.get("traducir_titulos_es"))
     titulo_es, titulo_orig = _titulos_para_mostrar(
         str(fila.get("titulo") or ""), traducir=traducir
     )
-    titulo = html.escape(titulo_es)
-    original_html = (
-        f'<p class="titulo-original"><em>Original:</em> {html.escape(titulo_orig)}</p>'
-        if titulo_orig
-        else ""
-    )
-    organo = html.escape(str(fila.get("organo_contratacion") or "—"))
-    ubicacion = html.escape(str(fila.get("ubicacion") or "—"))
-    estado = html.escape(str(fila.get("estado") or "—"))
-    expediente = html.escape(str(fila.get("expediente") or "—"))
-    keywords_html = html.escape(keywords)
-    nif_organo = html.escape(str(fila.get("nif_organo") or "—"))
-    adjudicatario = html.escape(str(fila.get("adjudicatario") or "—"))
-    nif_adj = html.escape(str(fila.get("nif_adjudicatario") or ""))
+    organo = str(fila.get("organo_contratacion") or "—")
+    ubicacion = str(fila.get("ubicacion") or "—")
+    estado = str(fila.get("estado") or "—")
+    expediente = str(fila.get("expediente") or "—")
+    nif_organo = str(fila.get("nif_organo") or "—")
+    adjudicatario = str(fila.get("adjudicatario") or "—")
+    nif_adj = str(fila.get("nif_adjudicatario") or "")
+    fecha = formato_fecha(fila.get("fecha_actualizacion"))
+    importe = formato_importe(fila.get("presupuesto_sin_iva"))
 
-    st.markdown(
-        f"""
-        <div class="tarjeta" style="--color-acento: {nivel['color']};">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
-                <span class="badge" style="background:{nivel['color']};">
-                    {nivel['emoji']} {fila['badge']} · {fila['relevancia']}%
-                </span>
-                <span class="meta">{formato_fecha(fila.get('fecha_actualizacion'))}</span>
-            </div>
-            <h4 class="tarjeta-titulo-completo">{titulo}</h4>
-            {original_html}
-            <p class="meta"><strong>Órgano:</strong> {organo}</p>
-            <p class="meta">
-                <strong>Presupuesto (sin IVA):</strong> {formato_importe(fila.get('presupuesto_sin_iva'))}
-                &nbsp;·&nbsp; <strong>Ubicación:</strong> {ubicacion}
-                &nbsp;·&nbsp; <strong>Estado:</strong> {estado}
-            </p>
-            <p class="meta"><strong>Expediente:</strong> {expediente}
-                &nbsp;·&nbsp; <strong>Palabras clave:</strong> {keywords_html}</p>
-            <p class="meta"><strong>NIF órgano:</strong> {nif_organo}
-                &nbsp;·&nbsp; <strong>Adjudicatario:</strong> {adjudicatario}
-                {f" ({nif_adj})" if nif_adj else ""}</p>
-            <p class="meta">{cpvs}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Contenedor nativo Streamlit (evita que Cloud muestre etiquetas HTML en crudo).
+    with st.container(border=True):
+        st.markdown(
+            f"{nivel['emoji']} **{fila.get('badge') or fila.get('categoria') or '—'}** · "
+            f"{fila.get('relevancia', '—')}% · {fecha}"
+        )
+        st.markdown(f"#### {titulo_es}")
+        if titulo_orig:
+            st.caption(f"Original: {titulo_orig}")
+        st.markdown(f"**Órgano:** {organo}")
+        st.caption(
+            f"Presupuesto (sin IVA): {importe} · Ubicación: {ubicacion} · Estado: {estado}"
+        )
+        st.caption(
+            f"Expediente: {expediente} · Palabras clave: {keywords}"
+        )
+        adj = adjudicatario + (f" ({nif_adj})" if nif_adj else "")
+        st.caption(f"NIF órgano: {nif_organo} · Adjudicatario: {adj}")
+        if cpvs:
+            st.caption("CPV: " + " · ".join(str(c) for c in cpvs))
+
     clave_card = _clave_expediente(
         str(fila.get("expediente") or ""), str(fila.get("url") or "")
     )
@@ -1713,7 +1702,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         with st.expander("¿Por qué esta puntuación?"):
             st.write(fila.get("justificacion", ""))
             if fila.get("descripcion"):
-                st.caption(fila["descripcion"][:800])
+                st.caption(str(fila["descripcion"])[:800])
 
     expediente = str(fila.get("expediente") or "")
     url = str(fila.get("url") or "")
@@ -1731,6 +1720,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             documentos=_docs_desde_fila(fila),
             organo=str(fila.get("organo_contratacion") or ""),
         )
+
 
 # ---------------------------------------------------------------------------
 # Barra superior: criterios de búsqueda (CPV, términos, estado)
@@ -6046,11 +6036,23 @@ def main_licitaciones(usuario=None) -> None:
         st.session_state["datos"] = datos
 
     if st.session_state["error_descarga"]:
-        st.error(st.session_state["error_descarga"])
-        st.info(
-            "Si la red corporativa bloquea contrataciondelestado.es, descarga el fichero "
-            ".atom manualmente y súbelo desde «Cargar fichero ATOM local» en la barra lateral."
-        )
+        msg = str(st.session_state["error_descarga"])
+        # Si ya hay datos (p. ej. histórico), aviso suave; si no, error.
+        if st.session_state.get("datos") is not None and not getattr(
+            st.session_state["datos"], "empty", True
+        ):
+            st.warning(msg)
+            st.caption(
+                "PLACSP en vivo está bloqueado por anti-bot desde Cloud. "
+                "Estás viendo el histórico de la sync diaria. "
+                "Opcional: sube un `.atom`/`.zip` en la barra lateral."
+            )
+        else:
+            st.error(msg)
+            st.info(
+                "Prueba «Sync histórico ahora» o sube un fichero ATOM/ZIP "
+                "desde «Cargar fichero ATOM / ZIP local»."
+            )
 
     _sincronizar_activos_desde_catalogos()
     cpvs_activos = list(st.session_state["cpvs"].keys())
