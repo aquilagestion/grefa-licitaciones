@@ -9,6 +9,7 @@ Ejecución:  streamlit run app.py
 
 from __future__ import annotations
 
+import hashlib
 import html
 import importlib
 import re
@@ -897,6 +898,12 @@ def _clave_expediente(expediente: str, url: str) -> str:
     return f"{str(expediente).strip().lower()}|{str(url).strip().lower()}"
 
 
+def _widget_id(*parts: object) -> str:
+    """Id corto y único para keys de widgets Streamlit (evita choques por truncado)."""
+    bruto = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.md5(bruto.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
 def _cargar_mis_licitaciones_cache(*, forzar: bool = False) -> list[dict]:
     if not sheets_store.is_configured():
         return list(st.session_state.get("mis_licitaciones_local") or [])
@@ -1016,10 +1023,11 @@ def _render_resultados_con_interes(
 
     interes = _claves_interes()
 
-    def _una(fila: pd.Series) -> None:
+    def _una(fila: pd.Series, idx: int = 0) -> None:
         clave = _clave_expediente(
             str(fila.get("expediente") or ""), str(fila.get("url") or "")
         )
+        wid = _widget_id(clave_prefix, clave, idx)
         marcado = clave in interes
         exp = fila.get("expediente") or "—"
         titulo_original = str(fila.get("titulo") or "").strip()
@@ -1049,7 +1057,7 @@ def _render_resultados_con_interes(
             c_trad, c_mis, c_prep, c_share = st.columns(4)
             with c_trad:
                 _boton_traducir_titulo(
-                    clave, titulo_original, key_prefix=clave_prefix
+                    clave, titulo_original, key_prefix=f"{clave_prefix}_{wid}"
                 )
             with c_mis:
                 etiqueta_mis = (
@@ -1057,7 +1065,7 @@ def _render_resultados_con_interes(
                 )
                 if st.button(
                     etiqueta_mis,
-                    key=f"mis_from_{clave_prefix}_{clave[:36]}",
+                    key=f"mis_from_{wid}",
                     type="primary" if not marcado else "secondary",
                     width="stretch",
                     help="Incluir o quitar de Mis Licitaciones",
@@ -1076,7 +1084,7 @@ def _render_resultados_con_interes(
             with c_prep:
                 if st.button(
                     "📝 Preparar docs",
-                    key=f"prep_from_{clave_prefix}_{clave[:36]}",
+                    key=f"prep_from_{wid}",
                     width="stretch",
                     help="Abrir asistente de documentación con este expediente",
                 ):
@@ -1089,7 +1097,7 @@ def _render_resultados_con_interes(
             with c_share:
                 ui_compartir.render_compartir(
                     fila,
-                    key=f"share_from_{clave_prefix}_{clave[:36]}",
+                    key=f"share_from_{wid}",
                     fuente_label="PLACSP",
                 )
 
@@ -1668,11 +1676,12 @@ def _boton_traducir_titulo(
     original = str(titulo or "").strip()
     if not original:
         return
+    wid = _widget_id("trad", key_prefix, clave)
     ya = _titulo_traducido_activo(clave)
     if ya and ya.casefold() != original.casefold():
         if st.button(
             "🔤 Ver original",
-            key=f"trad_off_{key_prefix}_{clave[:36]}",
+            key=f"trad_off_{wid}",
             width="stretch",
             help="Volver a mostrar el título en el idioma original",
         ):
@@ -1681,7 +1690,7 @@ def _boton_traducir_titulo(
         return
     if st.button(
         "🌐 Traducir al español",
-        key=f"trad_on_{key_prefix}_{clave[:36]}",
+        key=f"trad_on_{wid}",
         width="stretch",
         help="Traduce solo este título (euskera/catalán/gallego/valenciano → ES)",
     ):
@@ -1690,13 +1699,14 @@ def _boton_traducir_titulo(
         st.rerun()
 
 
-def tarjeta_licitacion(fila: pd.Series) -> None:
+def tarjeta_licitacion(fila: pd.Series, idx: int = 0) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     cpvs = list(fila.get("cpvs") or [])[:8]
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
     clave_card = _clave_expediente(
         str(fila.get("expediente") or ""), str(fila.get("url") or "")
     )
+    wid = _widget_id("card", clave_card, idx)
     titulo_original = str(fila.get("titulo") or "").strip() or "(Sin título en el expediente)"
     titulo_es = _titulo_traducido_activo(clave_card)
     mostrar_traduccion = bool(
@@ -1746,11 +1756,11 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         _boton_traducir_titulo(
             clave_card,
             titulo_original,
-            key_prefix="card",
+            key_prefix=f"card_{wid}",
         )
     with col_share:
         ui_compartir.render_compartir(
-            fila, key=f"share_card_{clave_card[:40]}", fuente_label="PLACSP"
+            fila, key=f"share_card_{wid}", fuente_label="PLACSP"
         )
     with col_mis:
         etiqueta_mis = (
@@ -1758,7 +1768,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         )
         if st.button(
             etiqueta_mis,
-            key=f"mis_card_{clave_card[:40]}",
+            key=f"mis_card_{wid}",
             width="stretch",
             type="primary" if not en_mis else "secondary",
         ):
@@ -1776,7 +1786,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
     with col_prep:
         if st.button(
             "📝 Preparar docs",
-            key=f"prep_card_{clave_card[:40]}",
+            key=f"prep_card_{wid}",
             width="stretch",
         ):
             _abrir_preparar_docs(
@@ -1803,7 +1813,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             expediente,
             url,
             str(fila.get("titulo") or ""),
-            clave_prefix=f"tarjeta_{clave[:40]}",
+            clave_prefix=f"tarjeta_{wid}",
             documentos=_docs_desde_fila(fila),
             organo=str(fila.get("organo_contratacion") or ""),
         )
@@ -2782,9 +2792,15 @@ def _render_tarjetas_paginadas(
     pagina_df = df.iloc[inicio:fin]
 
     def _pintar_pagina() -> None:
-        if not group_by or group_by not in df.columns:
-            for _, fila in pagina_df.iterrows():
+        def _llamar(fila: pd.Series, i: int) -> None:
+            try:
+                render_fila(fila, i)
+            except TypeError:
                 render_fila(fila)
+
+        if not group_by or group_by not in df.columns:
+            for i, (_, fila) in enumerate(pagina_df.iterrows()):
+                _llamar(fila, i)
             return
         etiquetas = (
             df[group_by]
@@ -2795,7 +2811,7 @@ def _render_tarjetas_paginadas(
         )
         conteos = etiquetas.value_counts()
         prev_grupo: str | None = None
-        for _, fila in pagina_df.iterrows():
+        for i, (_, fila) in enumerate(pagina_df.iterrows()):
             bruto = fila.get(group_by)
             grupo = str(bruto or "").strip() or "Sin comunidad"
             if grupo != prev_grupo:
@@ -2805,7 +2821,7 @@ def _render_tarjetas_paginadas(
                     f"{n_grupo} licitación{'es' if n_grupo != 1 else ''} en esta comunidad"
                 )
                 prev_grupo = grupo
-            render_fila(fila)
+            _llamar(fila, i)
 
     # Contenedor con scroll solo si el listado supera el alto (CSS max-height).
     with st.container(border=True):
