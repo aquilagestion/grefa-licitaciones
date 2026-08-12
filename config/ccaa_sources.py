@@ -308,8 +308,8 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "portal": "Junta de Andalucía · open data menores + PLACSP 1044",
         "tipo": "nativa",
         "estado": "nativa",
-        "url_base": "https://www.juntadeandalucia.es/datosabiertos/portal/dataset/contratacion-menor-plataforma-de-contratacion-andalucia-2025",
-        "notas": "Conector open data de menores (modules.ingestion_andalucia); licitaciones abiertas también vía PLACSP 1044.",
+        "url_base": "https://www.juntadeandalucia.es/datosabiertos/portal/dataset/contratacion-menor-plataforma-de-contratacion-andalucia-2026",
+        "notas": "Conector open data de menores adjudicados (modules.ingestion_andalucia). El CSV del portal suele devolver 503; licitaciones abiertas vía PLACSP 1044.",
     },
     {
         "id": "aragon",
