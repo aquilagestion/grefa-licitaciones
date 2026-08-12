@@ -958,16 +958,46 @@ def _render_resultados_con_interes(
     *,
     clave_prefix: str,
     page_size: int = 5,
+    agrupar_por_ccaa: bool = True,
 ) -> None:
     """Lista resultados paginados (5) con acciones Mis Licitaciones y Preparar docs."""
     if resultados.empty:
         return
+
+    vista = resultados
+    group_by: str | None = None
+    if agrupar_por_ccaa and "comunidad_autonoma" in resultados.columns:
+        vista = resultados.copy()
+        fechas = pd.to_datetime(vista.get("fecha_actualizacion"), errors="coerce")
+        vista = (
+            vista.assign(
+                _ccaa_ord=vista["comunidad_autonoma"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace("", "Sin comunidad"),
+                _fecha_ord=fechas,
+            )
+            .sort_values(
+                by=["_ccaa_ord", "_fecha_ord"],
+                ascending=[True, False],
+                na_position="last",
+            )
+            .drop(columns=["_ccaa_ord", "_fecha_ord"])
+            .reset_index(drop=True)
+        )
+        group_by = "comunidad_autonoma"
 
     st.markdown('<span class="resultados-buscador-flag"></span>', unsafe_allow_html=True)
     st.caption(
         "Usa **⭐ A Mis Licitaciones** / **📝 Preparar docs**. "
         "Navegación de **5 en 5**. "
         "Traduce solo las que te interesen con **🌐 Traducir al español**."
+        + (
+            " Resultados agrupados por **comunidad autónoma**."
+            if group_by
+            else ""
+        )
     )
 
     interes = _claves_interes()
@@ -1050,10 +1080,11 @@ def _render_resultados_con_interes(
                 )
 
     _render_tarjetas_paginadas(
-        resultados,
+        vista,
         _una,
         page_size=page_size,
         key=f"{clave_prefix}_tarjetas_page",
+        group_by=group_by,
     )
 
 
@@ -2662,15 +2693,20 @@ def _render_tarjetas_paginadas(
     *,
     page_size: int = 5,
     key: str = "tarjetas_page",
+    group_by: str | None = None,
 ) -> None:
-    """Muestra tarjetas de ``df`` en páginas fijas (por defecto 5)."""
+    """Muestra tarjetas de ``df`` en páginas fijas (por defecto 5).
+
+    Si ``group_by`` es una columna (p. ej. comunidad_autonoma), inserta un
+    título al cambiar de grupo en la página actual.
+    """
     total = len(df)
     if total == 0:
         return
 
     page_size = max(1, int(page_size))
     n_pages = max(1, (total + page_size - 1) // page_size)
-    firma = f"{total}:{page_size}:{key}"
+    firma = f"{total}:{page_size}:{key}:{group_by or ''}"
     if st.session_state.get(f"{key}_firma") != firma:
         st.session_state[f"{key}_firma"] = firma
         st.session_state[key] = 1
@@ -2707,7 +2743,31 @@ def _render_tarjetas_paginadas(
             st.session_state[key] = pagina + 1
             st.rerun()
 
-    for _, fila in df.iloc[inicio:fin].iterrows():
+    pagina_df = df.iloc[inicio:fin]
+    if not group_by or group_by not in df.columns:
+        for _, fila in pagina_df.iterrows():
+            render_fila(fila)
+        return
+
+    etiquetas = (
+        df[group_by]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Sin comunidad")
+    )
+    conteos = etiquetas.value_counts()
+    prev_grupo: str | None = None
+    for idx, fila in pagina_df.iterrows():
+        bruto = fila.get(group_by)
+        grupo = str(bruto or "").strip() or "Sin comunidad"
+        if grupo != prev_grupo:
+            n_grupo = int(conteos.get(grupo, 0))
+            st.markdown(f"### {grupo}")
+            st.caption(
+                f"{n_grupo} licitación{'es' if n_grupo != 1 else ''} en esta comunidad"
+            )
+            prev_grupo = grupo
         render_fila(fila)
 
 
