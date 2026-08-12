@@ -23,6 +23,11 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from config.cpv_catalog import active_cpvs, default_cpv_catalog  # noqa: E402
+from config.ccaa_sources import (  # noqa: E402
+    debe_consultar_nativa,
+    etiqueta_fuente,
+    opciones_filtro_buscador,
+)
 from config.default_criteria import (  # noqa: E402
     CUSTOM_KEYWORD_CATEGORY,
     ESTADOS_ABIERTOS_DEFAULT,
@@ -64,6 +69,8 @@ from modules.exporter import (  # noqa: E402
 )
 from modules.ingestion import (  # noqa: E402
     COLUMN_LABELS,
+    PLACSP_FEED_643,
+    PLACSP_FEEDS_1044,
     PRIMARY_FEED_URL,
     IngestionError,
     empty_dataframe,
@@ -1986,8 +1993,11 @@ def sidebar_fuente_datos() -> None:
             help="Por defecto 500, los más recientes según fecha de actualización.",
         )
         st.caption(
-            "Si la URL principal no responde, se prueban automáticamente las "
-            "sindicaciones oficiales alternativas de contrataciondelestado.es."
+            "Por defecto se fusionan las sindicaciones oficiales "
+            f"**643** (perfiles alojados) y **1044** (plataformas agregadas). "
+            f"Si cambias la URL a una sindicación concreta, solo se usa esa. "
+            f"643: `{PLACSP_FEED_643.split('/')[-1]}` · "
+            f"1044: `{PLACSP_FEEDS_1044[0].split('/')[-1]}`."
         )
 
     if st.session_state.get("cargando_datos"):
@@ -5318,7 +5328,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
         "Despliega los filtros, configúralos y pulsa **Buscar**. "
-        "Hasta entonces no se filtra, no se consulta Drive ni se carga el histórico local."
+        "Hasta entonces no se filtra, no se consulta Drive/API CCAA ni se carga el parquet."
     )
 
     importes = df["presupuesto_sin_iva"].dropna() if not df.empty else pd.Series(dtype=float)
@@ -5329,10 +5339,12 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     )
     estados_disponibles = _estados_disponibles(df)
     min_d, max_d = _rango_fechas_disponible(df)
+    opciones_ccaa = opciones_filtro_buscador()
 
     st.session_state.setdefault(
         "buscador_niveles", [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL]
     )
+    st.session_state.setdefault("buscador_comunidades", [])
     st.session_state.setdefault("buscador_estados", list(ESTADOS_ABIERTOS_DEFAULT))
     st.session_state.setdefault("buscador_usar_fechas", False)
     st.session_state.setdefault("buscador_incluir_sin_fecha", True)
@@ -5350,6 +5362,14 @@ def pestana_buscador(df: pd.DataFrame) -> None:
         exp = str(aplicados_prev.get("expediente") or "").strip()
         if exp:
             partes_resumen.append(f"exp. {exp}")
+        ccaa = aplicados_prev.get("comunidades") or []
+        if ccaa:
+            if len(ccaa) <= 3:
+                partes_resumen.append("CCAA: " + ", ".join(ccaa))
+            else:
+                partes_resumen.append(f"CCAA: {len(ccaa)} seleccionadas")
+        else:
+            partes_resumen.append("CCAA: todas")
         estados = aplicados_prev.get("estados") or []
         if estados:
             partes_resumen.append("estado: " + ", ".join(estados))
@@ -5368,6 +5388,19 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 
     with st.expander("Filtros de búsqueda", expanded=False):
         with st.form("form_buscador_general", clear_on_submit=False):
+            st.multiselect(
+                "Comunidades / fuentes",
+                options=opciones_ccaa,
+                key="buscador_comunidades",
+                placeholder="Estatal + 17 CCAA (vacío = todas)",
+                help=(
+                    "Filtro territorial. Vacío = todas. "
+                    "Si incluye País Vasco (o está vacío), al pulsar Buscar "
+                    "también se consulta la API nativa de Euskadi. "
+                    "PLACSP cubre el resto vía sindicaciones 643/1044."
+                ),
+            )
+
             col_exp, col_admin = st.columns([2, 2])
             with col_exp:
                 st.text_input(
@@ -5473,6 +5506,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
         )
         st.session_state["buscador_filtros_aplicados"] = {
             "expediente": str(st.session_state.get("buscador_exp") or "").strip(),
+            "comunidades": list(st.session_state.get("buscador_comunidades") or []),
             "niveles_admin": list(st.session_state.get("buscador_niveles") or []),
             "estados": list(st.session_state.get("buscador_estados") or []),
             "ubicaciones": list(st.session_state.get("buscador_ubicaciones") or []),
@@ -5522,6 +5556,51 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 except Exception as exc:
                     st.warning(f"No se pudo leer el parquet: {exc}")
 
+    # Conector nativo País Vasco (solo al pulsar Buscar y si el filtro lo implica).
+    comunidades_sel = list(aplicados.get("comunidades") or [])
+    if debe_consultar_nativa(comunidades_sel, "País Vasco"):
+        with st.spinner("Consultando API País Vasco (Euskadi)…"):
+            try:
+                from modules import ingestion_euskadi
+
+                euskadi_df = ingestion_euskadi.fetch_euskadi_notices(
+                    max_pages=4, page_size=50
+                )
+                if not euskadi_df.empty:
+                    cpvs_activos = list(st.session_state.get("cpvs") or {})
+                    if isinstance(st.session_state.get("cpvs"), dict):
+                        cpvs_activos = list(st.session_state["cpvs"].keys())
+                    keywords_activas = flatten_keywords(
+                        st.session_state.get("keywords") or {}
+                    )
+                    conceptos_activos = [
+                        t
+                        for t in (st.session_state.get("catalogo_terminos") or [])
+                        if t.get("activo")
+                    ]
+                    euskadi_df = grefa_filter.score_licitaciones(
+                        euskadi_df,
+                        cpvs_activos,
+                        keywords_activas,
+                        conceptos=conceptos_activos,
+                    )
+                    partes = [base] if base is not None and not base.empty else []
+                    partes.append(euskadi_df)
+                    base = pd.concat(partes, ignore_index=True, sort=False)
+                    if "expediente" in base.columns:
+                        subset = (
+                            ["expediente", "url"]
+                            if "url" in base.columns
+                            else ["expediente"]
+                        )
+                        base = base.drop_duplicates(subset=subset, keep="first")
+                    st.caption(
+                        f"API Euskadi: **{len(euskadi_df):,}** anuncios recientes "
+                        f"({etiqueta_fuente('euskadi')})."
+                    )
+            except Exception as exc:
+                st.warning(f"API País Vasco no disponible: {exc}")
+
     fecha_desde = None
     fecha_hasta = None
     if aplicados.get("usar_fechas"):
@@ -5545,6 +5624,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
         incluir_sin_fecha=bool(aplicados.get("incluir_sin_fecha", True)),
         expediente=str(aplicados.get("expediente") or ""),
         niveles_admin=aplicados.get("niveles_admin"),
+        comunidades=aplicados.get("comunidades") or None,
     )
 
     q_exp = str(aplicados.get("expediente") or "").strip()
@@ -5584,13 +5664,33 @@ def pestana_buscador(df: pd.DataFrame) -> None:
 
     _render_resultados_con_interes(resultados, clave_prefix="busc")
 
+    columnas_tabla = [
+        "relevancia",
+        "categoria",
+        "expediente",
+        "titulo",
+        "organo_contratacion",
+        "comunidad_autonoma",
+        "fuente",
+        "nivel_administracion",
+        "presupuesto_sin_iva",
+        "ubicacion",
+        "tipo_contrato",
+        "cpvs_texto",
+        "fecha_actualizacion",
+        "fecha_limite",
+        "estado",
+        "url",
+    ]
+    vista_resultados = resultados
+    if "fuente" in vista_resultados.columns:
+        vista_resultados = vista_resultados.copy()
+        vista_resultados["fuente"] = vista_resultados["fuente"].map(
+            lambda v: etiqueta_fuente(str(v)) if v else "—"
+        )
     vista_tabla = _dataframe_con_compartir(
-        resultados,
-        [
-            "relevancia", "categoria", "expediente", "titulo", "organo_contratacion",
-            "nivel_administracion", "presupuesto_sin_iva", "ubicacion", "tipo_contrato", "cpvs_texto",
-            "fecha_actualizacion", "fecha_limite", "estado", "url",
-        ],
+        vista_resultados,
+        columnas_tabla,
         fuente_label="PLACSP",
     )
     with st.expander("Tabla completa", expanded=False):
@@ -5643,6 +5743,12 @@ def main_licitaciones(usuario=None) -> None:
     datos = st.session_state["datos"]
     if datos is None:
         datos = empty_dataframe()
+    elif ("fuente" not in datos.columns) or ("comunidad_autonoma" not in datos.columns):
+        # Sesiones cacheadas antes de fase 0 pueden no traer fuente/CCAA.
+        from config.ccaa_sources import enrich_comunidad_autonoma, enrich_fuente
+
+        datos = enrich_comunidad_autonoma(enrich_fuente(datos))
+        st.session_state["datos"] = datos
 
     if st.session_state["error_descarga"]:
         st.error(st.session_state["error_descarga"])
