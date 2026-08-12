@@ -207,6 +207,20 @@ CUSTOM_CSS = """
     section.main, .main .block-container {
         overflow: visible !important;
     }
+    /* Lista de tarjetas: scroll interno solo si supera el alto útil */
+    .tarjetas-lista-flag { display: none; }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.tarjetas-lista-flag) {
+        max-height: min(68vh, 780px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 0.45rem 0.65rem 0.55rem 0.65rem;
+        margin-top: 0.35rem;
+        margin-bottom: 0.5rem;
+        scroll-behavior: smooth;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.tarjetas-lista-flag) [data-testid="stVerticalBlock"] {
+        gap: 0.35rem;
+    }
     .badge {
         display: inline-block;
         padding: 0.15rem 0.6rem;
@@ -2766,31 +2780,37 @@ def _render_tarjetas_paginadas(
             st.rerun()
 
     pagina_df = df.iloc[inicio:fin]
-    if not group_by or group_by not in df.columns:
-        for _, fila in pagina_df.iterrows():
-            render_fila(fila)
-        return
 
-    etiquetas = (
-        df[group_by]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace("", "Sin comunidad")
-    )
-    conteos = etiquetas.value_counts()
-    prev_grupo: str | None = None
-    for _, fila in pagina_df.iterrows():
-        bruto = fila.get(group_by)
-        grupo = str(bruto or "").strip() or "Sin comunidad"
-        if grupo != prev_grupo:
-            n_grupo = int(conteos.get(grupo, 0))
-            st.markdown(f"### {grupo}")
-            st.caption(
-                f"{n_grupo} licitación{'es' if n_grupo != 1 else ''} en esta comunidad"
-            )
-            prev_grupo = grupo
-        render_fila(fila)
+    def _pintar_pagina() -> None:
+        if not group_by or group_by not in df.columns:
+            for _, fila in pagina_df.iterrows():
+                render_fila(fila)
+            return
+        etiquetas = (
+            df[group_by]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "Sin comunidad")
+        )
+        conteos = etiquetas.value_counts()
+        prev_grupo: str | None = None
+        for _, fila in pagina_df.iterrows():
+            bruto = fila.get(group_by)
+            grupo = str(bruto or "").strip() or "Sin comunidad"
+            if grupo != prev_grupo:
+                n_grupo = int(conteos.get(grupo, 0))
+                st.markdown(f"### {grupo}")
+                st.caption(
+                    f"{n_grupo} licitación{'es' if n_grupo != 1 else ''} en esta comunidad"
+                )
+                prev_grupo = grupo
+            render_fila(fila)
+
+    # Contenedor con scroll solo si el listado supera el alto (CSS max-height).
+    with st.container(border=True):
+        st.markdown('<span class="tarjetas-lista-flag"></span>', unsafe_allow_html=True)
+        _pintar_pagina()
 
 
 def _anos_candidatos_desde_expediente(texto: str) -> list[int]:
