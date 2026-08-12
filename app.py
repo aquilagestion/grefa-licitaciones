@@ -131,6 +131,7 @@ IngestionError = _ingestion.IngestionError
 empty_dataframe = _ingestion.empty_dataframe
 fetch_placsp_licitaciones = _ingestion.fetch_placsp_licitaciones
 parse_atom_bytes = _ingestion.parse_atom_bytes
+parse_atom_zip_bytes = getattr(_ingestion, "parse_atom_zip_bytes", None)
 # Compatibilidad si un redeploy parcial aún no expone los símbolos nuevos.
 PLACSP_FEED_643 = getattr(
     _ingestion,
@@ -604,6 +605,56 @@ def cargar_feed(url: str, max_pages: int, max_entries: int, token: int) -> pd.Da
     )
 
 
+def _dataframe_desde_historico_sheets() -> pd.DataFrame | None:
+    """Carga el histórico reciente de Sheets como sustituto si el feed vivo falla."""
+    if not sheets_store.is_configured():
+        return None
+    try:
+        from modules import sheets_historico
+
+        year = datetime.now().year
+        df = sheets_historico.load_historico_dataframe(
+            years=[year, year - 1], include_legacy=True
+        )
+    except Exception as exc:
+        st.session_state["_fallback_historico_error"] = str(exc)
+        return None
+    if df is None or df.empty:
+        return None
+
+    out = df.copy()
+    # Completar columnas mínimas del esquema de ingestión.
+    for col, default in (
+        ("presupuesto_con_iva", pd.NA),
+        ("fecha_actualizacion", ""),
+        ("ubicacion", ""),
+        ("cpvs", None),
+        ("cpvs_texto", ""),
+        ("tipo_contrato", ""),
+        ("descripcion", ""),
+        ("nif_adjudicatario", ""),
+        ("adjudicatario", ""),
+        ("documentos", None),
+        ("fuente", "placsp"),
+        ("comunidad_autonoma", ""),
+    ):
+        if col not in out.columns:
+            if col in {"cpvs", "documentos"}:
+                out[col] = [[] for _ in range(len(out))]
+            else:
+                out[col] = default
+    if "fecha_actualizacion" in out.columns:
+        vacios = out["fecha_actualizacion"].fillna("").astype(str).str.strip() == ""
+        if "fecha_snapshot" in out.columns and vacios.any():
+            out.loc[vacios, "fecha_actualizacion"] = out.loc[vacios, "fecha_snapshot"]
+    if "cpvs_texto" in out.columns and "cpvs_match" in out.columns:
+        vacios = out["cpvs_texto"].fillna("").astype(str).str.strip() == ""
+        out.loc[vacios, "cpvs_texto"] = out.loc[vacios, "cpvs_match"]
+    out.attrs["feed_url"] = "Historico Sheets (fallback PLACSP)"
+    out.attrs["origen"] = "historico_sheets"
+    return out
+
+
 def actualizar_datos() -> None:
     st.session_state["error_descarga"] = ""
     try:
@@ -617,9 +668,37 @@ def actualizar_datos() -> None:
         st.session_state["origen_datos"] = df.attrs.get("feed_url", st.session_state["feed_url"])
         st.session_state["ultima_actualizacion"] = datetime.now()
     except IngestionError as exc:
-        st.session_state["error_descarga"] = str(exc)
+        # Fallback: sync diaria deja datos en Historico_YYYY.
+        fallback = _dataframe_desde_historico_sheets()
+        if fallback is not None and not fallback.empty:
+            st.session_state["datos"] = fallback
+            st.session_state["origen_datos"] = fallback.attrs.get(
+                "feed_url", "Historico Sheets"
+            )
+            st.session_state["ultima_actualizacion"] = datetime.now()
+            st.session_state["error_descarga"] = (
+                f"Feed PLACSP en vivo no disponible ({exc}). "
+                f"Se cargaron **{len(fallback):,}** filas del histórico de Sheets "
+                "(sync diaria). Puedes seguir trabajando; para datos vivos sube un ATOM/ZIP."
+            )
+        else:
+            st.session_state["error_descarga"] = str(exc)
     except Exception as exc:  # errores de red inesperados
-        st.session_state["error_descarga"] = f"Error inesperado al descargar el feed: {exc}"
+        fallback = _dataframe_desde_historico_sheets()
+        if fallback is not None and not fallback.empty:
+            st.session_state["datos"] = fallback
+            st.session_state["origen_datos"] = fallback.attrs.get(
+                "feed_url", "Historico Sheets"
+            )
+            st.session_state["ultima_actualizacion"] = datetime.now()
+            st.session_state["error_descarga"] = (
+                f"Error de red al descargar PLACSP ({exc}). "
+                f"Usando histórico Sheets ({len(fallback):,} filas)."
+            )
+        else:
+            st.session_state["error_descarga"] = (
+                f"Error inesperado al descargar el feed: {exc}"
+            )
 
 
 def cargar_datos_con_indicador() -> None:
@@ -2183,12 +2262,29 @@ def sidebar_fuente_datos() -> None:
         st.session_state["cargando_datos"] = True
         st.rerun()
 
-    with st.sidebar.expander("Cargar fichero ATOM local"):
-        fichero = st.file_uploader("Archivo .atom / .xml", type=["atom", "xml"], key="uploader")
+    with st.sidebar.expander("Cargar fichero ATOM / ZIP local"):
+        st.caption(
+            "Si PLACSP bloquea la descarga automática, sube el `.atom` o el `.zip` "
+            "oficial de sindicación 643/1044."
+        )
+        fichero = st.file_uploader(
+            "Archivo .atom / .xml / .zip",
+            type=["atom", "xml", "zip"],
+            key="uploader",
+        )
         if fichero is not None and st.button("Procesar fichero", width="stretch"):
             try:
-                with st.spinner("Procesando fichero ATOM…"):
-                    df = parse_atom_bytes(fichero.getvalue())
+                with st.spinner("Procesando fichero…"):
+                    bruto = fichero.getvalue()
+                    nombre = (fichero.name or "").lower()
+                    if nombre.endswith(".zip") or bruto[:2] == b"PK":
+                        if parse_atom_zip_bytes is None:
+                            raise RuntimeError(
+                                "Este despliegue aún no incluye parseo ZIP; sube un .atom."
+                            )
+                        df = parse_atom_zip_bytes(bruto)
+                    else:
+                        df = parse_atom_bytes(bruto)
                 st.session_state["datos"] = df
                 st.session_state["origen_datos"] = f"Fichero local: {fichero.name}"
                 st.session_state["ultima_actualizacion"] = datetime.now()

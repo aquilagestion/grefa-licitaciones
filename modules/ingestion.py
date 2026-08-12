@@ -90,27 +90,33 @@ ATOM_NS = "http://www.w3.org/2005/Atom"
 
 #: Feed histórico de la especificación del proyecto (hoy suele devolver 404).
 PRIMARY_FEED_URL = (
-    "https://contrataciondelestado.es/sourcing/licitaciones/ATOM/licitaciones.atom"
+    "https://contrataciondelsectorpublico.gob.es/sourcing/licitaciones/ATOM/licitaciones.atom"
 )
 
-#: Perfiles de contratante alojados en la propia PLACSP.
+#: Perfiles de contratante alojados en la propia PLACSP (host canónico .gob.es).
 PLACSP_FEED_643 = (
-    "https://contrataciondelestado.es/sindicacion/sindicacion_643/"
+    "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_643/"
     "licitacionesPerfilesContratanteCompleto3.atom"
 )
 
 #: Plataformas autonómicas agregadas (sin menores). Se prueba la `_3` primero.
 PLACSP_FEEDS_1044: tuple[str, ...] = (
+    "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_1044/"
+    "PlataformasAgregadasSinMenores_3.atom",
+    "https://contrataciondelsectorpublico.gob.es/sindicacion/sindicacion_1044/"
+    "PlataformasAgregadasSinMenores.atom",
     "https://contrataciondelestado.es/sindicacion/sindicacion_1044/"
     "PlataformasAgregadasSinMenores_3.atom",
-    "https://contrataciondelestado.es/sindicacion/sindicacion_1044/"
-    "PlataformasAgregadasSinMenores.atom",
 )
 
 #: Alias de compatibilidad: orden de prueba si se pide un único feed.
 FALLBACK_FEED_URLS: tuple[str, ...] = (PLACSP_FEED_643, *PLACSP_FEEDS_1044)
 
-USER_AGENT = "GREFA-Licitaciones/1.0 (monitorizacion de licitaciones publicas)"
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; GREFA-Licitaciones/1.1; "
+    "+https://github.com/aquilagestion/grefa-licitaciones) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 REQUEST_TIMEOUT = 60
 
 #: Esquema del DataFrame devuelto por el módulo.
@@ -618,20 +624,100 @@ def build_dataframe(
 # ---------------------------------------------------------------------------
 def _http_session(session: requests.Session | None = None) -> requests.Session:
     sesion = session or requests.Session()
-    sesion.headers.update({"User-Agent": USER_AGENT, "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8"})
+    sesion.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.5",
+            "Referer": "https://contrataciondelsectorpublico.gob.es/",
+        }
+    )
     return sesion
+
+
+def _diagnostico_respuesta_feed(raw: bytes) -> str | None:
+    """Si la respuesta no es ATOM usable, devuelve un mensaje corto; si no, ``None``."""
+    if not raw or not raw.strip():
+        return "respuesta vacía"
+    cabeza = raw.lstrip()[:800].lower()
+    texto = raw.decode("utf-8", errors="replace")
+    if b"request rejected" in cabeza or "request rejected" in texto[:2000].lower():
+        return (
+            "WAF/firewall PLACSP rechazó la petición (Request Rejected). "
+            "Desde Streamlit Cloud a veces no se puede; usa el histórico de Sheets "
+            "o sube un .atom/.zip local."
+        )
+    if b"bobcmn" in cabeza or b"apm_do_not_touch" in cabeza:
+        return (
+            "PLACSP exige un desafío anti-bot (JavaScript). "
+            "La descarga automática no es posible desde este servidor; "
+            "usa sync diaria (GitHub Actions), histórico Sheets o fichero local."
+        )
+    if cabeza.startswith(b"<!doctype") or cabeza.startswith(b"<html"):
+        return (
+            "PLACSP devolvió HTML en lugar de ATOM (posible bloqueo WAF). "
+            "Prueba fichero local o el histórico de la sync diaria."
+        )
+    return None
 
 
 def _download(url: str, session: requests.Session) -> bytes:
     respuesta = session.get(url, timeout=REQUEST_TIMEOUT)
     respuesta.raise_for_status()
-    return respuesta.content
+    raw = respuesta.content
+    problema = _diagnostico_respuesta_feed(raw)
+    if problema:
+        raise IngestionError(f"{url} → {problema}")
+    return raw
 
 
 def parse_atom_bytes(raw: bytes, *, fuente: str = FUENTE_PLACSP_LOCAL) -> pd.DataFrame:
     """Parsea un fichero ATOM ya descargado (útil para trabajar sin conexión)."""
+    problema = _diagnostico_respuesta_feed(raw)
+    if problema and not raw.lstrip().startswith(b"<?xml") and b"<feed" not in raw[:2000]:
+        raise IngestionError(problema)
     registros, _ = _parse_feed_bytes(raw)
     return build_dataframe(registros, fuente_default=fuente)
+
+
+def parse_atom_zip_bytes(raw: bytes, *, fuente: str = FUENTE_PLACSP_LOCAL) -> pd.DataFrame:
+    """Parsea un ZIP oficial PLACSP (varios .atom) y concatena entradas."""
+    import zipfile
+    from io import BytesIO
+
+    try:
+        with zipfile.ZipFile(BytesIO(raw)) as zf:
+            nombres = [
+                n
+                for n in zf.namelist()
+                if n.lower().endswith((".atom", ".xml")) and not n.endswith("/")
+            ]
+            if not nombres:
+                raise IngestionError("El ZIP no contiene ficheros .atom/.xml.")
+            # Preferir el atom "base" (sin sufijo _NNNN) si existe.
+            nombres.sort(
+                key=lambda n: (
+                    0 if n.lower().endswith("licitacionesperfilescontratantecompleto3.atom") else 1,
+                    len(n),
+                    n,
+                )
+            )
+            partes: list[pd.DataFrame] = []
+            for nombre in nombres[:12]:
+                with zf.open(nombre) as fh:
+                    df = parse_atom_bytes(fh.read(), fuente=fuente)
+                if not df.empty:
+                    partes.append(df)
+            if not partes:
+                raise IngestionError("ZIP leído pero sin entradas ATOM utilizables.")
+            out = pd.concat(partes, ignore_index=True, sort=False)
+            if "expediente" in out.columns:
+                subset = ["expediente", "url"] if "url" in out.columns else ["expediente"]
+                out = out.drop_duplicates(subset=subset, keep="first")
+            out.attrs["origen"] = "zip_local"
+            return out.reset_index(drop=True)
+    except zipfile.BadZipFile as exc:
+        raise IngestionError(f"ZIP inválido: {exc}") from exc
 
 
 def _fetch_feed_registros(
@@ -736,7 +822,9 @@ def fetch_placsp_licitaciones(
                     pags_643,
                 )
             else:
-                errores.append(f"{PLACSP_FEED_643} -> el feed no contiene entradas")
+                errores.append(
+                    f"{PLACSP_FEED_643} -> ATOM sin entradas (¿bloqueo WAF?)"
+                )
         except (requests.RequestException, IngestionError) as exc:
             errores.append(f"{PLACSP_FEED_643} -> {exc}")
             LOGGER.warning("Feed 643 no disponible: %s", exc)
@@ -762,7 +850,7 @@ def fetch_placsp_licitaciones(
                         pags_1044,
                     )
                     break
-                errores.append(f"{url_1044} -> el feed no contiene entradas")
+                errores.append(f"{url_1044} -> ATOM sin entradas (¿bloqueo WAF?)")
             except (requests.RequestException, IngestionError) as exc:
                 errores.append(f"{url_1044} -> {exc}")
                 LOGGER.warning("Feed 1044 no disponible (%s): %s", url_1044, exc)
@@ -800,8 +888,12 @@ def fetch_placsp_licitaciones(
 
         detalle = "\n".join(f"  · {mensaje}" for mensaje in errores)
         raise IngestionError(
-            "No se pudo obtener ninguna licitación de la PLACSP.\n"
-            f"Sindicaciones 643/1044 probadas:\n{detalle}"
+            "No se pudo obtener ninguna licitación de la PLACSP en vivo.\n"
+            "Causa habitual: el firewall anti-bot de PLACSP bloquea Streamlit Cloud "
+            "(aunque la sync de GitHub Actions sí suele funcionar).\n"
+            "Alternativas: «Sync histórico ahora» / pestaña Histórico, "
+            "o «Cargar fichero ATOM/ZIP local» en la barra lateral.\n"
+            f"Detalle:\n{detalle}"
         )
 
     # Modo feed único (URL explícita de sindicación o personalizada).
