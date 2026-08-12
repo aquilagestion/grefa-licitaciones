@@ -8,8 +8,18 @@ from typing import Any
 
 import pandas as pd
 
-from config.ccaa_sources import debe_consultar_nativa, etiqueta_fuente
 from modules.ingestion import empty_dataframe
+
+try:
+    from config.ccaa_sources import debe_consultar_nativa, etiqueta_fuente
+except ImportError:  # redeploy parcial
+
+    def debe_consultar_nativa(comunidades, ccaa_nombre: str) -> bool:
+        seleccion = [str(c).strip() for c in (comunidades or []) if str(c).strip()]
+        return (not seleccion) or (ccaa_nombre in seleccion)
+
+    def etiqueta_fuente(fuente: str) -> str:
+        return str(fuente or "").strip() or "—"
 
 LOGGER = logging.getLogger(__name__)
 

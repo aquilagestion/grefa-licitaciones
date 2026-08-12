@@ -10,9 +10,13 @@ from typing import Any
 import pandas as pd
 import requests
 
-from config.ccaa_sources import FUENTE_NAVARRA
 from modules.ccaa_common import cpvs_desde_texto, map_estado, texto, to_float_eu
 from modules.ingestion import USER_AGENT, build_dataframe, empty_dataframe
+
+try:
+    from config.ccaa_sources import FUENTE_NAVARRA
+except ImportError:  # redeploy parcial en Streamlit Cloud
+    FUENTE_NAVARRA = "navarra"
 
 LOGGER = logging.getLogger(__name__)
 

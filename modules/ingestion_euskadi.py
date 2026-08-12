@@ -14,8 +14,12 @@ from typing import Any
 import pandas as pd
 import requests
 
-from config.ccaa_sources import FUENTE_EUSKADI
 from modules.ingestion import USER_AGENT, build_dataframe, empty_dataframe
+
+try:
+    from config.ccaa_sources import FUENTE_EUSKADI
+except ImportError:  # redeploy parcial en Streamlit Cloud
+    FUENTE_EUSKADI = "euskadi"
 
 LOGGER = logging.getLogger(__name__)
 

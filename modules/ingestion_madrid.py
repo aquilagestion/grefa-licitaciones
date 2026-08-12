@@ -9,9 +9,13 @@ import feedparser
 import pandas as pd
 import requests
 
-from config.ccaa_sources import FUENTE_MADRID
 from modules.ccaa_common import cpvs_desde_texto, map_estado, texto, to_float_eu
 from modules.ingestion import USER_AGENT, build_dataframe, empty_dataframe
+
+try:
+    from config.ccaa_sources import FUENTE_MADRID
+except ImportError:  # redeploy parcial en Streamlit Cloud
+    FUENTE_MADRID = "madrid"
 
 LOGGER = logging.getLogger(__name__)
 
