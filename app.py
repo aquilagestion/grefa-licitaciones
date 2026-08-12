@@ -1810,43 +1810,6 @@ def panel_control_superior(
         with s5:
             _celda_par("Criterios", f"{n_cpv} CPV · {n_conceptos}")
 
-        # ── 1. Búsqueda estandarizada GREFA (CPV · Términos) ──
-        st.markdown('<span class="bloque-estandar-flag"></span>', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="bloque-seccion-titulo">Búsqueda estandarizada GREFA</p>',
-            unsafe_allow_html=True,
-        )
-        c_cpv, c_term = st.columns(2, gap="small")
-        with c_cpv:
-            st.markdown('<span class="col-filtros-flag"></span>', unsafe_allow_html=True)
-            _fila_popover("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog)
-        with c_term:
-            _fila_popover("Términos", f"Término · {n_terms}", render_term_catalog)
-        st.markdown(
-            f'<p class="resumen-filtros">{_resumen_busqueda_estandar_borrador(n_cpv_activos, n_terms)}</p>',
-            unsafe_allow_html=True,
-        )
-        _, c_lim_e, c_bus_e = st.columns([6.2, 0.55, 0.6], gap="small")
-        with c_lim_e:
-            if st.button("Limpiar", key="btn_limpiar_estandar", width="stretch"):
-                _limpiar_busqueda_estandar()
-                st.rerun()
-        with c_bus_e:
-            if st.button("🔍 Buscar GREFA", key="btn_buscar_estandar", type="primary", width="stretch"):
-                _aplicar_busqueda_estandar()
-                st.rerun()
-
-        # ── 2. Búsqueda libre (formulario: no rerun al tocar widgets) ──
-        st.markdown('<span class="bloque-libre-flag"></span>', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="bloque-seccion-titulo">Búsqueda libre</p>',
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            "Ajusta Estado, fechas, relevancia y categorías; los resultados "
-            "solo se actualizan al pulsar **Buscar**."
-        )
-
         minimo = int(
             st.session_state.get("opp_min_relevancia_aplicado", MEDIUM_RELEVANCE_THRESHOLD)
         )
@@ -1864,79 +1827,134 @@ def panel_control_superior(
                 st.session_state.get("opp_categorias_aplicadas") or ["Alta", "Media"]
             )
 
-        with st.form("form_busqueda_libre", border=False, clear_on_submit=False):
-            _render_fechas_inline(df, en_formulario=True)
+        st.caption(
+            f"{_resumen_busqueda_estandar_borrador(n_cpv_activos, n_terms)} · "
+            f"{_resumen_busqueda_libre_borrador()}"
+        )
 
-            col_izq, col_der = st.columns([1.55, 1], gap="small")
-            with col_izq:
-                ce, cv = st.columns([0.34, 0.66], gap="small")
-                with ce:
-                    _celda_etiqueta("Rel. mín. %")
-                with cv:
-                    st.slider(
-                        "Relevancia mínima",
-                        min_value=0,
-                        max_value=100,
-                        step=5,
-                        key="opp_min_relevancia",
-                        label_visibility="collapsed",
-                    )
-                ce, cv = st.columns([0.34, 0.66], gap="small")
-                with ce:
-                    _celda_etiqueta("Vista")
-                with cv:
-                    st.radio(
-                        "Vista",
-                        ["Tarjetas", "Tabla"],
-                        horizontal=True,
-                        key="opp_vista",
-                        label_visibility="collapsed",
-                    )
-                ce, cv = st.columns([0.34, 0.66], gap="small")
-                with ce:
-                    _celda_etiqueta("Categorías")
-                with cv:
-                    st.multiselect(
-                        "Categorías",
-                        options=["Alta", "Media", "Baja"],
-                        key="opp_categorias_borrador",
-                        label_visibility="collapsed",
-                    )
-
-            with col_der:
-                st.markdown('<div class="opp-stats-spacer"></div>', unsafe_allow_html=True)
-                o1, o2, o3 = st.columns(3, gap="small")
-                with o1:
-                    _celda_par(
-                        "Oportunidades", str(resumen_opp["total"] if resumen_opp else 0)
-                    )
-                with o2:
-                    _celda_par("Alta", str(resumen_opp["alta"] if resumen_opp else 0))
-                with o3:
-                    _celda_par("Importe", importe_opp)
-
+        with st.expander("Filtros y búsqueda", expanded=False):
+            # ── 1. Búsqueda estandarizada GREFA (CPV · Términos) ──
+            st.markdown('<span class="bloque-estandar-flag"></span>', unsafe_allow_html=True)
             st.markdown(
-                f'<p class="resumen-filtros">{_resumen_busqueda_libre_borrador()}</p>',
+                '<p class="bloque-seccion-titulo">Búsqueda estandarizada GREFA</p>',
                 unsafe_allow_html=True,
             )
-            st.markdown('<span class="fila-buscar-flag"></span>', unsafe_allow_html=True)
-            _, c_lim_l, c_bus_l = st.columns([6.2, 0.55, 0.6], gap="small")
-            with c_lim_l:
-                limpiar_libre = st.form_submit_button("Limpiar", width="stretch")
-            with c_bus_l:
-                buscar_libre = st.form_submit_button(
-                    "🔍 Buscar", type="primary", width="stretch"
-                )
+            c_cpv, c_term = st.columns(2, gap="small")
+            with c_cpv:
+                st.markdown('<span class="col-filtros-flag"></span>', unsafe_allow_html=True)
+                _fila_popover("CPV", f"CPV · {n_cpv_activos}", render_cpv_catalog)
+            with c_term:
+                _fila_popover("Términos", f"Término · {n_terms}", render_term_catalog)
+            st.markdown(
+                f'<p class="resumen-filtros">{_resumen_busqueda_estandar_borrador(n_cpv_activos, n_terms)}</p>',
+                unsafe_allow_html=True,
+            )
+            _, c_lim_e, c_bus_e = st.columns([6.2, 0.55, 0.6], gap="small")
+            with c_lim_e:
+                if st.button("Limpiar", key="btn_limpiar_estandar", width="stretch"):
+                    _limpiar_busqueda_estandar()
+                    st.rerun()
+            with c_bus_e:
+                if st.button(
+                    "🔍 Buscar GREFA",
+                    key="btn_buscar_estandar",
+                    type="primary",
+                    width="stretch",
+                ):
+                    _aplicar_busqueda_estandar()
+                    st.rerun()
 
-        if limpiar_libre:
-            _limpiar_busqueda_libre()
-            st.rerun()
-        if buscar_libre:
-            error = _aplicar_busqueda_libre()
-            if error:
-                st.error(error)
-            else:
+            # ── 2. Búsqueda libre (formulario: no rerun al tocar widgets) ──
+            st.markdown('<span class="bloque-libre-flag"></span>', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="bloque-seccion-titulo">Búsqueda libre</p>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Ajusta Estado, fechas, relevancia y categorías; los resultados "
+                "solo se actualizan al pulsar **Buscar**."
+            )
+
+            with st.form("form_busqueda_libre", border=False, clear_on_submit=False):
+                _render_fechas_inline(df, en_formulario=True)
+
+                col_izq, col_der = st.columns([1.55, 1], gap="small")
+                with col_izq:
+                    ce, cv = st.columns([0.34, 0.66], gap="small")
+                    with ce:
+                        _celda_etiqueta("Rel. mín. %")
+                    with cv:
+                        st.slider(
+                            "Relevancia mínima",
+                            min_value=0,
+                            max_value=100,
+                            step=5,
+                            key="opp_min_relevancia",
+                            label_visibility="collapsed",
+                        )
+                    ce, cv = st.columns([0.34, 0.66], gap="small")
+                    with ce:
+                        _celda_etiqueta("Vista")
+                    with cv:
+                        st.radio(
+                            "Vista",
+                            ["Tarjetas", "Tabla"],
+                            horizontal=True,
+                            key="opp_vista",
+                            label_visibility="collapsed",
+                        )
+                    ce, cv = st.columns([0.34, 0.66], gap="small")
+                    with ce:
+                        _celda_etiqueta("Categorías")
+                    with cv:
+                        st.multiselect(
+                            "Categorías",
+                            options=["Alta", "Media", "Baja"],
+                            key="opp_categorias_borrador",
+                            label_visibility="collapsed",
+                        )
+
+                with col_der:
+                    st.markdown(
+                        '<div class="opp-stats-spacer"></div>', unsafe_allow_html=True
+                    )
+                    o1, o2, o3 = st.columns(3, gap="small")
+                    with o1:
+                        _celda_par(
+                            "Oportunidades",
+                            str(resumen_opp["total"] if resumen_opp else 0),
+                        )
+                    with o2:
+                        _celda_par(
+                            "Alta", str(resumen_opp["alta"] if resumen_opp else 0)
+                        )
+                    with o3:
+                        _celda_par("Importe", importe_opp)
+
+                st.markdown(
+                    f'<p class="resumen-filtros">{_resumen_busqueda_libre_borrador()}</p>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    '<span class="fila-buscar-flag"></span>', unsafe_allow_html=True
+                )
+                _, c_lim_l, c_bus_l = st.columns([6.2, 0.55, 0.6], gap="small")
+                with c_lim_l:
+                    limpiar_libre = st.form_submit_button("Limpiar", width="stretch")
+                with c_bus_l:
+                    buscar_libre = st.form_submit_button(
+                        "🔍 Buscar", type="primary", width="stretch"
+                    )
+
+            if limpiar_libre:
+                _limpiar_busqueda_libre()
                 st.rerun()
+            if buscar_libre:
+                error = _aplicar_busqueda_libre()
+                if error:
+                    st.error(error)
+                else:
+                    st.rerun()
 
     vista = str(st.session_state.get("opp_vista") or "Tarjetas")
     return oportunidades, vista
