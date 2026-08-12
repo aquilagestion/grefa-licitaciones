@@ -964,22 +964,13 @@ def _render_resultados_con_interes(
         return
 
     st.markdown('<span class="resultados-buscador-flag"></span>', unsafe_allow_html=True)
-    st.toggle(
-        "Traducir títulos al español",
-        key="traducir_titulos_es",
-        help=(
-            "Muestra el título en castellano y el original debajo "
-            "(euskera, catalán/valenciano, gallego…)."
-        ),
-    )
     st.caption(
-        "Usa **⭐ A Mis Licitaciones** para guardarla en esa pestaña, "
-        "o **📝 Preparar docs** para abrir el asistente. "
-        "Navegación de **5 en 5**."
+        "Usa **⭐ A Mis Licitaciones** / **📝 Preparar docs**. "
+        "Navegación de **5 en 5**. "
+        "Traduce solo las que te interesen con **🌐 Traducir al español**."
     )
 
     interes = _claves_interes()
-    traducir = bool(st.session_state.get("traducir_titulos_es"))
 
     def _una(fila: pd.Series) -> None:
         clave = _clave_expediente(
@@ -987,9 +978,12 @@ def _render_resultados_con_interes(
         )
         marcado = clave in interes
         exp = fila.get("expediente") or "—"
-        tit_es, tit_orig = _titulos_para_mostrar(
-            str(fila.get("titulo") or ""), traducir=traducir
+        titulo_original = str(fila.get("titulo") or "").strip()
+        titulo_es = _titulo_traducido_activo(clave)
+        mostrar_trad = bool(
+            titulo_es and titulo_es.casefold() != titulo_original.casefold()
         )
+        tit_vista = titulo_es if mostrar_trad else titulo_original
         organo = str(fila.get("organo_contratacion") or "")[:80]
         meta = " · ".join(
             x
@@ -1000,62 +994,60 @@ def _render_resultados_con_interes(
             )
             if x
         )
-        st.markdown(
-            f"<p class='tarjeta-titulo-completo'><strong>{html.escape(str(exp))}</strong> — "
-            f"{html.escape(tit_es)}</p>",
-            unsafe_allow_html=True,
-        )
-        if tit_orig:
-            st.markdown(
-                f"<p class='titulo-original'><em>Original:</em> {html.escape(tit_orig)}</p>",
-                unsafe_allow_html=True,
-            )
-        if meta:
-            st.caption(meta)
-        if fila.get("url"):
-            st.markdown(f"[PLACSP ↗]({fila.get('url')})")
-        c_mis, c_prep, c_share = st.columns(3)
-        with c_mis:
-            etiqueta_mis = (
-                "⭐ Ya en Mis Licitaciones" if marcado else "⭐ A Mis Licitaciones"
-            )
-            if st.button(
-                etiqueta_mis,
-                key=f"mis_from_{clave_prefix}_{clave[:36]}",
-                type="primary" if not marcado else "secondary",
-                width="stretch",
-                help="Incluir o quitar de Mis Licitaciones",
-            ):
-                try:
-                    _marcar_interes(fila, interesa=not marcado)
-                    st.toast(
-                        "Añadida a Mis Licitaciones."
-                        if not marcado
-                        else "Quitada de Mis Licitaciones.",
-                        icon="⭐" if not marcado else "🗑️",
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-        with c_prep:
-            if st.button(
-                "📝 Preparar docs",
-                key=f"prep_from_{clave_prefix}_{clave[:36]}",
-                width="stretch",
-                help="Abrir asistente de documentación con este expediente",
-            ):
-                _abrir_preparar_docs(
-                    str(fila.get("expediente") or ""),
-                    titulo=str(fila.get("titulo") or ""),
-                    organo=str(fila.get("organo_contratacion") or ""),
-                    url=str(fila.get("url") or ""),
+        with st.container(border=True):
+            st.markdown(f"**{exp}** — {tit_vista}")
+            if mostrar_trad:
+                st.caption(f"Original: {titulo_original}")
+            if meta:
+                st.caption(meta)
+            if fila.get("url"):
+                st.markdown(f"[PLACSP ↗]({fila.get('url')})")
+            c_trad, c_mis, c_prep, c_share = st.columns(4)
+            with c_trad:
+                _boton_traducir_titulo(
+                    clave, titulo_original, key_prefix=clave_prefix
                 )
-        with c_share:
-            ui_compartir.render_compartir(
-                fila,
-                key=f"share_from_{clave_prefix}_{clave[:36]}",
-                fuente_label="PLACSP",
-            )
+            with c_mis:
+                etiqueta_mis = (
+                    "⭐ Ya en Mis Licitaciones" if marcado else "⭐ A Mis Licitaciones"
+                )
+                if st.button(
+                    etiqueta_mis,
+                    key=f"mis_from_{clave_prefix}_{clave[:36]}",
+                    type="primary" if not marcado else "secondary",
+                    width="stretch",
+                    help="Incluir o quitar de Mis Licitaciones",
+                ):
+                    try:
+                        _marcar_interes(fila, interesa=not marcado)
+                        st.toast(
+                            "Añadida a Mis Licitaciones."
+                            if not marcado
+                            else "Quitada de Mis Licitaciones.",
+                            icon="⭐" if not marcado else "🗑️",
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+            with c_prep:
+                if st.button(
+                    "📝 Preparar docs",
+                    key=f"prep_from_{clave_prefix}_{clave[:36]}",
+                    width="stretch",
+                    help="Abrir asistente de documentación con este expediente",
+                ):
+                    _abrir_preparar_docs(
+                        str(fila.get("expediente") or ""),
+                        titulo=str(fila.get("titulo") or ""),
+                        organo=str(fila.get("organo_contratacion") or ""),
+                        url=str(fila.get("url") or ""),
+                    )
+            with c_share:
+                ui_compartir.render_compartir(
+                    fila,
+                    key=f"share_from_{clave_prefix}_{clave[:36]}",
+                    fuente_label="PLACSP",
+                )
 
     _render_tarjetas_paginadas(
         resultados,
@@ -1063,6 +1055,7 @@ def _render_resultados_con_interes(
         page_size=page_size,
         key=f"{clave_prefix}_tarjetas_page",
     )
+
 
 
 def _cargar_seguimiento_cache() -> dict:
@@ -1603,25 +1596,69 @@ def _cache_titulo_es(titulo: str) -> str:
     return str(cache[bruto] or bruto)
 
 
-def _titulos_para_mostrar(titulo: str, *, traducir: bool) -> tuple[str, str]:
-    """Devuelve (titulo_principal, titulo_original_o_vacio)."""
-    original = str(titulo or "").strip() or "(Sin título en el expediente)"
-    if not traducir:
-        return original, ""
-    es = _cache_titulo_es(original)
-    if not es or es.casefold() == original.casefold():
-        return original, ""
-    return es, original
+def _titulo_traducido_activo(clave: str) -> str:
+    """Traducción ES ya pedida para esta tarjeta (vacío si no se ha traducido)."""
+    activos = st.session_state.get("_titulos_es_activos") or {}
+    return str(activos.get(clave) or "").strip()
+
+
+def _activar_traduccion_titulo(clave: str, titulo: str) -> None:
+    trad = _cache_titulo_es(titulo)
+    activos = st.session_state.setdefault("_titulos_es_activos", {})
+    activos[clave] = trad or str(titulo or "").strip()
+
+
+def _desactivar_traduccion_titulo(clave: str) -> None:
+    activos = st.session_state.setdefault("_titulos_es_activos", {})
+    activos.pop(clave, None)
+
+
+def _boton_traducir_titulo(
+    clave: str,
+    titulo: str,
+    *,
+    key_prefix: str,
+) -> None:
+    """Botón por tarjeta: traduce solo este título bajo demanda."""
+    original = str(titulo or "").strip()
+    if not original:
+        return
+    ya = _titulo_traducido_activo(clave)
+    if ya and ya.casefold() != original.casefold():
+        if st.button(
+            "🔤 Ver original",
+            key=f"trad_off_{key_prefix}_{clave[:36]}",
+            width="stretch",
+            help="Volver a mostrar el título en el idioma original",
+        ):
+            _desactivar_traduccion_titulo(clave)
+            st.rerun()
+        return
+    if st.button(
+        "🌐 Traducir al español",
+        key=f"trad_on_{key_prefix}_{clave[:36]}",
+        width="stretch",
+        help="Traduce solo este título (euskera/catalán/gallego/valenciano → ES)",
+    ):
+        with st.spinner("Traduciendo…"):
+            _activar_traduccion_titulo(clave, original)
+        st.rerun()
 
 
 def tarjeta_licitacion(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     cpvs = list(fila.get("cpvs") or [])[:8]
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
-    traducir = bool(st.session_state.get("traducir_titulos_es"))
-    titulo_es, titulo_orig = _titulos_para_mostrar(
-        str(fila.get("titulo") or ""), traducir=traducir
+    clave_card = _clave_expediente(
+        str(fila.get("expediente") or ""), str(fila.get("url") or "")
     )
+    titulo_original = str(fila.get("titulo") or "").strip() or "(Sin título en el expediente)"
+    titulo_es = _titulo_traducido_activo(clave_card)
+    mostrar_traduccion = bool(
+        titulo_es and titulo_es.casefold() != titulo_original.casefold()
+    )
+    titulo_vista = titulo_es if mostrar_traduccion else titulo_original
+
     organo = str(fila.get("organo_contratacion") or "—")
     ubicacion = str(fila.get("ubicacion") or "—")
     estado = str(fila.get("estado") or "—")
@@ -1638,9 +1675,9 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
             f"{nivel['emoji']} **{fila.get('badge') or fila.get('categoria') or '—'}** · "
             f"{fila.get('relevancia', '—')}% · {fecha}"
         )
-        st.markdown(f"#### {titulo_es}")
-        if titulo_orig:
-            st.caption(f"Original: {titulo_orig}")
+        st.markdown(f"#### {titulo_vista}")
+        if mostrar_traduccion:
+            st.caption(f"Original: {titulo_original}")
         st.markdown(f"**Órgano:** {organo}")
         st.caption(
             f"Presupuesto (sin IVA): {importe} · Ubicación: {ubicacion} · Estado: {estado}"
@@ -1653,14 +1690,19 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
         if cpvs:
             st.caption("CPV: " + " · ".join(str(c) for c in cpvs))
 
-    clave_card = _clave_expediente(
-        str(fila.get("expediente") or ""), str(fila.get("url") or "")
-    )
     en_mis = clave_card in _claves_interes()
-    col_enlace, col_share, col_mis, col_prep, col_motivo = st.columns([1, 1, 1, 1, 1.5])
+    col_enlace, col_trad, col_share, col_mis, col_prep, col_motivo = st.columns(
+        [1, 1, 1, 1, 1, 1.4]
+    )
     with col_enlace:
         if fila.get("url"):
             st.link_button("Ver en PLACSP ↗", fila["url"], width="stretch")
+    with col_trad:
+        _boton_traducir_titulo(
+            clave_card,
+            titulo_original,
+            key_prefix="card",
+        )
     with col_share:
         ui_compartir.render_compartir(
             fila, key=f"share_card_{clave_card[:40]}", fuente_label="PLACSP"
@@ -2560,13 +2602,8 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
     botones_exportacion(oportunidades, "oportunidades", permitir_sheets=True)
 
     if vista == "Tarjetas":
-        st.toggle(
-            "Traducir títulos al español",
-            key="traducir_titulos_es",
-            help=(
-                "Muestra el título en castellano y el original debajo "
-                "(euskera, catalán/valenciano, gallego…)."
-            ),
+        st.caption(
+            "Traduce solo las que te interesen con **🌐 Traducir al español** en cada tarjeta."
         )
         _render_tarjetas_paginadas(
             oportunidades,
