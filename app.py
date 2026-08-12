@@ -2289,19 +2289,12 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
     botones_exportacion(oportunidades, "oportunidades", permitir_sheets=True)
 
     if vista == "Tarjetas":
-        total = len(oportunidades)
-        if total > 5:
-            tope = min(total, 60)
-            a_mostrar = st.slider("Nº de tarjetas a mostrar", 5, tope, min(15, tope), step=5)
-        else:
-            a_mostrar = total
-        for _, fila in oportunidades.head(a_mostrar).iterrows():
-            tarjeta_licitacion(fila)
-        if total > a_mostrar:
-            st.caption(
-                f"Mostrando {a_mostrar} de {total} oportunidades. "
-                "Usa la vista de tabla o exporta el listado completo."
-            )
+        _render_tarjetas_paginadas(
+            oportunidades,
+            tarjeta_licitacion,
+            page_size=5,
+            key="opp_tarjetas_page",
+        )
     else:
         vista_tabla = _dataframe_con_compartir(
             oportunidades,
@@ -2322,6 +2315,61 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
             "En cada fila: columnas **Compartir WhatsApp** / **Compartir Email** "
             "y el enlace oficial PLACSP."
         )
+
+
+def _render_tarjetas_paginadas(
+    df: pd.DataFrame,
+    render_fila,
+    *,
+    page_size: int = 5,
+    key: str = "tarjetas_page",
+) -> None:
+    """Muestra tarjetas de ``df`` en páginas fijas (por defecto 5)."""
+    total = len(df)
+    if total == 0:
+        return
+
+    page_size = max(1, int(page_size))
+    n_pages = max(1, (total + page_size - 1) // page_size)
+    firma = f"{total}:{page_size}:{key}"
+    if st.session_state.get(f"{key}_firma") != firma:
+        st.session_state[f"{key}_firma"] = firma
+        st.session_state[key] = 1
+
+    pagina = int(st.session_state.get(key) or 1)
+    pagina = min(max(1, pagina), n_pages)
+    st.session_state[key] = pagina
+
+    inicio = (pagina - 1) * page_size
+    fin = min(inicio + page_size, total)
+
+    c_prev, c_info, c_next = st.columns([1, 2.4, 1], gap="small")
+    with c_prev:
+        if st.button(
+            "◀ Anterior",
+            key=f"{key}_prev",
+            width="stretch",
+            disabled=pagina <= 1,
+        ):
+            st.session_state[key] = pagina - 1
+            st.rerun()
+    with c_info:
+        st.caption(
+            f"Página **{pagina}** de **{n_pages}** · "
+            f"tarjetas {inicio + 1}–{fin} de {total} (de 5 en 5)"
+        )
+    with c_next:
+        if st.button(
+            "Siguiente ▶",
+            key=f"{key}_next",
+            width="stretch",
+            disabled=pagina >= n_pages,
+        ):
+            st.session_state[key] = pagina + 1
+            st.rerun()
+
+    for _, fila in df.iloc[inicio:fin].iterrows():
+        render_fila(fila)
 
 
 def _anos_candidatos_desde_expediente(texto: str) -> list[int]:
@@ -5269,27 +5317,32 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
-        "Configura los filtros y pulsa **Buscar** (no se filtra al tocar Ámbito o presupuesto). "
-        "Si indicas un ID de expediente, también se consulta el histórico Drive (2026→2025…)."
+        "Configura los filtros (estado, fechas, ámbito…) y pulsa **Buscar**. "
+        "Hasta entonces no se filtra, no se consulta Drive ni se carga el histórico local."
     )
 
-    importes = df["presupuesto_sin_iva"].dropna()
+    importes = df["presupuesto_sin_iva"].dropna() if not df.empty else pd.Series(dtype=float)
     tope = float(importes.max()) if not importes.empty else 0.0
 
-    ubicaciones_disponibles = sorted({u for u in df["ubicacion"].unique() if u})
+    ubicaciones_disponibles = (
+        sorted({u for u in df["ubicacion"].unique() if u}) if not df.empty else []
+    )
+    estados_disponibles = _estados_disponibles(df)
+    min_d, max_d = _rango_fechas_disponible(df)
+
     st.session_state.setdefault(
         "buscador_niveles", [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL]
     )
+    st.session_state.setdefault("buscador_estados", list(ESTADOS_ABIERTOS_DEFAULT))
+    st.session_state.setdefault("buscador_usar_fechas", False)
+    st.session_state.setdefault("buscador_incluir_sin_fecha", True)
+    st.session_state.setdefault("buscador_incluir_parquet", False)
+    if "buscador_fecha_desde" not in st.session_state:
+        st.session_state["buscador_fecha_desde"] = min_d
+    if "buscador_fecha_hasta" not in st.session_state:
+        st.session_state["buscador_fecha_hasta"] = max_d
     if tope > 0 and "buscador_rango" not in st.session_state:
         st.session_state["buscador_rango"] = (0.0, tope)
-
-    estados_globales = st.session_state.get("estados_aplicados") or None
-    if estados_globales:
-        st.caption(f"Estados aplicados (barra superior): {', '.join(estados_globales)}")
-
-    busqueda = (st.session_state.get("busqueda_aplicada") or "").strip()
-    if busqueda:
-        st.caption(f"Búsqueda libre activa: «{busqueda}»")
 
     with st.form("form_buscador_general", clear_on_submit=False):
         col_exp, col_admin = st.columns([2, 2])
@@ -5305,6 +5358,44 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 "Ámbito del órgano",
                 [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
                 key="buscador_niveles",
+            )
+
+        st.multiselect(
+            "Estado",
+            options=estados_disponibles,
+            key="buscador_estados",
+            placeholder="Publicada, En evaluación…",
+            help="Vacío = todos los estados. Solo se aplica al pulsar Buscar.",
+            disabled=not estados_disponibles,
+        )
+
+        st.checkbox(
+            "Activar filtro por fechas",
+            key="buscador_usar_fechas",
+            help="Solo se aplica al pulsar «Buscar».",
+        )
+        c1, c2, c3 = st.columns([1, 1, 0.7], gap="small")
+        with c1:
+            st.date_input(
+                "Desde",
+                min_value=min_d,
+                max_value=max_d,
+                format="DD/MM/YYYY",
+                key="buscador_fecha_desde",
+            )
+        with c2:
+            st.date_input(
+                "Hasta",
+                min_value=min_d,
+                max_value=max_d,
+                format="DD/MM/YYYY",
+                key="buscador_fecha_hasta",
+            )
+        with c3:
+            st.checkbox(
+                "Sin fecha",
+                key="buscador_incluir_sin_fecha",
+                help="Incluir licitaciones sin fecha de actualización",
             )
 
         st.multiselect(
@@ -5330,33 +5421,90 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 "El feed descargado no incluye importes; el filtro de presupuesto está desactivado."
             )
 
+        from modules import historico_local
+
+        if historico_local.is_available():
+            st.checkbox(
+                "Incluir histórico local (parquet)",
+                key="buscador_incluir_parquet",
+                help="No se lee el fichero hasta pulsar Buscar.",
+            )
+
         buscar = st.form_submit_button("🔍 Buscar", type="primary")
 
     if buscar:
         rango = st.session_state.get("buscador_rango") or (None, None)
+        usar_fechas = bool(st.session_state.get("buscador_usar_fechas"))
+        desde = _como_date(st.session_state.get("buscador_fecha_desde")) if usar_fechas else None
+        hasta = _como_date(st.session_state.get("buscador_fecha_hasta")) if usar_fechas else None
         st.session_state["buscador_filtros_aplicados"] = {
             "expediente": str(st.session_state.get("buscador_exp") or "").strip(),
             "niveles_admin": list(st.session_state.get("buscador_niveles") or []),
+            "estados": list(st.session_state.get("buscador_estados") or []),
             "ubicaciones": list(st.session_state.get("buscador_ubicaciones") or []),
             "presupuesto_min": rango[0] if isinstance(rango, (list, tuple)) else None,
             "presupuesto_max": rango[1] if isinstance(rango, (list, tuple)) else None,
             "incluir_sin_presupuesto": bool(
                 st.session_state.get("buscador_sin_importe", True)
             ),
+            "usar_fechas": usar_fechas,
+            "fecha_desde": desde.isoformat() if desde else None,
+            "fecha_hasta": hasta.isoformat() if hasta else None,
+            "incluir_sin_fecha": bool(
+                st.session_state.get("buscador_incluir_sin_fecha", True)
+            ),
+            "incluir_parquet": bool(st.session_state.get("buscador_incluir_parquet")),
             "_probe_drive": True,
         }
 
     aplicados = st.session_state.get("buscador_filtros_aplicados")
     if not aplicados:
-        st.info("Configura filtros y pulsa **Buscar**. Hasta entonces no se carga nada.")
+        st.info(
+            "Configura filtros y pulsa **Buscar**. "
+            "Hasta entonces no se consulta el feed filtrado, Drive ni el parquet."
+        )
         return
 
+    base = df
+    if aplicados.get("incluir_parquet"):
+        from modules import historico_local
+
+        if historico_local.is_available():
+            with st.spinner("Cargando histórico local (parquet)…"):
+                try:
+                    local_df = _cargar_historico_local_cached("")
+                    if local_df is not None and not local_df.empty:
+                        partes = [base] if not base.empty else []
+                        partes.append(local_df)
+                        base = pd.concat(partes, ignore_index=True, sort=False)
+                        if "expediente" in base.columns:
+                            subset = ["expediente", "url"] if "url" in base.columns else ["expediente"]
+                            base = base.drop_duplicates(subset=subset, keep="first")
+                        st.caption(f"Histórico local añadido: {len(local_df):,} filas.")
+                except Exception as exc:
+                    st.warning(f"No se pudo leer el parquet: {exc}")
+
+    fecha_desde = None
+    fecha_hasta = None
+    if aplicados.get("usar_fechas"):
+        fecha_desde = _como_date(aplicados.get("fecha_desde"))
+        fecha_hasta = _como_date(aplicados.get("fecha_hasta"))
+        if fecha_desde is not None:
+            fecha_desde = pd.Timestamp(fecha_desde)
+        if fecha_hasta is not None:
+            fecha_hasta = pd.Timestamp(fecha_hasta)
+
     resultados = grefa_filter.search_dataframe(
-        df,
+        base,
         presupuesto_min=aplicados.get("presupuesto_min"),
         presupuesto_max=aplicados.get("presupuesto_max"),
         ubicaciones=aplicados.get("ubicaciones") or None,
+        estados=aplicados.get("estados") or None,
         incluir_sin_presupuesto=bool(aplicados.get("incluir_sin_presupuesto", True)),
+        fecha_campo="fecha_actualizacion",
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        incluir_sin_fecha=bool(aplicados.get("incluir_sin_fecha", True)),
         expediente=str(aplicados.get("expediente") or ""),
         niveles_admin=aplicados.get("niveles_admin"),
     )
