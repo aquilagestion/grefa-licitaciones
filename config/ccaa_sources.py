@@ -408,7 +408,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "nativa",
         "estado": "nativa",
         "url_base": "https://www.contratosdegalicia.gal",
-        "notas": "Conector RSS activo (modules.ingestion_galicia); también en PLACSP 1044.",
+        "notas": "Conector RSS (modules.ingestion_galicia); si el portal no responde desde Cloud, cobertura vía PLACSP 1044.",
     },
     {
         "id": "madrid",

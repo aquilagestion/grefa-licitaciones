@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 import feedparser
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from modules.ccaa_common import map_estado, texto, to_float_eu
 from modules.ingestion import USER_AGENT, build_dataframe, empty_dataframe
@@ -20,11 +23,23 @@ except ImportError:  # redeploy parcial en Streamlit Cloud
 
 LOGGER = logging.getLogger(__name__)
 
+#: Feeds oficiales + host sin www (algunas redes resuelven distinto).
 FEED_PUBLICACIONES = (
-    "https://www.contratosdegalicia.gal/rss/ultimas-publicacions.rss"
+    "https://www.contratosdegalicia.gal/rss/ultimas-publicacions.rss",
+    "https://contratosdegalicia.gal/rss/ultimas-publicacions.rss",
+    # Abertos Xunta (suele redirigir al mismo RSS; útil si el DNS www falla).
+    "https://abertos.xunta.gal/catalogo/administracion-publica/-/dataset/"
+    "0252/actualidade-plataforma-contratos-publicos/001/descarga-directa-ficheiro.rss",
 )
-FEED_PLAZOS = "https://www.contratosdegalicia.gal/rss/ultimos-dias.rss"
-REQUEST_TIMEOUT = 45
+FEED_PLAZOS = (
+    "https://www.contratosdegalicia.gal/rss/ultimos-dias.rss",
+    "https://contratosdegalicia.gal/rss/ultimos-dias.rss",
+    "https://abertos.xunta.gal/catalogo/administracion-publica/-/dataset/"
+    "0288/ultimos-dias-presentacion-ofertas-plataforma/101/acceso-aos-datos.rss",
+)
+# (connect, read): connect corto evita colgar el Buscador en Cloud.
+REQUEST_TIMEOUT = (8, 25)
+MAX_ATTEMPTS = 2
 
 _STATUS_MAP = {
     "en curso": "Publicada",
@@ -51,8 +66,21 @@ def _session() -> requests.Session:
         {
             "User-Agent": USER_AGENT,
             "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+            "Connection": "close",
         }
     )
+    retry = Retry(
+        total=1,
+        connect=1,
+        read=0,
+        backoff_factor=0.4,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     return s
 
 
@@ -137,14 +165,51 @@ def _fila(entry: Any) -> dict[str, Any]:
     }
 
 
-def _fetch_feed(url: str, sesion: requests.Session) -> list[Any]:
-    resp = sesion.get(url, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    # RSS Galicia declara ISO-8859-1.
-    if not resp.encoding or resp.encoding.lower() in {"iso-8859-1", "latin-1"}:
-        resp.encoding = "iso-8859-1"
-    feed = feedparser.parse(resp.text)
-    return list(feed.entries or [])
+def _resumen_error(exc: BaseException) -> str:
+    nombre = type(exc).__name__
+    msg = str(exc)
+    if "ConnectTimeout" in nombre or "ConnectTimeout" in msg:
+        return "timeout de conexión"
+    if "ReadTimeout" in nombre or "ReadTimeout" in msg:
+        return "timeout de lectura"
+    if "NameResolution" in msg or "getaddrinfo" in msg:
+        return "DNS no resuelve el host"
+    if len(msg) > 120:
+        msg = msg[:117] + "…"
+    return f"{nombre}: {msg}"
+
+
+def _fetch_feed(urls: tuple[str, ...], sesion: requests.Session) -> list[Any]:
+    """Prueba varias URLs/reintentos; devuelve entradas o lanza el último error."""
+    ultimo: Exception | None = None
+    for url in urls:
+        for intento in range(1, MAX_ATTEMPTS + 1):
+            try:
+                resp = sesion.get(url, timeout=REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                if "html" in (resp.headers.get("content-type") or "").lower():
+                    raise GaliciaIngestionError("respuesta HTML en lugar de RSS")
+                if not resp.encoding or resp.encoding.lower() in {
+                    "iso-8859-1",
+                    "latin-1",
+                }:
+                    resp.encoding = "iso-8859-1"
+                feed = feedparser.parse(resp.text)
+                return list(feed.entries or [])
+            except Exception as exc:
+                ultimo = exc
+                LOGGER.warning(
+                    "RSS Galicia %s intento %s/%s: %s",
+                    url,
+                    intento,
+                    MAX_ATTEMPTS,
+                    _resumen_error(exc),
+                )
+                if intento < MAX_ATTEMPTS:
+                    time.sleep(0.35 * intento)
+    if ultimo is not None:
+        raise ultimo
+    return []
 
 
 def fetch_galicia_notices(
@@ -152,24 +217,28 @@ def fetch_galicia_notices(
     incluir_plazos: bool = True,
     sesion: requests.Session | None = None,
 ) -> pd.DataFrame:
-    """Descarga RSS oficiales de Contratos de Galicia (publicaciones ± plazos)."""
+    """Descarga RSS oficiales de Contratos de Galicia (publicaciones ± plazos).
+
+    Si el portal no es alcanzable (frecuente desde Streamlit Cloud), lanza un
+    aviso corto; el Buscador sigue cubriendo Galicia vía PLACSP 1044.
+    """
     cliente = sesion or _session()
-    urls = [FEED_PUBLICACIONES]
+    feeds: list[tuple[str, ...]] = [FEED_PUBLICACIONES]
     if incluir_plazos:
-        urls.append(FEED_PLAZOS)
+        feeds.append(FEED_PLAZOS)
 
     entradas: list[Any] = []
     errores: list[str] = []
-    for url in urls:
+    for urls in feeds:
         try:
-            entradas.extend(_fetch_feed(url, cliente))
+            entradas.extend(_fetch_feed(urls, cliente))
         except Exception as exc:
-            LOGGER.warning("RSS Galicia %s falló: %s", url, exc)
-            errores.append(f"{url}: {exc}")
+            errores.append(_resumen_error(exc))
 
     if not entradas and errores:
+        detalle = next(iter(dict.fromkeys(errores)))
         raise GaliciaIngestionError(
-            "RSS Galicia falló: " + "; ".join(errores)
+            f"portal no alcanzable ({detalle}). Cobertura Galicia vía PLACSP."
         )
     if not entradas:
         return empty_dataframe()
