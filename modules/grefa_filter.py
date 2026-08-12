@@ -810,6 +810,22 @@ def search_dataframe(
         filtrado = with_nivel_administracion(filtrado)
     if "ubicacion" in filtrado.columns or "organo_contratacion" in filtrado.columns:
         filtrado = with_comunidad_autonoma(filtrado)
+
+    # Con filtro CCAA: agrupar por comunidad y, dentro, más recientes primero.
+    if comunidades and "comunidad_autonoma" in filtrado.columns and not filtrado.empty:
+        fechas = pd.to_datetime(
+            filtrado.get("fecha_actualizacion"), errors="coerce"
+        )
+        filtrado = (
+            filtrado.assign(_fecha_ord=fechas)
+            .sort_values(
+                by=["comunidad_autonoma", "_fecha_ord"],
+                ascending=[True, False],
+                na_position="last",
+            )
+            .drop(columns=["_fecha_ord"])
+        )
+
     return filtrado.reset_index(drop=True)
 
 

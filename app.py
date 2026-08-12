@@ -2289,15 +2289,23 @@ def sidebar_fuente_datos() -> None:
     if st.session_state.get("cargando_datos"):
         st.sidebar.info("⏳ Descargando licitaciones…")
 
-    if st.sidebar.button("🔁 Actualizar datos ahora", type="primary", width="stretch"):
+    if st.sidebar.button(
+        "🔁 Actualizar datos ahora",
+        type="primary",
+        width="stretch",
+        help=(
+            "Intenta el feed PLACSP en vivo. Si Cloud lo bloquea, carga solo "
+            "el histórico de Sheets (sync diaria). Úsalo al entrar o para refrescar."
+        ),
+    ):
         st.session_state["refresh_token"] += 1
         st.session_state["cargando_datos"] = True
         st.rerun()
 
     with st.sidebar.expander("Cargar fichero ATOM / ZIP local"):
         st.caption(
-            "Si PLACSP bloquea la descarga automática, sube el `.atom` o el `.zip` "
-            "oficial de sindicación 643/1044."
+            "Rescate manual: si el feed vivo y Sheets no bastan, descarga el "
+            "`.atom`/`.zip` en tu PC (PLACSP) y súbelo aquí. Sustituye los datos de la sesión."
         )
         fichero = st.file_uploader(
             "Archivo .atom / .xml / .zip",
@@ -2349,11 +2357,22 @@ def sidebar_google_sheets() -> None:
 
     columna_cargar, columna_guardar = st.sidebar.columns(2)
     with columna_cargar:
-        if st.button("⬇️ Cargar", width="stretch", help="Traer los criterios de la hoja"):
+        if st.button(
+            "⬇️ Cargar",
+            width="stretch",
+            help=(
+                "Trae de Sheets los criterios compartidos (CPV, términos, umbrales). "
+                "No descarga licitaciones."
+            ),
+        ):
             cargar_criterios_de_sheets()
             st.rerun()
     with columna_guardar:
-        if st.button("⬆️ Guardar", width="stretch", help="Volcar los criterios actuales a la hoja"):
+        if st.button(
+            "⬆️ Guardar",
+            width="stretch",
+            help="Guarda en Sheets los criterios actuales de esta sesión.",
+        ):
             guardar_criterios_en_sheets()
             st.rerun()
 
@@ -2374,7 +2393,11 @@ def sidebar_google_sheets() -> None:
     if st.sidebar.button(
         "🔄 Sync histórico ahora",
         width="stretch",
-        help="Guarda snapshot Alta/Media y avisa nuevas Alta (1×/día automático)",
+        help=(
+            "Con los datos YA cargados en la app: escribe Alta/Media en Histórico "
+            "de Sheets y avisa nuevas Alta. No sustituye «Actualizar datos ahora». "
+            "GitHub Actions lo hace solo cada mañana laborable."
+        ),
     ):
         st.session_state["_forzar_sync_diaria"] = True
         st.session_state.pop("_sync_omitida_hoy", None)
