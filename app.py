@@ -5317,7 +5317,7 @@ def _pestana_historico_nif_body(puntuadas: pd.DataFrame) -> None:
 def pestana_buscador(df: pd.DataFrame) -> None:
     st.subheader("Buscador general PLACSP")
     st.caption(
-        "Configura los filtros (estado, fechas, ámbito…) y pulsa **Buscar**. "
+        "Despliega los filtros, configúralos y pulsa **Buscar**. "
         "Hasta entonces no se filtra, no se consulta Drive ni se carga el histórico local."
     )
 
@@ -5344,99 +5344,133 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     if tope > 0 and "buscador_rango" not in st.session_state:
         st.session_state["buscador_rango"] = (0.0, tope)
 
-    with st.form("form_buscador_general", clear_on_submit=False):
-        col_exp, col_admin = st.columns([2, 2])
-        with col_exp:
-            st.text_input(
-                "ID Expediente",
-                placeholder="Búsqueda directa por código de licitación",
-                key="buscador_exp",
-                help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
-            )
-        with col_admin:
-            st.multiselect(
-                "Ámbito del órgano",
-                [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
-                key="buscador_niveles",
-            )
-
-        st.multiselect(
-            "Estado",
-            options=estados_disponibles,
-            key="buscador_estados",
-            placeholder="Publicada, En evaluación…",
-            help="Vacío = todos los estados. Solo se aplica al pulsar Buscar.",
-            disabled=not estados_disponibles,
-        )
-
-        st.checkbox(
-            "Activar filtro por fechas",
-            key="buscador_usar_fechas",
-            help="Solo se aplica al pulsar «Buscar».",
-        )
-        c1, c2, c3 = st.columns([1, 1, 0.7], gap="small")
-        with c1:
-            st.date_input(
-                "Desde",
-                min_value=min_d,
-                max_value=max_d,
-                format="DD/MM/YYYY",
-                key="buscador_fecha_desde",
-            )
-        with c2:
-            st.date_input(
-                "Hasta",
-                min_value=min_d,
-                max_value=max_d,
-                format="DD/MM/YYYY",
-                key="buscador_fecha_hasta",
-            )
-        with c3:
-            st.checkbox(
-                "Sin fecha",
-                key="buscador_incluir_sin_fecha",
-                help="Incluir licitaciones sin fecha de actualización",
-            )
-
-        st.multiselect(
-            "Ubicación / Provincia", ubicaciones_disponibles, key="buscador_ubicaciones"
-        )
-
-        if tope > 0:
-            st.slider(
-                "Rango de presupuesto sin IVA (€)",
-                min_value=0.0,
-                max_value=tope,
-                step=max(tope / 200, 1.0),
-                format="%.0f",
-                key="buscador_rango",
-            )
-            st.checkbox(
-                "Incluir licitaciones sin presupuesto publicado",
-                value=True,
-                key="buscador_sin_importe",
+    aplicados_prev = st.session_state.get("buscador_filtros_aplicados")
+    if aplicados_prev:
+        partes_resumen = []
+        exp = str(aplicados_prev.get("expediente") or "").strip()
+        if exp:
+            partes_resumen.append(f"exp. {exp}")
+        estados = aplicados_prev.get("estados") or []
+        if estados:
+            partes_resumen.append("estado: " + ", ".join(estados))
+        if aplicados_prev.get("usar_fechas"):
+            partes_resumen.append(
+                f"fechas: {aplicados_prev.get('fecha_desde') or '…'}–"
+                f"{aplicados_prev.get('fecha_hasta') or '…'}"
             )
         else:
-            st.caption(
-                "El feed descargado no incluye importes; el filtro de presupuesto está desactivado."
+            partes_resumen.append("fechas: sin filtrar")
+        if aplicados_prev.get("incluir_parquet"):
+            partes_resumen.append("parquet: sí")
+        st.caption("Filtros aplicados: " + " · ".join(partes_resumen))
+    else:
+        st.caption("Sin búsqueda aplicada todavía.")
+
+    with st.expander("Filtros de búsqueda", expanded=False):
+        with st.form("form_buscador_general", clear_on_submit=False):
+            col_exp, col_admin = st.columns([2, 2])
+            with col_exp:
+                st.text_input(
+                    "ID Expediente",
+                    placeholder="Búsqueda directa por código de licitación",
+                    key="buscador_exp",
+                    help="Si rellenas el ID, se ignoran ámbito, ubicación e importe.",
+                )
+            with col_admin:
+                st.multiselect(
+                    "Ámbito del órgano",
+                    [NIVEL_NACIONAL, NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVELES_ADMIN[-1]],
+                    key="buscador_niveles",
+                )
+
+            st.multiselect(
+                "Estado",
+                options=estados_disponibles,
+                key="buscador_estados",
+                placeholder="Publicada, En evaluación…",
+                help="Vacío = todos los estados. Solo se aplica al pulsar Buscar.",
+                disabled=not estados_disponibles,
             )
 
-        from modules import historico_local
-
-        if historico_local.is_available():
             st.checkbox(
-                "Incluir histórico local (parquet)",
-                key="buscador_incluir_parquet",
-                help="No se lee el fichero hasta pulsar Buscar.",
+                "Activar filtro por fechas",
+                key="buscador_usar_fechas",
+                help="Solo se aplica al pulsar «Buscar».",
+            )
+            c1, c2, c3 = st.columns([1, 1, 0.7], gap="small")
+            with c1:
+                st.date_input(
+                    "Desde",
+                    min_value=min_d,
+                    max_value=max_d,
+                    format="DD/MM/YYYY",
+                    key="buscador_fecha_desde",
+                )
+            with c2:
+                st.date_input(
+                    "Hasta",
+                    min_value=min_d,
+                    max_value=max_d,
+                    format="DD/MM/YYYY",
+                    key="buscador_fecha_hasta",
+                )
+            with c3:
+                st.checkbox(
+                    "Sin fecha",
+                    key="buscador_incluir_sin_fecha",
+                    help="Incluir licitaciones sin fecha de actualización",
+                )
+
+            st.multiselect(
+                "Ubicación / Provincia",
+                ubicaciones_disponibles,
+                key="buscador_ubicaciones",
             )
 
-        buscar = st.form_submit_button("🔍 Buscar", type="primary")
+            if tope > 0:
+                st.slider(
+                    "Rango de presupuesto sin IVA (€)",
+                    min_value=0.0,
+                    max_value=tope,
+                    step=max(tope / 200, 1.0),
+                    format="%.0f",
+                    key="buscador_rango",
+                )
+                st.checkbox(
+                    "Incluir licitaciones sin presupuesto publicado",
+                    value=True,
+                    key="buscador_sin_importe",
+                )
+            else:
+                st.caption(
+                    "El feed descargado no incluye importes; "
+                    "el filtro de presupuesto está desactivado."
+                )
+
+            from modules import historico_local
+
+            if historico_local.is_available():
+                st.checkbox(
+                    "Incluir histórico local (parquet)",
+                    key="buscador_incluir_parquet",
+                    help="No se lee el fichero hasta pulsar Buscar.",
+                )
+
+            buscar = st.form_submit_button("🔍 Buscar", type="primary")
 
     if buscar:
         rango = st.session_state.get("buscador_rango") or (None, None)
         usar_fechas = bool(st.session_state.get("buscador_usar_fechas"))
-        desde = _como_date(st.session_state.get("buscador_fecha_desde")) if usar_fechas else None
-        hasta = _como_date(st.session_state.get("buscador_fecha_hasta")) if usar_fechas else None
+        desde = (
+            _como_date(st.session_state.get("buscador_fecha_desde"))
+            if usar_fechas
+            else None
+        )
+        hasta = (
+            _como_date(st.session_state.get("buscador_fecha_hasta"))
+            if usar_fechas
+            else None
+        )
         st.session_state["buscador_filtros_aplicados"] = {
             "expediente": str(st.session_state.get("buscador_exp") or "").strip(),
             "niveles_admin": list(st.session_state.get("buscador_niveles") or []),
@@ -5460,7 +5494,7 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     aplicados = st.session_state.get("buscador_filtros_aplicados")
     if not aplicados:
         st.info(
-            "Configura filtros y pulsa **Buscar**. "
+            "Despliega **Filtros de búsqueda**, configura y pulsa **Buscar**. "
             "Hasta entonces no se consulta el feed filtrado, Drive ni el parquet."
         )
         return
@@ -5478,7 +5512,11 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                         partes.append(local_df)
                         base = pd.concat(partes, ignore_index=True, sort=False)
                         if "expediente" in base.columns:
-                            subset = ["expediente", "url"] if "url" in base.columns else ["expediente"]
+                            subset = (
+                                ["expediente", "url"]
+                                if "url" in base.columns
+                                else ["expediente"]
+                            )
                             base = base.drop_duplicates(subset=subset, keep="first")
                         st.caption(f"Histórico local añadido: {len(local_df):,} filas.")
                 except Exception as exc:
