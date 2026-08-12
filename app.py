@@ -960,7 +960,7 @@ def _render_resultados_con_interes(
     page_size: int = 5,
     agrupar_por_ccaa: bool = True,
 ) -> None:
-    """Lista resultados paginados (5) con acciones Mis Licitaciones y Preparar docs."""
+    """Lista resultados paginados con acciones Mis Licitaciones y Preparar docs."""
     if resultados.empty:
         return
 
@@ -991,7 +991,7 @@ def _render_resultados_con_interes(
     st.markdown('<span class="resultados-buscador-flag"></span>', unsafe_allow_html=True)
     st.caption(
         "Usa **⭐ A Mis Licitaciones** / **📝 Preparar docs**. "
-        "Navegación de **5 en 5**. "
+        "Elige cuántas tarjetas ver por página (5–100). "
         "Traduce solo las que te interesen con **🌐 Traducir al español**."
         + (
             " Resultados agrupados por **comunidad autónoma**."
@@ -2694,6 +2694,7 @@ def _render_tarjetas_paginadas(
     page_size: int = 5,
     key: str = "tarjetas_page",
     group_by: str | None = None,
+    elegir_page_size: bool = True,
 ) -> None:
     """Muestra tarjetas de ``df`` en páginas fijas (por defecto 5).
 
@@ -2704,7 +2705,27 @@ def _render_tarjetas_paginadas(
     if total == 0:
         return
 
-    page_size = max(1, int(page_size))
+    opciones_tam = [5, 10, 25, 50, 100]
+    size_key = f"{key}_size"
+    if elegir_page_size:
+        if size_key not in st.session_state:
+            inicial = int(page_size) if int(page_size) in opciones_tam else 5
+            st.session_state[size_key] = inicial
+        # Si el valor guardado no es válido (sesión antigua), corregir.
+        if st.session_state.get(size_key) not in opciones_tam:
+            st.session_state[size_key] = 5
+        c_size, _ = st.columns([1.2, 2.8])
+        with c_size:
+            st.selectbox(
+                "Tarjetas por página",
+                opciones_tam,
+                key=size_key,
+                help="Cuántas licitaciones mostrar en cada página",
+            )
+        page_size = int(st.session_state[size_key])
+    else:
+        page_size = max(1, int(page_size))
+
     n_pages = max(1, (total + page_size - 1) // page_size)
     firma = f"{total}:{page_size}:{key}:{group_by or ''}"
     if st.session_state.get(f"{key}_firma") != firma:
@@ -2731,7 +2752,8 @@ def _render_tarjetas_paginadas(
     with c_info:
         st.caption(
             f"Página **{pagina}** de **{n_pages}** · "
-            f"tarjetas {inicio + 1}–{fin} de {total} (de 5 en 5)"
+            f"tarjetas {inicio + 1}–{fin} de {total} "
+            f"(de {page_size} en {page_size})"
         )
     with c_next:
         if st.button(
@@ -2758,7 +2780,7 @@ def _render_tarjetas_paginadas(
     )
     conteos = etiquetas.value_counts()
     prev_grupo: str | None = None
-    for idx, fila in pagina_df.iterrows():
+    for _, fila in pagina_df.iterrows():
         bruto = fila.get(group_by)
         grupo = str(bruto or "").strip() or "Sin comunidad"
         if grupo != prev_grupo:
