@@ -19,6 +19,9 @@ FUENTE_PLACSP_1044 = "placsp_1044"
 FUENTE_PLACSP_LOCAL = "placsp_local"
 FUENTE_PLACSP = "placsp"
 FUENTE_EUSKADI = "euskadi"
+FUENTE_CATALUNYA = "catalunya"
+FUENTE_MADRID = "madrid"
+FUENTE_NAVARRA = "navarra"
 
 FUENTES_PLACSP: frozenset[str] = frozenset(
     {FUENTE_PLACSP_643, FUENTE_PLACSP_1044, FUENTE_PLACSP_LOCAL, FUENTE_PLACSP}
@@ -367,7 +370,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "nativa",
         "estado": "nativa",
         "url_base": "https://analisi.transparenciacatalunya.cat",
-        "notas": "Conector nativo previsto (fase 1); mientras tanto PLACSP 1044.",
+        "notas": "Conector Socrata activo (modules.ingestion_catalunya); también en PLACSP 1044.",
     },
     {
         "id": "valencia",
@@ -402,8 +405,8 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "portal": "Contratos Públicos Comunidad de Madrid (ATOM)",
         "tipo": "nativa",
         "estado": "nativa",
-        "url_base": "https://contratos-publicos.comunidad.madrid",
-        "notas": "Conector ATOM nativo previsto (fase 1); mientras tanto PLACSP 1044.",
+        "url_base": "https://contratos-publicos.comunidad.madrid/feed/licitaciones2",
+        "notas": "Conector ATOM activo (modules.ingestion_madrid); también en PLACSP 1044.",
     },
     {
         "id": "murcia",
@@ -420,8 +423,8 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "portal": "datosabiertos.navarra.es (CKAN)",
         "tipo": "nativa",
         "estado": "nativa",
-        "url_base": "https://datosabiertos.navarra.es",
-        "notas": "Conector CKAN nativo previsto (fase 1); mientras tanto PLACSP 1044.",
+        "url_base": "https://datosabiertos.navarra.es/dataset/anuncios-licitaciones",
+        "notas": "Conector CKAN/CSV activo (modules.ingestion_navarra); también en PLACSP 1044.",
     },
     {
         "id": "euskadi",
@@ -461,6 +464,9 @@ def etiqueta_fuente(fuente: str) -> str:
         FUENTE_PLACSP_LOCAL: "PLACSP · fichero local",
         FUENTE_PLACSP: "PLACSP",
         FUENTE_EUSKADI: "País Vasco · API Euskadi",
+        FUENTE_CATALUNYA: "Cataluña · PSCP/Socrata",
+        FUENTE_MADRID: "Madrid · ATOM",
+        FUENTE_NAVARRA: "Navarra · open data CSV",
     }
     return mapa.get(str(fuente or "").strip(), str(fuente or "").strip() or "—")
 

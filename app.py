@@ -24,7 +24,6 @@ if str(BASE_DIR) not in sys.path:
 
 from config.cpv_catalog import active_cpvs, default_cpv_catalog  # noqa: E402
 from config.ccaa_sources import (  # noqa: E402
-    debe_consultar_nativa,
     etiqueta_fuente,
     opciones_filtro_buscador,
 )
@@ -5395,9 +5394,9 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 placeholder="Estatal + 17 CCAA (vacío = todas)",
                 help=(
                     "Filtro territorial. Vacío = todas. "
-                    "Si incluye País Vasco (o está vacío), al pulsar Buscar "
-                    "también se consulta la API nativa de Euskadi. "
-                    "PLACSP cubre el resto vía sindicaciones 643/1044."
+                    "Si incluye País Vasco, Cataluña, Madrid o Navarra "
+                    "(o está vacío), al pulsar Buscar también se consultan "
+                    "sus APIs/feeds nativos. El resto va por PLACSP 643/1044."
                 ),
             )
 
@@ -5556,50 +5555,47 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 except Exception as exc:
                     st.warning(f"No se pudo leer el parquet: {exc}")
 
-    # Conector nativo País Vasco (solo al pulsar Buscar y si el filtro lo implica).
+    # Conectores nativos CCAA (solo al pulsar Buscar y si el filtro lo implica).
     comunidades_sel = list(aplicados.get("comunidades") or [])
-    if debe_consultar_nativa(comunidades_sel, "País Vasco"):
-        with st.spinner("Consultando API País Vasco (Euskadi)…"):
-            try:
-                from modules import ingestion_euskadi
+    with st.spinner("Consultando fuentes nativas CCAA (si aplica)…"):
+        try:
+            from modules import ccaa_fetch
 
-                euskadi_df = ingestion_euskadi.fetch_euskadi_notices(
-                    max_pages=4, page_size=50
+            nativas_df, oks, avisos = ccaa_fetch.fetch_nativas(comunidades_sel)
+            for msg in oks:
+                st.caption(msg)
+            for msg in avisos:
+                st.warning(msg)
+            if nativas_df is not None and not nativas_df.empty:
+                cpvs_activos = list(st.session_state.get("cpvs") or {})
+                if isinstance(st.session_state.get("cpvs"), dict):
+                    cpvs_activos = list(st.session_state["cpvs"].keys())
+                keywords_activas = flatten_keywords(
+                    st.session_state.get("keywords") or {}
                 )
-                if not euskadi_df.empty:
-                    cpvs_activos = list(st.session_state.get("cpvs") or {})
-                    if isinstance(st.session_state.get("cpvs"), dict):
-                        cpvs_activos = list(st.session_state["cpvs"].keys())
-                    keywords_activas = flatten_keywords(
-                        st.session_state.get("keywords") or {}
+                conceptos_activos = [
+                    t
+                    for t in (st.session_state.get("catalogo_terminos") or [])
+                    if t.get("activo")
+                ]
+                nativas_df = grefa_filter.score_licitaciones(
+                    nativas_df,
+                    cpvs_activos,
+                    keywords_activas,
+                    conceptos=conceptos_activos,
+                )
+                partes = [base] if base is not None and not base.empty else []
+                partes.append(nativas_df)
+                base = pd.concat(partes, ignore_index=True, sort=False)
+                if "expediente" in base.columns:
+                    subset = (
+                        ["expediente", "url"]
+                        if "url" in base.columns
+                        else ["expediente"]
                     )
-                    conceptos_activos = [
-                        t
-                        for t in (st.session_state.get("catalogo_terminos") or [])
-                        if t.get("activo")
-                    ]
-                    euskadi_df = grefa_filter.score_licitaciones(
-                        euskadi_df,
-                        cpvs_activos,
-                        keywords_activas,
-                        conceptos=conceptos_activos,
-                    )
-                    partes = [base] if base is not None and not base.empty else []
-                    partes.append(euskadi_df)
-                    base = pd.concat(partes, ignore_index=True, sort=False)
-                    if "expediente" in base.columns:
-                        subset = (
-                            ["expediente", "url"]
-                            if "url" in base.columns
-                            else ["expediente"]
-                        )
-                        base = base.drop_duplicates(subset=subset, keep="first")
-                    st.caption(
-                        f"API Euskadi: **{len(euskadi_df):,}** anuncios recientes "
-                        f"({etiqueta_fuente('euskadi')})."
-                    )
-            except Exception as exc:
-                st.warning(f"API País Vasco no disponible: {exc}")
+                    base = base.drop_duplicates(subset=subset, keep="first")
+        except Exception as exc:
+            st.warning(f"Fuentes nativas CCAA no disponibles: {exc}")
 
     fecha_desde = None
     fecha_hasta = None
