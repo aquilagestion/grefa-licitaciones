@@ -113,7 +113,11 @@ from modules import (  # noqa: E402
     ui_compartir,
 )
 from modules.admin_ambito import NIVEL_AUTONOMICO, NIVEL_LOCAL, NIVEL_NACIONAL, NIVELES_ADMIN  # noqa: E402
-from modules.translator import complete_from_any, complete_term_translations  # noqa: E402
+from modules.translator import (  # noqa: E402
+    a_espanol,
+    complete_from_any,
+    complete_term_translations,
+)
 from modules.exporter import (  # noqa: E402
     timestamped_filename,
     to_csv_bytes,
@@ -187,6 +191,20 @@ CUSTOM_CSS = """
         overflow-wrap: anywhere;
         line-height: 1.4;
         margin: 0 0 0.25rem 0;
+    }
+    .titulo-original {
+        color: #5b6b62;
+        font-size: 0.86rem;
+        margin: 0.1rem 0 0.45rem 0;
+        line-height: 1.35;
+        white-space: normal;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    /* Resultados del buscador: no recortar el bloque principal */
+    .resultados-buscador-flag { display: none; }
+    section.main, .main .block-container {
+        overflow: visible !important;
     }
     .badge {
         display: inline-block;
@@ -860,21 +878,39 @@ def _render_resultados_con_interes(
     resultados: pd.DataFrame,
     *,
     clave_prefix: str,
-    max_filas: int = 40,
+    page_size: int = 5,
 ) -> None:
-    """Lista resultados con acciones Mis Licitaciones y Preparar docs."""
+    """Lista resultados paginados (5) con acciones Mis Licitaciones y Preparar docs."""
     if resultados.empty:
         return
-    interes = _claves_interes()
+
+    st.markdown('<span class="resultados-buscador-flag"></span>', unsafe_allow_html=True)
+    st.toggle(
+        "Traducir títulos al español",
+        key="traducir_titulos_es",
+        help=(
+            "Muestra el título en castellano y el original debajo "
+            "(euskera, catalán/valenciano, gallego…)."
+        ),
+    )
     st.caption(
         "Usa **⭐ A Mis Licitaciones** para guardarla en esa pestaña, "
-        "o **📝 Preparar docs** para abrir el asistente."
+        "o **📝 Preparar docs** para abrir el asistente. "
+        "Navegación de **5 en 5**."
     )
-    for i, (_, fila) in enumerate(resultados.head(max_filas).iterrows()):
-        clave = _clave_expediente(str(fila.get("expediente") or ""), str(fila.get("url") or ""))
+
+    interes = _claves_interes()
+    traducir = bool(st.session_state.get("traducir_titulos_es"))
+
+    def _una(fila: pd.Series) -> None:
+        clave = _clave_expediente(
+            str(fila.get("expediente") or ""), str(fila.get("url") or "")
+        )
         marcado = clave in interes
         exp = fila.get("expediente") or "—"
-        tit = str(fila.get("titulo") or "").strip()
+        tit_es, tit_orig = _titulos_para_mostrar(
+            str(fila.get("titulo") or ""), traducir=traducir
+        )
         organo = str(fila.get("organo_contratacion") or "")[:80]
         meta = " · ".join(
             x
@@ -887,9 +923,14 @@ def _render_resultados_con_interes(
         )
         st.markdown(
             f"<p class='tarjeta-titulo-completo'><strong>{html.escape(str(exp))}</strong> — "
-            f"{html.escape(tit)}</p>",
+            f"{html.escape(tit_es)}</p>",
             unsafe_allow_html=True,
         )
+        if tit_orig:
+            st.markdown(
+                f"<p class='titulo-original'><em>Original:</em> {html.escape(tit_orig)}</p>",
+                unsafe_allow_html=True,
+            )
         if meta:
             st.caption(meta)
         if fila.get("url"):
@@ -901,7 +942,7 @@ def _render_resultados_con_interes(
             )
             if st.button(
                 etiqueta_mis,
-                key=f"mis_from_{clave_prefix}_{i}_{clave[:36]}",
+                key=f"mis_from_{clave_prefix}_{clave[:36]}",
                 type="primary" if not marcado else "secondary",
                 width="stretch",
                 help="Incluir o quitar de Mis Licitaciones",
@@ -920,7 +961,7 @@ def _render_resultados_con_interes(
         with c_prep:
             if st.button(
                 "📝 Preparar docs",
-                key=f"prep_from_{clave_prefix}_{i}_{clave[:36]}",
+                key=f"prep_from_{clave_prefix}_{clave[:36]}",
                 width="stretch",
                 help="Abrir asistente de documentación con este expediente",
             ):
@@ -933,11 +974,16 @@ def _render_resultados_con_interes(
         with c_share:
             ui_compartir.render_compartir(
                 fila,
-                key=f"share_from_{clave_prefix}_{i}_{clave[:36]}",
+                key=f"share_from_{clave_prefix}_{clave[:36]}",
                 fuente_label="PLACSP",
             )
-    if len(resultados) > max_filas:
-        st.caption(f"Mostrando {max_filas} de {len(resultados):,} (exporta para ver todas).")
+
+    _render_tarjetas_paginadas(
+        resultados,
+        _una,
+        page_size=page_size,
+        key=f"{clave_prefix}_tarjetas_page",
+    )
 
 
 def _cargar_seguimiento_cache() -> dict:
@@ -1462,11 +1508,47 @@ def _widget_resumen_pliego(
         st.info("Aún no hay archivos en cola. Sube al menos el PCAP y el PPT (PDF/Word/Excel).")
 
 
+def _cache_titulo_es(titulo: str) -> str:
+    """Traduce a español con caché en sesión (evita repetir llamadas)."""
+    bruto = str(titulo or "").strip()
+    if not bruto:
+        return ""
+    cache = st.session_state.setdefault("_cache_titulo_es", {})
+    if bruto in cache:
+        return str(cache[bruto] or "")
+    try:
+        trad = a_espanol(bruto)
+    except Exception:
+        trad = bruto
+    cache[bruto] = trad or bruto
+    return str(cache[bruto] or bruto)
+
+
+def _titulos_para_mostrar(titulo: str, *, traducir: bool) -> tuple[str, str]:
+    """Devuelve (titulo_principal, titulo_original_o_vacio)."""
+    original = str(titulo or "").strip() or "(Sin título en el expediente)"
+    if not traducir:
+        return original, ""
+    es = _cache_titulo_es(original)
+    if not es or es.casefold() == original.casefold():
+        return original, ""
+    return es, original
+
+
 def tarjeta_licitacion(fila: pd.Series) -> None:
     nivel = RELEVANCE_LEVELS.get(fila["categoria"], RELEVANCE_LEVELS["Baja"])
     cpvs = " ".join(f"<span class='chip'>{codigo}</span>" for codigo in (fila.get("cpvs") or [])[:8])
     keywords = ", ".join(fila.get("keywords_match") or []) or "—"
-    titulo = html.escape(str(fila["titulo"] or "(Sin título en el expediente)"))
+    traducir = bool(st.session_state.get("traducir_titulos_es"))
+    titulo_es, titulo_orig = _titulos_para_mostrar(
+        str(fila.get("titulo") or ""), traducir=traducir
+    )
+    titulo = html.escape(titulo_es)
+    original_html = (
+        f'<p class="titulo-original"><em>Original:</em> {html.escape(titulo_orig)}</p>'
+        if titulo_orig
+        else ""
+    )
     organo = html.escape(str(fila.get("organo_contratacion") or "—"))
     ubicacion = html.escape(str(fila.get("ubicacion") or "—"))
     estado = html.escape(str(fila.get("estado") or "—"))
@@ -1486,6 +1568,7 @@ def tarjeta_licitacion(fila: pd.Series) -> None:
                 <span class="meta">{formato_fecha(fila.get('fecha_actualizacion'))}</span>
             </div>
             <h4 class="tarjeta-titulo-completo">{titulo}</h4>
+            {original_html}
             <p class="meta"><strong>Órgano:</strong> {organo}</p>
             <p class="meta">
                 <strong>Presupuesto (sin IVA):</strong> {formato_importe(fila.get('presupuesto_sin_iva'))}
@@ -2391,6 +2474,14 @@ def pestana_oportunidades(oportunidades: pd.DataFrame, vista: str) -> None:
     botones_exportacion(oportunidades, "oportunidades", permitir_sheets=True)
 
     if vista == "Tarjetas":
+        st.toggle(
+            "Traducir títulos al español",
+            key="traducir_titulos_es",
+            help=(
+                "Muestra el título en castellano y el original debajo "
+                "(euskera, catalán/valenciano, gallego…)."
+            ),
+        )
         _render_tarjetas_paginadas(
             oportunidades,
             tarjeta_licitacion,
@@ -2687,7 +2778,7 @@ def pestana_analisis_pliegos(
             )
         else:
             st.success(f"**{len(hallados)}** coincidencia(s) para «{consulta}».")
-            _render_resultados_con_interes(hallados, clave_prefix="pliego", max_filas=15)
+            _render_resultados_con_interes(hallados, clave_prefix="pliego", page_size=5)
 
     opciones: list[tuple[str, str, str, str, str, list]] = []
     fuente_opciones = hallados if not hallados.empty else (

@@ -111,3 +111,14 @@ def complete_from_any(texto: str) -> dict[str, str]:
         campo: translate_to(texto, CODIGO_POR_CAMPO[campo], origen=AUTO) or texto
         for campo in CAMPOS
     }
+
+
+def a_espanol(texto: str) -> str:
+    """Traduce un título/anuncio a castellano (origen auto: eu/ca/gl/es…)."""
+    bruto = (texto or "").strip()
+    if not bruto:
+        return ""
+    if PROPER_NOUN_RE.match(bruto):
+        return bruto
+    trad = translate_to(bruto, CASTELLANO, origen=AUTO)
+    return (trad or bruto).strip()
