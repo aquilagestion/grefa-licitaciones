@@ -26,7 +26,9 @@ if str(BASE_DIR) not in sys.path:
 from config.cpv_catalog import active_cpvs, default_cpv_catalog  # noqa: E402
 from config.ccaa_sources import (  # noqa: E402
     etiqueta_fuente,
+    nombres_nativas,
     opciones_filtro_buscador,
+    tabla_cobertura,
 )
 from config.default_criteria import (  # noqa: E402
     CUSTOM_KEYWORD_CATEGORY,
@@ -5428,6 +5430,25 @@ def pestana_buscador(df: pd.DataFrame) -> None:
     else:
         st.caption("Sin búsqueda aplicada todavía.")
 
+    nativas_txt = ", ".join(nombres_nativas())
+    with st.expander("Cobertura de las 17 CCAA", expanded=False):
+        st.caption(
+            f"Conectores nativos activos: **{nativas_txt}**. "
+            "El resto se cubre con PLACSP (643 perfiles / 1044 agregadas) "
+            "y filtro territorial al pulsar Buscar."
+        )
+        st.dataframe(
+            tabla_cobertura(),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Comunidad": st.column_config.TextColumn("Comunidad", width="medium"),
+                "Cobertura": st.column_config.TextColumn("Cobertura", width="medium"),
+                "Portal": st.column_config.TextColumn("Portal", width="large"),
+                "Notas": st.column_config.TextColumn("Notas", width="large"),
+            },
+        )
+
     with st.expander("Filtros de búsqueda", expanded=False):
         with st.form("form_buscador_general", clear_on_submit=False):
             st.multiselect(
@@ -5437,9 +5458,8 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                 placeholder="Estatal + 17 CCAA (vacío = todas)",
                 help=(
                     "Filtro territorial. Vacío = todas. "
-                    "Si incluye País Vasco, Cataluña, Madrid o Navarra "
-                    "(o está vacío), al pulsar Buscar también se consultan "
-                    "sus APIs/feeds nativos. El resto va por PLACSP 643/1044."
+                    f"Nativas (API/feed): {nativas_txt}. "
+                    "El resto va por PLACSP 643/1044 + filtro CCAA."
                 ),
             )
 
@@ -5627,16 +5647,15 @@ def pestana_buscador(df: pd.DataFrame) -> None:
                     keywords_activas,
                     conceptos=conceptos_activos,
                 )
-                partes = [base] if base is not None and not base.empty else []
-                partes.append(nativas_df)
-                base = pd.concat(partes, ignore_index=True, sort=False)
-                if "expediente" in base.columns:
-                    subset = (
-                        ["expediente", "url"]
-                        if "url" in base.columns
-                        else ["expediente"]
-                    )
-                    base = base.drop_duplicates(subset=subset, keep="first")
+                from modules.ccaa_common import dedupe_licitaciones
+
+                # Preferir nativas ante colisiones con PLACSP.
+                partes = [nativas_df]
+                if base is not None and not base.empty:
+                    partes.append(base)
+                base = dedupe_licitaciones(
+                    pd.concat(partes, ignore_index=True, sort=False)
+                )
         except Exception as exc:
             st.warning(f"Fuentes nativas CCAA no disponibles: {exc}")
 

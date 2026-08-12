@@ -1,8 +1,7 @@
 """Catálogo de fuentes de licitaciones por comunidad autónoma.
 
-Fase 0: cobertura legal nacional vía PLACSP (feeds 643 y 1044).
-Las CCAA con conector nativo previsto se marcan como ``nativa`` (fase 1+);
-hasta entonces se sirven desde PLACSP filtrando por territorio/órgano.
+Fase 0–3: cobertura de las 17 CCAA vía PLACSP (643/1044) + conectores nativos
+donde hay API/ATOM/RSS/CKAN estable. El resto se filtra por territorio/órgano.
 """
 
 from __future__ import annotations
@@ -25,11 +24,19 @@ FUENTE_NAVARRA = "navarra"
 FUENTE_GALICIA = "galicia"
 FUENTE_ANDALUCIA = "andalucia"
 # Versión de catálogo CCAA (fuerza recarga en Streamlit Cloud si cachea .py antiguos).
-CCAA_SOURCES_VERSION = "2026-08-12-nativas-v3"
+CCAA_SOURCES_VERSION = "2026-08-12-fase3-cierre"
 
 FUENTES_PLACSP: frozenset[str] = frozenset(
     {FUENTE_PLACSP_643, FUENTE_PLACSP_1044, FUENTE_PLACSP_LOCAL, FUENTE_PLACSP}
 )
+
+#: Etiquetas legibles de estado de cobertura (fase 3).
+ETIQUETA_ESTADO_COBERTURA: dict[str, str] = {
+    "nativa": "Nativa (API/feed propio)",
+    "placsp_643": "PLACSP · perfiles (643)",
+    "placsp_1044": "PLACSP · agregadas (1044)",
+    "parcial": "Parcial",
+}
 
 #: Etiqueta UI para contratos de ámbito estatal / no territorial.
 CCAA_ESTATAL = "Estatal (AGE y otros)"
@@ -307,11 +314,11 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
     {
         "id": "aragon",
         "nombre": "Aragón",
-        "portal": "PLACSP (perfiles alojados)",
+        "portal": "PLACSP (perfiles alojados; remite desde Aragón)",
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Perfiles en PLACSP desde 2018; sin feed nativo de anuncios vivos (fase 3).",
     },
     {
         "id": "asturias",
@@ -320,16 +327,16 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "baleares",
         "nombre": "Illes Balears",
-        "portal": "PLACSP (perfiles alojados)",
+        "portal": "PLACSP (DIR3 / perfiles alojados)",
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Publica en PLACSP; cobertura 643 + filtro territorial (fase 3).",
     },
     {
         "id": "canarias",
@@ -338,7 +345,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "cantabria",
@@ -347,7 +354,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "clm",
@@ -356,7 +363,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "cyl",
@@ -365,7 +372,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "catalunya",
@@ -383,7 +390,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Sin API de anuncios vivos reutilizable; cobertura 643 + filtro (fase 3).",
     },
     {
         "id": "extremadura",
@@ -392,7 +399,7 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Cobertura principalmente vía sindicación 643.",
+        "notas": "Cobertura vía sindicación 643 + filtro territorial (fase 3).",
     },
     {
         "id": "galicia",
@@ -415,11 +422,11 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
     {
         "id": "murcia",
         "nombre": "Región de Murcia",
-        "portal": "PLACSP agregación",
+        "portal": "PLACSP agregación (1044)",
         "tipo": "placsp_1044",
         "estado": "placsp_1044",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Agregación a PLACSP; sin API fuerte documentada.",
+        "notas": "Agregación a PLACSP 1044; sin API nativa documentada (fase 3).",
     },
     {
         "id": "navarra",
@@ -446,13 +453,40 @@ CCAA_SOURCES: tuple[dict[str, Any], ...] = (
         "tipo": "placsp_643",
         "estado": "placsp_643",
         "url_base": "https://contrataciondelestado.es",
-        "notas": "Remite a PLACSP; cobertura vía sindicación 643.",
+        "notas": "Remite a PLACSP; cobertura vía sindicación 643 (fase 3).",
     },
 )
 
 
 def ccaa_por_nombre() -> dict[str, dict[str, Any]]:
     return {entrada["nombre"]: entrada for entrada in CCAA_SOURCES}
+
+
+def etiqueta_estado_cobertura(estado: str) -> str:
+    """Etiqueta legible del estado de cobertura de una CCAA."""
+    clave = str(estado or "").strip()
+    return ETIQUETA_ESTADO_COBERTURA.get(clave, clave or "—")
+
+
+def nombres_nativas() -> tuple[str, ...]:
+    """CCAA con conector nativo activo."""
+    return tuple(
+        e["nombre"] for e in CCAA_SOURCES if e.get("estado") == "nativa"
+    )
+
+
+def tabla_cobertura() -> pd.DataFrame:
+    """Tabla de estado de cobertura de las 17 CCAA (para UI)."""
+    filas = [
+        {
+            "Comunidad": e["nombre"],
+            "Cobertura": etiqueta_estado_cobertura(str(e.get("estado") or "")),
+            "Portal": e.get("portal") or "—",
+            "Notas": e.get("notas") or "",
+        }
+        for e in CCAA_SOURCES
+    ]
+    return pd.DataFrame(filas)
 
 
 def opciones_filtro_buscador() -> list[str]:

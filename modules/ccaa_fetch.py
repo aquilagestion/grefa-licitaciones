@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from modules.ingestion import empty_dataframe
+from modules.ccaa_common import dedupe_licitaciones
 
 try:
     from config.ccaa_sources import debe_consultar_nativa, etiqueta_fuente
@@ -105,9 +106,5 @@ def fetch_nativas(
         return empty_dataframe(), oks, avisos
 
     combinado = pd.concat(partes, ignore_index=True, sort=False)
-    if "expediente" in combinado.columns:
-        subset = (
-            ["expediente", "url"] if "url" in combinado.columns else ["expediente"]
-        )
-        combinado = combinado.drop_duplicates(subset=subset, keep="first")
-    return combinado.reset_index(drop=True), oks, avisos
+    combinado = dedupe_licitaciones(combinado)
+    return combinado, oks, avisos
