@@ -19,6 +19,29 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      - name: Comprobar secrets obligatorios
+        env:
+          GREFA_SPREADSHEET_ID: ${{ secrets.GREFA_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          faltan=0
+          if [ -z "$GREFA_SPREADSHEET_ID" ]; then
+            echo "::error::Falta el secret GREFA_SPREADSHEET_ID"
+            faltan=1
+          else
+            echo "GREFA_SPREADSHEET_ID: OK (${#GREFA_SPREADSHEET_ID} caracteres)"
+          fi
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::Falta el secret GOOGLE_SERVICE_ACCOUNT_JSON"
+            faltan=1
+          else
+            echo "GOOGLE_SERVICE_ACCOUNT_JSON: OK (${#GOOGLE_SERVICE_ACCOUNT_JSON} caracteres)"
+          fi
+          if [ "$faltan" -ne 0 ]; then
+            echo "Configura los secrets en: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+
       - name: Ejecutar sync diaria
         env:
           GREFA_SPREADSHEET_ID: ${{ secrets.GREFA_SPREADSHEET_ID }}

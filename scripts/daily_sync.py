@@ -48,9 +48,37 @@ def _cargar_criterios() -> tuple[list[str], list[str], list[dict]]:
     )
 
 
-def main() -> int:
+def _diagnostico_config() -> list[str]:
+    """Lista qué falta para ejecutar en CI (sin revelar valores)."""
+    faltan: list[str] = []
     if not sheets_store.is_configured():
-        print("ERROR: configure GREFA_SPREADSHEET_ID y credenciales de servicio.")
+        faltan.append("GREFA_SPREADSHEET_ID (o [sheets].spreadsheet_id en secrets.toml)")
+    tiene_creds = bool(
+        os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or (
+            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            and Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]).exists()
+        )
+    )
+    if not tiene_creds:
+        # En local puede bastar secrets.toml / ADC; en Actions hace falta el JSON.
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            faltan.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    return faltan
+
+
+def main() -> int:
+    faltan = _diagnostico_config()
+    if faltan:
+        print("ERROR: configuración incompleta para la sync diaria.")
+        print("Falta configurar:")
+        for item in faltan:
+            print(f"  - {item}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(
+                "En GitHub: Settings → Secrets and variables → Actions "
+                "y define los secrets del workflow daily-sync.yml."
+            )
         return 1
 
     max_pages = int(os.environ.get("GREFA_FEED_MAX_PAGES", "2"))
